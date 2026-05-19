@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from skill_installer.cli import build_no_ui_command, main
+from skill_installer.cli import build_no_ui_command, format_status_line, main
 from skill_installer.installer import (
     PYPI_METADATA_TIMEOUT_SECONDS,
     Installer,
@@ -22,7 +25,7 @@ from skill_installer.installer import (
 
 
 def make_skill(path: Path, text: str = "example skill\n") -> Path:
-    path.mkdir(parents=True)
+    path.mkdir(parents=True, exist_ok=True)
     (path / "agents").mkdir()
     (path / "scripts").mkdir()
     (path / "SKILL.md").write_text(text)
@@ -58,6 +61,13 @@ def make_skill_checkout(path: Path) -> Path:
     return path
 
 
+def make_root_skill_checkout(path: Path) -> Path:
+    path.mkdir()
+    (path / ".git").mkdir()
+    make_skill(path, text="root skill\n")
+    return path
+
+
 def make_skill_wheel(
     path: Path,
     project: SkillProject,
@@ -76,6 +86,16 @@ def make_skill_wheel(
 
 def read_manifest(project: SkillProject, skill_dir: Path) -> dict[str, object]:
     return json.loads(manifest_path(project, skill_dir).read_text())
+
+
+def write_manifest(
+    project: SkillProject,
+    skill_dir: Path,
+    manifest: dict[str, object],
+) -> None:
+    manifest_path(project, skill_dir).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def test_installs_and_uninstalls_codex_repo_scope(tmp_path: Path) -> None:
@@ -118,6 +138,49 @@ def test_installs_and_uninstalls_claude_global_scope(tmp_path: Path) -> None:
     assert not claude_home.exists()
 
 
+def test_global_scope_defaults_to_agent_dirs_under_user_home(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    home = tmp_path / "home"
+
+    Installer(project).install(["codex"], "global", home=home)
+
+    skill_dir = home / ".codex" / "skills" / project.skill_name
+    assert (skill_dir / "SKILL.md").exists()
+    assert (home / ".codex" / "AGENTS.md").exists()
+
+    Installer(project).uninstall(["codex"], "global", home=home)
+
+    assert not (home / ".codex").exists()
+
+
+def test_global_scope_supports_per_agent_home_directories(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    codex_home = tmp_path / "codex-alt"
+    claude_home = tmp_path / "claude-alt"
+
+    Installer(project).install(
+        ["all"],
+        "global",
+        codex_home=codex_home,
+        claude_home=claude_home,
+    )
+
+    assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
+    assert (claude_home / "skills" / project.skill_name / "SKILL.md").exists()
+    assert (codex_home / "AGENTS.md").exists()
+    assert (claude_home / "CLAUDE.md").exists()
+
+    Installer(project).uninstall(
+        ["all"],
+        "global",
+        codex_home=codex_home,
+        claude_home=claude_home,
+    )
+
+    assert not codex_home.exists()
+    assert not claude_home.exists()
+
+
 def test_editable_install_links_local_checkout_skill_files(
     tmp_path: Path,
     monkeypatch,
@@ -139,6 +202,20 @@ def test_editable_install_links_local_checkout_skill_files(
         repo / ".codex" / "skills" / project.sidecar_manifest_name
     )
     assert manifest["source_dir"] == str(checkout / "skill")
+
+
+def test_editable_install_requires_local_checkout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    with pytest.raises(InstallerError, match="requires running from a git or sl checkout"):
+        Installer(project).install(["codex"], "repo", repo=repo, editable=True)
 
 
 def test_pypi_wheel_install_extracts_only_project_skill(
@@ -168,6 +245,24 @@ def test_pypi_wheel_install_extracts_only_project_skill(
     assert not (skill_dir / project.import_name / "__init__.py").exists()
 
 
+def test_copy_pypi_wheel_skill_extracts_only_bundled_skill(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    skill_dir = tmp_path / "skill"
+
+    copied = copy_pypi_wheel_skill(project, wheel, skill_dir)
+
+    assert copied == [
+        "SKILL.md",
+        "agents/openai.yaml",
+        "scripts/tool.py",
+    ]
+    assert (skill_dir / "SKILL.md").read_text() == "wheel skill\n"
+    assert (skill_dir / "agents" / "openai.yaml").read_text() == "agent: wheel\n"
+    assert not (skill_dir / project.import_name / "__init__.py").exists()
+    assert not (skill_dir / f"{project.import_name}-1.2.3.dist-info").exists()
+
+
 def test_copy_pypi_wheel_skill_rejects_missing_skill(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     wheel = tmp_path / "empty.whl"
@@ -176,6 +271,40 @@ def test_copy_pypi_wheel_skill_rejects_missing_skill(tmp_path: Path) -> None:
 
     with pytest.raises(InstallerError, match="did not contain"):
         copy_pypi_wheel_skill(project, wheel, tmp_path / "skill")
+
+
+def test_install_rejects_editable_and_pypi_version_together(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(InstallerError, match="cannot be combined"):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            editable=True,
+            pypi_version="1.2.3",
+        )
+
+
+def test_install_source_metadata_requires_vcs_repo(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    (checkout / ".git").rmdir()
+    monkeypatch.chdir(checkout)
+    monkeypatch.setattr(
+        "skill_installer.installer.find_repo_root",
+        lambda _start=None: None,
+    )
+
+    metadata = install_source_metadata(project)
+
+    assert metadata.editable_available is False
+    assert metadata.local_version is None
+    assert metadata.source_dir is None
 
 
 def test_install_source_metadata_accepts_generic_skill_checkout(
@@ -191,6 +320,23 @@ def test_install_source_metadata_accepts_generic_skill_checkout(
     assert metadata.editable_available is True
     assert metadata.local_version == "7.8.9"
     assert metadata.source_dir == checkout / "skill"
+    assert metadata.repo_root == checkout
+    assert metadata.vcs == "git"
+
+
+def test_install_source_metadata_accepts_root_skill_checkout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    checkout = make_root_skill_checkout(tmp_path / "checkout")
+    monkeypatch.chdir(checkout / "scripts")
+
+    metadata = install_source_metadata(project)
+
+    assert metadata.editable_available is True
+    assert metadata.local_version == project.version
+    assert metadata.source_dir == checkout
     assert metadata.repo_root == checkout
     assert metadata.vcs == "git"
 
@@ -241,6 +387,82 @@ def test_fetch_json_url_uses_metadata_timeout(monkeypatch) -> None:
     assert captured["timeout"] == PYPI_METADATA_TIMEOUT_SECONDS
 
 
+def test_reinstall_reports_upgrade_from_previous_manifest_version(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+    installer.install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    manifest = read_manifest(project, skill_dir)
+    manifest["package_version"] = "0.0.0"
+    write_manifest(project, skill_dir, manifest)
+
+    result = installer.install(["codex"], "repo", repo=repo)[0]
+
+    assert result.version == project.version
+    assert result.previous_version == "0.0.0"
+    assert result.version_change == "upgrade"
+    assert "upgraded from 0.0.0" in format_status_line(result, color=False)
+
+
+def test_reinstall_reports_downgrade_from_previous_manifest_version(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+    installer.install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    manifest = read_manifest(project, skill_dir)
+    manifest["package_version"] = "9.0.0"
+    write_manifest(project, skill_dir, manifest)
+
+    result = installer.install(["codex"], "repo", repo=repo)[0]
+
+    assert result.version == project.version
+    assert result.previous_version == "9.0.0"
+    assert result.version_change == "downgrade"
+    assert "downgraded from 9.0.0" in format_status_line(result, color=False)
+
+
+def test_uninstall_preserves_existing_hook_content(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    hook = repo / "AGENTS.md"
+    hook.write_text("# Existing Instructions\n\nKeep this.\n")
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).uninstall(["codex"], "repo", repo=repo)
+
+    assert hook.read_text() == "# Existing Instructions\n\nKeep this.\n"
+
+
+def test_reinstall_replaces_existing_discoverability_block(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    hook = repo / "AGENTS.md"
+    hook.write_text(f"{project.marker_start}\nold\n{project.marker_end}\n")
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    hook_text = hook.read_text()
+    assert "old" not in hook_text
+    assert hook_text.count(project.marker_start) == 1
+
+
+def test_install_refuses_to_replace_unowned_skill_dir(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("manual install\n")
+
+    with pytest.raises(InstallerError, match="unowned skill directory"):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+
 def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
     project = make_project(tmp_path)
     repo = make_repo(tmp_path / "repo")
@@ -282,6 +504,222 @@ def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
     assert "removed: codex/repo version 1.2.3" in output.out
 
 
+def test_cli_no_ui_verbose_lists_paths(tmp_path: Path, capsys) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--verbose",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"  skill: {repo / '.codex' / 'skills' / project.skill_name}" in output.out
+    assert f"  hook:  {repo / 'AGENTS.md'}" in output.out
+
+
+def test_cli_no_ui_uses_per_agent_home_directories(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    codex_home = tmp_path / "codex-cli"
+    claude_home = tmp_path / "claude-cli"
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--agent",
+            "all",
+            "--scope",
+            "global",
+            "--codex-home",
+            str(codex_home),
+            "--claude-home",
+            str(claude_home),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "installed: codex/global version 1.2.3" in output.out
+    assert "installed: claude/global version 1.2.3" in output.out
+    assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
+    assert (claude_home / "skills" / project.skill_name / "SKILL.md").exists()
+
+
+def test_cli_no_ui_accepts_comma_separated_agents(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    codex_home = tmp_path / "codex-cli"
+    claude_home = tmp_path / "claude-cli"
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--agent",
+            "codex,claude",
+            "--scope",
+            "global",
+            "--codex-home",
+            str(codex_home),
+            "--claude-home",
+            str(claude_home),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "installed: codex/global version 1.2.3" in output.out
+    assert "installed: claude/global version 1.2.3" in output.out
+
+
+def test_cli_no_ui_editable_install(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.chdir(checkout)
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--editable",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "installed: codex/repo version 1.2.3 (editable)" in output.out
+    assert (repo / ".codex" / "skills" / project.skill_name).is_symlink()
+
+
+def test_cli_no_ui_pypi_version_install(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    monkeypatch.setattr(
+        "skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: wheel,
+    )
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--pypi-version",
+            "2.0.0",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installing from PyPI: example-agent-skill==2.0.0" in output.err
+    assert "installed: codex/repo version 2.0.0 (PyPI wheel)" in output.out
+
+
+def test_cli_no_ui_pypi_version_download_error_names_attempted_package(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+
+    def fail_download(_project: SkillProject, _version: str, _download_dir: Path) -> Path:
+        raise InstallerError("metadata not found")
+
+    monkeypatch.setattr("skill_installer.installer.download_pypi_wheel", fail_download)
+
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--no-ui",
+                "install",
+                "--pypi-version",
+                "9.9.9",
+                "--agent",
+                "codex",
+                "--scope",
+                "repo",
+                "--repo",
+                str(repo),
+            ],
+            project=project,
+        )
+    output = capsys.readouterr()
+
+    assert error.value.code == 1
+    assert "Installing from PyPI: example-agent-skill==9.9.9" in output.err
+    assert "example-agent-skill: error: metadata not found" in output.err
+
+
+def test_cli_no_ui_rejects_conflicting_install_sources(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--no-ui",
+                "install",
+                "--editable",
+                "--pypi-version",
+                "2.0.0",
+                "--agent",
+                "codex",
+                "--scope",
+                "repo",
+            ],
+            project=project,
+        )
+    output = capsys.readouterr()
+
+    assert error.value.code == 2
+    assert "--editable and --pypi-version cannot be used together" in output.err
+
+
 def test_cli_no_ui_command_preview_uses_project_package_name(tmp_path: Path) -> None:
     project = make_project(tmp_path)
 
@@ -308,3 +746,28 @@ def test_code_does_not_carry_awd_specific_constants() -> None:
     assert "agent_workflow_dsl" not in source
     assert "awd-installer" not in source
     assert "AWD" not in source
+
+
+def test_package_metadata_is_generic() -> None:
+    pyproject = Path(__file__).resolve().parents[2].joinpath("pyproject.toml").read_text()
+
+    assert 'name = "skill-installer"' in pyproject
+    assert "agent-workflow-dsl" not in pyproject
+    assert "agent_workflow_dsl" not in pyproject
+    assert "[project.scripts]" not in pyproject
+
+
+def test_python_module_entry_point_explains_library_usage() -> None:
+    env = os.environ.copy()
+    src_dir = Path(__file__).resolve().parents[2] / "src"
+    env["PYTHONPATH"] = str(src_dir)
+    completed = subprocess.run(
+        [sys.executable, "-m", "skill_installer"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert completed.returncode == 2
+    assert "skill-installer is a library" in completed.stderr
