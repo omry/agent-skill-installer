@@ -1089,7 +1089,8 @@ def test_cli_no_ui_command_preview_includes_github_source(tmp_path: Path) -> Non
     ) == (
         "example-agent-skill --no-ui install "
         "--github-url https://github.com/example/demo --github-ref v1 "
-        f"--github-path skill --agent codex --scope repo --repo {tmp_path / 'repo'}"
+        "--github-path skill --agent codex --scope repo --repo "
+        f"{shlex.quote(str(tmp_path / 'repo'))}"
     )
 
 
@@ -1812,8 +1813,9 @@ def test_build_no_ui_command_for_mixed_scope_targets(tmp_path: Path) -> None:
 
     assert command == (
         "example-agent-skill --no-ui install --agent codex --scope global "
-        f"--codex-home {codex_home}\n"
-        f"example-agent-skill --no-ui install --agent codex --scope repo --repo {repo}"
+        f"--codex-home {shlex.quote(str(codex_home))}\n"
+        "example-agent-skill --no-ui install --agent codex --scope repo --repo "
+        f"{shlex.quote(str(repo))}"
     )
 
 
@@ -1904,7 +1906,7 @@ def test_complete_with_ui_selects_pypi_source(
         "example-agent-skill --no-ui install --pypi-version 2.0.0 "
         "--agent codex --scope global",
         "example-agent-skill --no-ui install --pypi-version 2.0.0 "
-        f"--agent codex --scope repo --repo {repo}",
+        f"--agent codex --scope repo --repo {shlex.quote(str(repo))}",
     ]
 
 
@@ -1963,7 +1965,8 @@ def test_complete_with_ui_selects_github_source(
         "example-agent-skill --no-ui install "
         "--github-url https://github.com/example/demo --agent codex --scope global",
         "example-agent-skill --no-ui install "
-        f"--github-url https://github.com/example/demo --agent codex --scope repo --repo {repo}",
+        "--github-url https://github.com/example/demo --agent codex --scope repo --repo "
+        f"{shlex.quote(str(repo))}",
     ]
 
 
@@ -2179,7 +2182,7 @@ def test_generic_complete_with_ui_selects_local_install_source(
     )
     assert prompter.previews[2] == (
         "agent-skill-installer --no-ui install "
-        f"--skill-path {source} --agent all --scope global"
+        f"--skill-path {shlex.quote(str(source))} --agent all --scope global"
     )
     assert prompter.summaries[1] == (
         f"Installing agent-skill-installer from editable local path {Path.cwd()}"
