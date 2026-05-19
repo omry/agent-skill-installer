@@ -859,25 +859,17 @@ def remember_recent_github_url(
 def recent_pypi_package_choices(
     args: argparse.Namespace,
 ) -> list[dict[str, str]]:
-    return [
-        {
-            "name": package,
-            "value": package,
-        }
-        for package in load_recent_pypi_packages(getattr(args, "home", None))
-    ]
+    return value_choices(load_recent_pypi_packages(getattr(args, "home", None)))
 
 
 def recent_github_url_choices(
     args: argparse.Namespace,
 ) -> list[dict[str, str]]:
-    return [
-        {
-            "name": url,
-            "value": url,
-        }
-        for url in load_recent_github_urls(getattr(args, "home", None))
-    ]
+    return value_choices(load_recent_github_urls(getattr(args, "home", None)))
+
+
+def value_choices(values: list[str]) -> list[dict[str, str]]:
+    return [{"name": value, "value": value} for value in values]
 
 
 def validate_pypi_skill_package(args: argparse.Namespace) -> None:
@@ -925,13 +917,7 @@ def cleanup_validated_pypi_download(args: argparse.Namespace) -> None:
     temp_dir = getattr(args, "_validated_pypi_temp_dir", None)
     if temp_dir is not None:
         temp_dir.cleanup()
-    for name in (
-        "_validated_pypi_package",
-        "_validated_pypi_version",
-        "_validated_pypi_wheel_path",
-        "_validated_pypi_project",
-        "_validated_pypi_temp_dir",
-    ):
+    for name in VALIDATED_PYPI_FIELDS:
         if hasattr(args, name):
             delattr(args, name)
 
@@ -2009,15 +1995,15 @@ def prefixed_path(prefix: PurePosixPath, name: str) -> PurePosixPath:
     return prefix / name if prefix.parts else PurePosixPath(name)
 
 
-def read_archive_text(
+def read_prefixed_text(
     archive: zipfile.ZipFile,
-    skill_prefix: PurePosixPath,
+    prefix: PurePosixPath,
     name: str,
+    relative_path_for: Callable[[str], PurePosixPath | None],
 ) -> str | None:
-    target = prefixed_path(skill_prefix, name)
+    target = prefixed_path(prefix, name)
     for info in archive.infolist():
-        relative = github_archive_relative_path(info.filename)
-        if relative == target:
+        if relative_path_for(info.filename) == target:
             return archive.read(info).decode()
     return None
 
@@ -2035,17 +2021,19 @@ def read_github_project(
 ) -> SkillProject:
     with zipfile.ZipFile(archive_path) as archive:
         skill_prefix = github_archive_skill_prefix(archive, source.path)
-        skill_text = read_archive_text(
+        skill_text = read_prefixed_text(
             archive,
             skill_prefix,
             "SKILL.md",
+            github_archive_relative_path,
         )
         if skill_text is None:
             raise InstallerError("GitHub archive did not contain SKILL.md")
-        config_text = read_archive_text(
+        config_text = read_prefixed_text(
             archive,
             skill_prefix,
             CONFIG_FILE_NAME,
+            github_archive_relative_path,
         )
     config = (
         load_installer_config_text(config_text, source=f"{source.url}/{CONFIG_FILE_NAME}")
@@ -2077,18 +2065,6 @@ def wheel_skill_prefix(archive: zipfile.ZipFile) -> PurePosixPath:
     return candidates[0]
 
 
-def read_wheel_text(
-    archive: zipfile.ZipFile,
-    prefix: PurePosixPath,
-    name: str,
-) -> str | None:
-    target = prefixed_path(prefix, name)
-    for info in archive.infolist():
-        if PurePosixPath(info.filename) == target:
-            return archive.read(info).decode()
-    return None
-
-
 def read_pypi_project(
     args: argparse.Namespace,
     wheel_path: Path,
@@ -2096,10 +2072,15 @@ def read_pypi_project(
 ) -> SkillProject:
     with zipfile.ZipFile(wheel_path) as archive:
         prefix = wheel_skill_prefix(archive)
-        skill_text = read_wheel_text(archive, prefix, "SKILL.md")
+        skill_text = read_prefixed_text(archive, prefix, "SKILL.md", PurePosixPath)
         if skill_text is None:
             raise InstallerError("PyPI wheel did not contain SKILL.md")
-        config_text = read_wheel_text(archive, prefix, CONFIG_FILE_NAME)
+        config_text = read_prefixed_text(
+            archive,
+            prefix,
+            CONFIG_FILE_NAME,
+            PurePosixPath,
+        )
 
     config = (
         load_installer_config_text(

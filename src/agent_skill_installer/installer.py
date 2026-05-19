@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from .config import CONFIG_FILE_NAME, AgentInstructions, InstallerConfig, load_installer_config_text
 
@@ -1212,30 +1212,43 @@ def github_archive_skill_relative_path(
     return Path(*relative.parts)
 
 
+def copy_zip_skill_files(
+    archive: zipfile.ZipFile,
+    skill_dir: Path,
+    relative_path_for: Callable[[str], Path | None],
+) -> list[str]:
+    copied: list[str] = []
+    for info in sorted(archive.infolist(), key=lambda item: item.filename):
+        if info.is_dir():
+            continue
+        relative_path = relative_path_for(info.filename)
+        if relative_path is None:
+            continue
+        target = skill_dir / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(archive.read(info))
+        copied.append(relative_path.as_posix())
+    return copied
+
+
 def copy_github_archive_skill(
     project: SkillProject,
     archive_path: Path,
     skill_dir: Path,
     source_path: PurePosixPath | None = None,
 ) -> list[str]:
-    copied: list[str] = []
     try:
         with zipfile.ZipFile(archive_path) as archive:
             skill_prefix = github_archive_skill_prefix(archive, source_path)
-            for info in sorted(archive.infolist(), key=lambda item: item.filename):
-                if info.is_dir():
-                    continue
-                relative_path = github_archive_skill_relative_path(
+            copied = copy_zip_skill_files(
+                archive,
+                skill_dir,
+                lambda filename: github_archive_skill_relative_path(
                     project,
-                    info.filename,
+                    filename,
                     skill_prefix,
-                )
-                if relative_path is None:
-                    continue
-                target = skill_dir / relative_path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(archive.read(info))
-                copied.append(relative_path.as_posix())
+                ),
+            )
     except zipfile.BadZipFile as error:
         raise InstallerError(
             f"GitHub archive is not a valid zip file: {archive_path}"
@@ -1272,19 +1285,13 @@ def copy_pypi_wheel_skill(
     wheel_path: Path,
     skill_dir: Path,
 ) -> list[str]:
-    copied: list[str] = []
     try:
         with zipfile.ZipFile(wheel_path) as wheel:
-            for info in sorted(wheel.infolist(), key=lambda item: item.filename):
-                if info.is_dir():
-                    continue
-                relative_path = wheel_skill_relative_path(project, info.filename)
-                if relative_path is None:
-                    continue
-                target = skill_dir / relative_path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(wheel.read(info))
-                copied.append(relative_path.as_posix())
+            copied = copy_zip_skill_files(
+                wheel,
+                skill_dir,
+                lambda filename: wheel_skill_relative_path(project, filename),
+            )
     except zipfile.BadZipFile as error:
         raise InstallerError(f"PyPI wheel is not a valid zip file: {wheel_path}") from error
 

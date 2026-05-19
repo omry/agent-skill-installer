@@ -1,5 +1,6 @@
 include LICENSE
 include README.md
+graft docs
 graft examples
 prune examples/demo-installer/build
 prune examples/demo-installer/dist
