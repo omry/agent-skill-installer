@@ -51,7 +51,7 @@ Run the generic UI and choose an external source:
 agent-skill-installer
 ```
 
-![Interactive install source picker](docs/images/ui-install-source.svg)
+![Interactive install source picker](docs/images/ui-install.png)
 
 The generic command installs from local repos or skill directories, PyPI
 packages, and GitHub repos. Use `--no-ui` for scripts.
