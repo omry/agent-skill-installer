@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from email.parser import Parser
 import json
 import shlex
 import sys
@@ -63,14 +64,16 @@ RECENT_INSTALLS_FILE_NAME = "recent-installations.json"
 RECENT_PYPI_LIMIT = 10
 RECENT_PYPI_KEY = "pypi_packages"
 RECENT_GITHUB_KEY = "github_urls"
-EXAMPLE_SKILL_NAME = "agent-workflow-dsl"
-EXAMPLE_GITHUB_URL = f"https://github.com/OWNER/{EXAMPLE_SKILL_NAME}"
 VALIDATED_PYPI_FIELDS = [
     "_validated_pypi_package",
     "_validated_pypi_version",
     "_validated_pypi_wheel_path",
     "_validated_pypi_project",
     "_validated_pypi_temp_dir",
+]
+VALIDATED_WHEEL_FIELDS = [
+    "_validated_wheel_file",
+    "_validated_wheel_project",
 ]
 VALIDATED_GITHUB_FIELDS = [
     "_validated_github_source",
@@ -82,11 +85,14 @@ INSTALL_SOURCE_FIELDS = [
     "_selected_install_source",
     "pypi_package",
     "pypi_version",
+    "wheel_file",
     "github_url",
     "github_ref",
     "github_path",
     "skill_path",
+    "editable",
     *VALIDATED_PYPI_FIELDS,
+    *VALIDATED_WHEEL_FIELDS,
     *VALIDATED_GITHUB_FIELDS,
 ]
 TARGET_FIELDS = [
@@ -174,6 +180,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="PyPI package containing a bundled agent skill.",
     )
     source.add_argument(
+        "--wheel-file",
+        "--wheel",
+        dest="wheel_file",
+        type=Path,
+        metavar="PATH",
+        help="Local wheel file containing a bundled agent skill.",
+    )
+    source.add_argument(
         "--github-url",
         metavar="URL",
         help="GitHub repository or tree URL containing a skill.",
@@ -200,6 +214,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--github-path",
         metavar="PATH",
         help="Skill directory inside the GitHub archive.",
+    )
+    local_mode = install.add_mutually_exclusive_group()
+    local_mode.add_argument(
+        "--editable",
+        dest="editable",
+        action="store_true",
+        default=None,
+        help=(
+            "Symlink --skill-path installs to the source directory. "
+            "This is the default for local installs."
+        ),
+    )
+    local_mode.add_argument(
+        "--copy",
+        dest="editable",
+        action="store_false",
+        default=None,
+        help="Copy --skill-path installs instead of symlinking them.",
     )
 
     uninstall = subparsers.add_parser("uninstall", help="Uninstall a skill.")
@@ -263,6 +295,10 @@ def install_source_choices() -> list[dict[str, str]]:
             "value": "pypi",
         },
         {
+            "name": "Local wheel file",
+            "value": "wheel",
+        },
+        {
             "name": "GitHub repository URL",
             "value": "github",
         },
@@ -272,10 +308,24 @@ def install_source_choices() -> list[dict[str, str]]:
     return [*remote_choices, local_choice]
 
 
+def local_install_mode_choices() -> list[dict[str, str]]:
+    return [
+        {
+            "name": "Editable symlink (reflect source changes immediately)",
+            "value": "editable",
+        },
+        {
+            "name": "Copy files (snapshot of the current source)",
+            "value": "copy",
+        },
+    ]
+
+
 def scope_choices() -> list[dict[str, str]]:
     return [
         {"name": "User global", "value": "global"},
         {"name": "Current repository", "value": "repo"},
+        {"name": "Specific directory", "value": "specific"},
     ]
 
 
@@ -294,6 +344,10 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
             parts.append("--force")
         if getattr(args, "skill_path", None) is not None:
             parts.extend(["--skill-path", args.skill_path])
+            if getattr(args, "editable", None) is True:
+                parts.append("--editable")
+            elif getattr(args, "editable", None) is False:
+                parts.append("--copy")
         elif getattr(args, "github_url", None):
             parts.extend(["--github-url", args.github_url])
             if getattr(args, "github_ref", None):
@@ -304,6 +358,8 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
             parts.extend(["--pypi-package", args.pypi_package])
             if getattr(args, "pypi_version", None):
                 parts.extend(["--pypi-version", args.pypi_version])
+        elif getattr(args, "wheel_file", None) is not None:
+            parts.extend(["--wheel-file", args.wheel_file])
         else:
             return None
 
@@ -336,10 +392,12 @@ def ensure_arg_defaults(args: argparse.Namespace) -> None:
         "description": None,
         "pypi_package": None,
         "pypi_version": None,
+        "wheel_file": None,
         "github_url": None,
         "github_ref": None,
         "github_path": None,
         "skill_path": None,
+        "editable": None,
         "agent": None,
         "scope": None,
         "repo": None,
@@ -362,6 +420,7 @@ def copy_args(args: argparse.Namespace) -> argparse.Namespace:
 def selected_install_source(args: argparse.Namespace) -> str | None:
     sources = [
         ("pypi", getattr(args, "pypi_package", None) is not None),
+        ("wheel", getattr(args, "wheel_file", None) is not None),
         ("github", getattr(args, "github_url", None) is not None),
         ("local", getattr(args, "skill_path", None) is not None),
     ]
@@ -369,7 +428,7 @@ def selected_install_source(args: argparse.Namespace) -> str | None:
     if len(selected) == 1:
         return selected[0]
     remembered = getattr(args, "_selected_install_source", None)
-    if not selected and remembered in {"pypi", "github", "local"}:
+    if not selected and remembered in {"pypi", "wheel", "github", "local"}:
         return remembered
     return None
 
@@ -379,6 +438,7 @@ def install_source_count(args: argparse.Namespace) -> int:
         value is not None
         for value in (
             getattr(args, "pypi_package", None),
+            getattr(args, "wheel_file", None),
             getattr(args, "github_url", None),
             getattr(args, "skill_path", None),
         )
@@ -389,10 +449,12 @@ def clear_install_sources(args: argparse.Namespace) -> None:
     args._selected_install_source = None
     args.pypi_package = None
     args.pypi_version = None
+    args.wheel_file = None
     args.github_url = None
     args.github_ref = None
     args.github_path = None
     args.skill_path = None
+    args.editable = None
 
 
 def local_development_source() -> tuple[Path, Path] | None:
@@ -405,6 +467,14 @@ def default_skill_path() -> Path:
         return source[1]
     candidate = default_repo_path() / "skill"
     return candidate if candidate.exists() else default_repo_path()
+
+
+def default_wheel_file() -> Path:
+    dist_dir = default_repo_path() / "dist"
+    wheels = sorted(dist_dir.glob("*.whl")) if dist_dir.is_dir() else []
+    if wheels:
+        return wheels[-1]
+    return dist_dir
 
 
 def preview_skill_path() -> Path:
@@ -434,6 +504,19 @@ def preview_command(
     return build_no_ui_command(preview_args)
 
 
+def editable_from_mode(mode: object | None) -> bool | None:
+    if mode is None:
+        return None
+    if isinstance(mode, bool):
+        return mode
+    value = str(mode)
+    if value == "editable":
+        return True
+    if value == "copy":
+        return False
+    return None
+
+
 def preview_source_command(
     args: argparse.Namespace,
     source: object,
@@ -442,11 +525,7 @@ def preview_source_command(
     clear_install_sources(preview_args)
     preview_args.command = "install"
     source_name = str(source)
-    if source_name == "pypi":
-        preview_args.pypi_package = EXAMPLE_SKILL_NAME
-    if source_name == "github":
-        preview_args.github_url = EXAMPLE_GITHUB_URL
-    elif source_name == "local":
+    if source_name == "local":
         preview_args.skill_path = preview_skill_path()
     return build_no_ui_command(preview_args)
 
@@ -461,8 +540,6 @@ def preview_command_choice(
         if install_source_count(preview_args) == 0:
             if local_development_source() is not None:
                 preview_args.skill_path = preview_skill_path()
-            else:
-                preview_args.pypi_package = EXAMPLE_SKILL_NAME
         preview_args.agent = preview_args.agent or TARGET_ALL
         preview_args.scope = preview_args.scope or "global"
     elif preview_args.command == "uninstall":
@@ -480,7 +557,9 @@ def install_decision_summary(
     pypi_version: object | None = None,
     github_url: object | None = None,
     github_ref: object | None = None,
+    wheel_file: object | None = None,
     skill_path: object | None = None,
+    editable: object | None = None,
     agent: object | None = None,
     scope: object | None = None,
     repo: object | None = None,
@@ -499,9 +578,11 @@ def install_decision_summary(
         source is None
         and pypi_package is None
         and pypi_version is None
+        and wheel_file is None
         and github_url is None
         and github_ref is None
         and skill_path is None
+        and editable is None
         and selected_install_source(args) is None
     ):
         return "Installing a skill"
@@ -512,9 +593,11 @@ def install_decision_summary(
             source=source,
             pypi_package=pypi_package,
             pypi_version=pypi_version,
+            wheel_file=wheel_file,
             github_url=github_url,
             github_ref=github_ref,
             skill_path=skill_path,
+            editable=editable,
         )
     ]
     target_line = install_target_summary(
@@ -536,7 +619,9 @@ def install_source_summary(
     pypi_version: object | None = None,
     github_url: object | None = None,
     github_ref: object | None = None,
+    wheel_file: object | None = None,
     skill_path: object | None = None,
+    editable: object | None = None,
 ) -> str:
     selected_source = (
         str(source)
@@ -549,13 +634,15 @@ def install_source_summary(
         package = summary_value(
             pypi_package,
             getattr(args, "pypi_package", None),
-            fallback=EXAMPLE_SKILL_NAME,
+            fallback="",
         )
         version = summary_value(
             pypi_version,
             getattr(args, "pypi_version", None),
             fallback="",
         )
+        if not package:
+            return "Installing from PyPI"
         if version:
             return f"Installing PyPI package {package} {version}"
         return f"Installing PyPI package {package}"
@@ -563,8 +650,10 @@ def install_source_summary(
         url = summary_value(
             github_url,
             getattr(args, "github_url", None),
-            fallback=EXAMPLE_GITHUB_URL,
+            fallback="",
         )
+        if not url:
+            return "Installing from GitHub"
         ref = summary_value(
             github_ref,
             getattr(args, "github_ref", None),
@@ -582,6 +671,16 @@ def install_source_summary(
         if ref:
             return f"Installing {name} from GitHub {url} at {ref}"
         return f"Installing {name} from GitHub {url}"
+    if selected_source == "wheel":
+        path_value = (
+            Path(str(wheel_file))
+            if wheel_file is not None
+            else getattr(args, "wheel_file", None)
+        )
+        if path_value is None:
+            return "Installing from a local wheel file"
+        wheel_path = Path(str(path_value)).expanduser()
+        return f"Installing from local wheel file {wheel_path}"
     if selected_source == "local":
         path_value = (
             Path(str(skill_path))
@@ -590,8 +689,17 @@ def install_source_summary(
         )
         source_path = local_summary_path(path_value)
         name = local_summary_name(source_path, getattr(args, "skill_name", None))
-        return f"Installing {name} from editable local path {source_path}"
-    return f"Installing PyPI package {EXAMPLE_SKILL_NAME}"
+        explicit_editable = (
+            editable_from_mode(editable)
+            if editable is not None
+            else getattr(args, "editable", None)
+        )
+        if explicit_editable is True:
+            return f"Installing {name} as editable symlink from {source_path}"
+        if explicit_editable is False:
+            return f"Installing a copy of {name} from {source_path}"
+        return f"Installing {name} from local path {source_path}"
+    return "Installing a skill"
 
 
 def summary_value(
@@ -617,7 +725,7 @@ def github_summary_name(
     try:
         source = parse_github_url(url, path=github_path)
     except InstallerError:
-        return EXAMPLE_SKILL_NAME
+        return "skill"
     if source.path is not None and source.path.name:
         return source.path.name
     return source.repo
@@ -637,10 +745,10 @@ def local_summary_name(path: Path | None, skill_name: str | None) -> str:
     if skill_name:
         return skill_name
     if path is None:
-        return EXAMPLE_SKILL_NAME
+        return "skill"
     if path.name:
         return path.name
-    return EXAMPLE_SKILL_NAME
+    return "skill"
 
 
 def install_target_summary(
@@ -939,6 +1047,34 @@ def validated_pypi_download(
     return wheel_path, project
 
 
+def validate_wheel_file(args: argparse.Namespace) -> None:
+    wheel_path = args.wheel_file.expanduser().resolve()
+    if not wheel_path.is_file():
+        raise InstallerError(f"wheel file does not exist: {wheel_path}")
+    project = read_pypi_project(args, wheel_path, None)
+    args._validated_wheel_file = wheel_path
+    args._validated_wheel_project = project
+
+
+def validated_wheel_file(args: argparse.Namespace) -> tuple[Path, SkillProject] | None:
+    wheel_path = getattr(args, "_validated_wheel_file", None)
+    project = getattr(args, "_validated_wheel_project", None)
+    if not isinstance(wheel_path, Path) or not wheel_path.is_file():
+        return None
+    if not isinstance(project, SkillProject):
+        return None
+    current = args.wheel_file.expanduser().resolve()
+    if current != wheel_path:
+        return None
+    return wheel_path, project
+
+
+def cleanup_validated_wheel_file(args: argparse.Namespace) -> None:
+    for name in VALIDATED_WHEEL_FIELDS:
+        if hasattr(args, name):
+            delattr(args, name)
+
+
 def validate_github_skill_source(args: argparse.Namespace) -> None:
     cleanup_validated_github_download(args)
     source = parse_github_url(
@@ -1050,6 +1186,8 @@ def installation_choice_description(status: InstallationStatus) -> str:
         if status.source_path is not None:
             source += f" / {status.source_path}"
         lines.append(f"Source: {source}")
+    elif status.source_path is not None:
+        lines.append(f"Source: {status.source_path}")
     elif status.package_name is not None:
         lines.append(f"Package: {status.package_name}")
     return "\n".join(lines)
@@ -1108,6 +1246,8 @@ def installed_source_phrase(status: InstallationStatus) -> str:
         return f" - GitHub ref {ref}" if ref else " - GitHub"
     if status.install_mode == "pypi":
         return f" - PyPI version {status.version}" if status.version else " - PyPI"
+    if status.install_mode == "wheel":
+        return f" - wheel version {status.version}" if status.version else " - wheel"
     if status.install_mode == "editable":
         return f" - editable version {status.version}" if status.version else " - editable"
     if status.version:
@@ -1309,12 +1449,14 @@ def complete_install_with_ui(
             default_package = (
                 package_choices[0]["value"]
                 if package_choices
-                else EXAMPLE_SKILL_NAME
+                else ""
             )
 
             def validate_pypi_package(value: str) -> str | None:
                 nonlocal version_choices
                 package_name = value.strip() or default_package
+                if not package_name:
+                    return "PyPI package name must not be empty"
                 try:
                     version_choices = required_generic_pypi_version_choices(
                         package_name
@@ -1332,19 +1474,13 @@ def complete_install_with_ui(
                     command_preview_builder=lambda value: preview_command(
                         args,
                         command="install",
-                        pypi_package=str(value).strip()
-                        or default_package
-                        or EXAMPLE_SKILL_NAME,
+                        pypi_package=str(value).strip() or default_package or None,
                     ),
                     summary_builder=lambda value: install_decision_summary(
                         args,
                         command="install",
                         source="pypi",
-                        pypi_package=(
-                            str(value).strip()
-                            or default_package
-                            or EXAMPLE_SKILL_NAME
-                        ),
+                        pypi_package=str(value).strip() or default_package or None,
                     ),
                     validator=validate_pypi_package,
                 ),
@@ -1405,6 +1541,31 @@ def complete_install_with_ui(
         version = resolve_pypi_version(args)
         if validated_pypi_download(args, version) is None:
             validate_pypi_skill_package(args)
+    elif source == "wheel":
+        if args.wheel_file is None:
+            wheel_file = run_prompt(
+                ["wheel_file", *VALIDATED_WHEEL_FIELDS],
+                lambda: prompter.path(
+                    "Wheel file",
+                    default_wheel_file(),
+                    command_preview_builder=lambda value: preview_command(
+                        args,
+                        command="install",
+                        wheel_file=Path(str(value)),
+                    ),
+                    summary_builder=lambda value: install_decision_summary(
+                        args,
+                        command="install",
+                        source="wheel",
+                        wheel_file=Path(str(value)),
+                    ),
+                ),
+            )
+            if wheel_file == PROMPT_BACK:
+                return PROMPT_BACK
+            args.wheel_file = wheel_file
+        if validated_wheel_file(args) is None:
+            validate_wheel_file(args)
     elif source == "github":
         if args.github_url is None:
             url_choices = recent_github_url_choices(args)
@@ -1433,19 +1594,13 @@ def complete_install_with_ui(
                     command_preview_builder=lambda value: preview_command(
                         args,
                         command="install",
-                        github_url=str(value).strip()
-                        or default_url
-                        or EXAMPLE_GITHUB_URL,
+                        github_url=str(value).strip() or default_url or None,
                     ),
                     summary_builder=lambda value: install_decision_summary(
                         args,
                         command="install",
                         source="github",
-                        github_url=(
-                            str(value).strip()
-                            or default_url
-                            or EXAMPLE_GITHUB_URL
-                        ),
+                        github_url=str(value).strip() or default_url or None,
                     ),
                     validator=validate_github_url,
                 ),
@@ -1486,6 +1641,28 @@ def complete_install_with_ui(
             if skill_path == PROMPT_BACK:
                 return PROMPT_BACK
             args.skill_path = skill_path
+        if args.editable is None:
+            install_mode = run_prompt(
+                ["editable"],
+                lambda: prompter.select(
+                    "Local install mode",
+                    local_install_mode_choices(),
+                    command_preview_builder=lambda value: preview_command(
+                        args,
+                        command="install",
+                        editable=editable_from_mode(value),
+                    ),
+                    summary_builder=lambda value: install_decision_summary(
+                        args,
+                        command="install",
+                        source="local",
+                        editable=value,
+                    ),
+                ),
+            )
+            if install_mode == PROMPT_BACK:
+                return PROMPT_BACK
+            args.editable = editable_from_mode(install_mode)
     else:
         raise UsageError(f"unknown install source: {source}")
     return None
@@ -1553,6 +1730,8 @@ def complete_install_targets_with_ui(
     if args.scope is None:
         def scope_preview(scope: object) -> str | None:
             selected_scope = str(scope)
+            if selected_scope == "specific":
+                return None
             repo = repo_root_for_ui(args) if selected_scope == "repo" else None
             return preview_command(
                 args,
@@ -1562,6 +1741,8 @@ def complete_install_targets_with_ui(
 
         def scope_summary(scope: object) -> str | None:
             selected_scope = str(scope)
+            if selected_scope == "specific":
+                return install_decision_summary(args, command="install")
             repo = repo_root_for_ui(args) if selected_scope == "repo" else None
             return install_decision_summary(
                 args,
@@ -1582,7 +1763,33 @@ def complete_install_targets_with_ui(
         )
         if scope_result == PROMPT_BACK:
             return PROMPT_BACK
-        args.scope = str(scope_result)
+        selected_scope = str(scope_result)
+        if selected_scope == "specific":
+            repo_result = run_prompt(
+                ["scope", "repo"],
+                lambda: prompter.path(
+                    "Repository path",
+                    default_repo_path(),
+                    command_preview_builder=lambda value: preview_command(
+                        args,
+                        scope="repo",
+                        repo=Path(str(value)),
+                    ),
+                    summary_builder=lambda value: install_decision_summary(
+                        args,
+                        command="install",
+                        scope="repo",
+                        repo=Path(str(value)),
+                    ),
+                    submit_label="Install",
+                ),
+            )
+            if repo_result == PROMPT_BACK:
+                return PROMPT_BACK
+            args.scope = "repo"
+            args.repo = repo_result
+        else:
+            args.scope = selected_scope
 
     if args.scope == "repo" and args.repo is None:
         repo = repo_root_for_ui(args)
@@ -1818,6 +2025,10 @@ def needs_ui(args: argparse.Namespace) -> bool:
     if args.command == "install":
         return (
             install_source_count(args) != 1
+            or (
+                getattr(args, "skill_path", None) is not None
+                and getattr(args, "editable", None) is None
+            )
             or args.agent is None
             or args.scope is None
         )
@@ -1847,6 +2058,7 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
             name
             for name, value in (
                 ("--pypi-package", args.pypi_package),
+                ("--wheel-file", args.wheel_file),
                 ("--github-url", args.github_url),
                 ("--skill-path", args.skill_path),
             )
@@ -1855,8 +2067,11 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
         if len(selected_sources) != 1:
             raise UsageError(
                 "choose exactly one install source: "
-                "--pypi-package, --github-url, or --skill-path"
+                "--pypi-package, --wheel-file, --github-url, or --skill-path"
             )
+        if args.editable is not None and args.skill_path is None:
+            flag = "--editable" if args.editable else "--copy"
+            raise UsageError(f"{flag} requires --skill-path")
         if args.pypi_package is not None:
             args.pypi_package = args.pypi_package.strip()
             if not args.pypi_package:
@@ -1865,6 +2080,9 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
             args.pypi_version = args.pypi_version.strip()
             if not args.pypi_version:
                 raise UsageError("--pypi-version must not be empty")
+        if args.wheel_file is not None:
+            if not str(args.wheel_file).strip():
+                raise UsageError("--wheel-file must not be empty")
         if args.github_url is not None:
             args.github_url = args.github_url.strip()
             if not args.github_url:
@@ -2060,32 +2278,71 @@ def wheel_skill_prefix(archive: zipfile.ZipFile) -> PurePosixPath:
             continue
         candidates.append(path.parent)
     if not candidates:
-        raise InstallerError("PyPI wheel did not contain a bundled SKILL.md")
+        raise InstallerError("wheel did not contain a bundled SKILL.md")
     candidates.sort(key=lambda item: (item.name != "_skill", len(item.parts)))
     return candidates[0]
+
+
+def wheel_filename_metadata(wheel_path: Path) -> tuple[str, str]:
+    name = wheel_path.name
+    stem = name[:-4] if name.endswith(".whl") else wheel_path.stem
+    parts = stem.split("-")
+    if len(parts) >= 2:
+        return parts[0].replace("_", "-"), parts[1]
+    return wheel_path.stem.replace("_", "-"), "local"
+
+
+def wheel_archive_metadata(archive: zipfile.ZipFile) -> dict[str, str]:
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        path = PurePosixPath(info.filename)
+        if len(path.parts) != 2:
+            continue
+        if not path.parts[0].endswith(".dist-info") or path.name != "METADATA":
+            continue
+        text = archive.read(info).decode("utf-8", errors="replace")
+        message = Parser().parsestr(text)
+        return {
+            "name": (message.get("Name") or "").strip(),
+            "version": (message.get("Version") or "").strip(),
+        }
+    return {}
 
 
 def read_pypi_project(
     args: argparse.Namespace,
     wheel_path: Path,
-    version: str,
+    version: str | None,
 ) -> SkillProject:
-    with zipfile.ZipFile(wheel_path) as archive:
-        prefix = wheel_skill_prefix(archive)
-        skill_text = read_prefixed_text(archive, prefix, "SKILL.md", PurePosixPath)
-        if skill_text is None:
-            raise InstallerError("PyPI wheel did not contain SKILL.md")
-        config_text = read_prefixed_text(
-            archive,
-            prefix,
-            CONFIG_FILE_NAME,
-            PurePosixPath,
-        )
+    fallback_package, fallback_version = wheel_filename_metadata(wheel_path)
+    try:
+        with zipfile.ZipFile(wheel_path) as archive:
+            prefix = wheel_skill_prefix(archive)
+            archive_metadata = wheel_archive_metadata(archive)
+            skill_text = read_prefixed_text(archive, prefix, "SKILL.md", PurePosixPath)
+            if skill_text is None:
+                raise InstallerError("wheel did not contain SKILL.md")
+            config_text = read_prefixed_text(
+                archive,
+                prefix,
+                CONFIG_FILE_NAME,
+                PurePosixPath,
+            )
+    except zipfile.BadZipFile as error:
+        raise InstallerError(f"wheel file is not a valid zip file: {wheel_path}") from error
+
+    package_name = (
+        getattr(args, "pypi_package", None)
+        or archive_metadata.get("name")
+        or fallback_package
+    )
+    wheel_version = version or archive_metadata.get("version") or fallback_version
 
     config = (
         load_installer_config_text(
             config_text,
-            source=f"{args.pypi_package} wheel/{prefix.as_posix()}/{CONFIG_FILE_NAME}",
+            source=f"{package_name} wheel/{prefix.as_posix()}/{CONFIG_FILE_NAME}",
         )
         if config_text is not None
         else None
@@ -2100,18 +2357,18 @@ def read_pypi_project(
     skill_name = normalize_skill_name(
         args.skill_name
         or metadata.get("name")
-        or args.pypi_package
+        or package_name
     )
     return SkillProject(
         package_name=skill_name,
         import_name=import_name,
-        version=metadata.get("version") or version,
+        version=metadata.get("version") or wheel_version,
         skill_name=skill_name,
         cli_name="agent-skill-installer",
         description=args.description or description_from_skill_text(skill_text, skill_name),
         installer_config=config or InstallerConfig(),
         bundled_skill_path=bundled_skill_path,
-        pypi_project_name=args.pypi_package,
+        pypi_project_name=getattr(args, "pypi_package", None),
     )
 
 
@@ -2148,6 +2405,7 @@ def install_for_targets(
     validate_install_source_selection(
         editable=editable_source_dir is not None,
         pypi_version=pypi_version,
+        wheel_path=pypi_wheel_path if pypi_version is None else None,
         github_source=github_source,
     )
     repo = args.repo if args.scope == "repo" else None
@@ -2186,10 +2444,30 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
         project = read_local_project(args)
         if project.bundled_skill_source is None:
             raise InstallerError("local install source was not resolved")
+        editable_source_dir = (
+            project.bundled_skill_source
+            if getattr(args, "editable", None) is not False
+            else None
+        )
         return install_for_targets(
             project,
             args,
-            editable_source_dir=project.bundled_skill_source,
+            editable_source_dir=editable_source_dir,
+        )
+
+    if args.wheel_file is not None:
+        validated_wheel = validated_wheel_file(args)
+        if validated_wheel is not None:
+            wheel_path, project = validated_wheel
+        else:
+            wheel_path = args.wheel_file.expanduser().resolve()
+            if not wheel_path.is_file():
+                raise InstallerError(f"wheel file does not exist: {wheel_path}")
+            project = read_pypi_project(args, wheel_path, None)
+        return install_for_targets(
+            project,
+            args,
+            pypi_wheel_path=wheel_path,
         )
 
     if args.github_url is not None:
@@ -2322,6 +2600,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         cleanup_validated_pypi_download(args)
+        cleanup_validated_wheel_file(args)
         cleanup_validated_github_download(args)
 
     print_results(results, verbose=bool(getattr(args, "verbose", False)))

@@ -50,6 +50,7 @@ SCOPE_LABELS = {
 }
 AGENT_TARGET_VALUES = set(AGENTS)
 INSTALLATION_TARGET_SEPARATOR = ":"
+SPECIFIC_DIRECTORY_VALUE = "specific"
 TEXTUAL_APP_TITLE = "Agent Skill Installer"
 CommandPreviewBuilder = Callable[[object], str | None]
 PromptValidator = Callable[[str], str | None]
@@ -351,7 +352,7 @@ def command_preview_classes(command_preview: str | None) -> str:
 
 def command_preview_class_for_value(value: object) -> str:
     text = str(value)
-    if text in {"install", "pypi", "github", "local", "editable"}:
+    if text in {"install", "pypi", "wheel", "github", "local", "editable", "copy"}:
         return "install-preview"
     if text == "uninstall":
         return "uninstall-preview"
@@ -2434,6 +2435,8 @@ def installation_scope_choice_label(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
 ) -> str:
+    if scope == SPECIFIC_DIRECTORY_VALUE:
+        return "Specific directory"
     return "Global" if scope == "global" else "Repository install"
 
 
@@ -2446,6 +2449,8 @@ def installation_scope_choice_description(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
 ) -> str:
+    if scope == SPECIFIC_DIRECTORY_VALUE:
+        return "Prompt for a repository directory"
     if scope == "global":
         paths = [
             str(
@@ -2540,6 +2545,28 @@ def installation_option_choices(
                     "kind": "scope",
                 }
             )
+        choices.append(
+            {
+                "name": installation_scope_choice_label(
+                    SPECIFIC_DIRECTORY_VALUE,
+                    agents=agents,
+                    repo=repo,
+                    home=home,
+                    codex_home=codex_home,
+                    claude_home=claude_home,
+                ),
+                "description": installation_scope_choice_description(
+                    SPECIFIC_DIRECTORY_VALUE,
+                    agents=agents,
+                    repo=repo,
+                    home=home,
+                    codex_home=codex_home,
+                    claude_home=claude_home,
+                ),
+                "value": SPECIFIC_DIRECTORY_VALUE,
+                "kind": "scope",
+            }
+        )
         return choices
 
     installed_by_target = (
@@ -3034,6 +3061,8 @@ def complete_with_ui(
                 )
                 if not selected:
                     return None
+                if args.command == "install" and selected == [SPECIFIC_DIRECTORY_VALUE]:
+                    return None
                 preview_targets = normalize_installation_targets(
                     selected,
                     project=project,
@@ -3076,6 +3105,34 @@ def complete_with_ui(
                     ),
                 )
             if selected_options == PROMPT_BACK:
+                continue
+            if (
+                args.command == "install"
+                and str(selected_options) == SPECIFIC_DIRECTORY_VALUE
+            ):
+                selected_targets = [(agent, "repo") for agent in selected_agents]
+
+                def specific_repo_preview(repo: object) -> str | None:
+                    return build_no_ui_command(
+                        project,
+                        args,
+                        targets=selected_targets,
+                        repo=Path(str(repo)),
+                    )
+
+                repo = prompt_step(
+                    ["targets", "repo"],
+                    lambda: prompter.path(
+                        "Repository path",
+                        default_repo_path(),
+                        command_preview_builder=specific_repo_preview,
+                        submit_label=final_submit_label(),
+                    ),
+                )
+                if repo == PROMPT_BACK:
+                    continue
+                args.targets = selected_targets
+                args.repo = repo
                 continue
             targets = normalize_installation_targets(
                 selected_options,
@@ -3226,6 +3283,8 @@ def version_suffix(result: InstallResult) -> str:
         details.append("editable")
     elif result.install_mode == "pypi":
         details.append("PyPI wheel")
+    elif result.install_mode == "wheel":
+        details.append("wheel")
     elif result.install_mode == "github":
         details.append("GitHub archive")
 
@@ -3291,6 +3350,8 @@ def print_results(results: Sequence[InstallResult], *, verbose: bool = False) ->
             print(f"  source: {result.source_dir}")
         if result.source_url is not None:
             print(f"  source: {result.source_url}")
+        elif result.source_path is not None:
+            print(f"  source: {result.source_path}")
         print(f"  hook:  {result.hook_path}")
 
 

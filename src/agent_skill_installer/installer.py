@@ -1475,6 +1475,7 @@ def validate_install_source_selection(
     *,
     editable: bool = False,
     pypi_version: str | None = None,
+    wheel_path: Path | None = None,
     github_source: GithubSource | None = None,
 ) -> None:
     selected = [
@@ -1482,6 +1483,7 @@ def validate_install_source_selection(
         for name, enabled in (
             ("--editable", editable),
             ("--pypi-version", pypi_version is not None),
+            ("--wheel-file", wheel_path is not None),
             ("--github-url", github_source is not None),
         )
         if enabled
@@ -1506,6 +1508,7 @@ def install_target(
     validate_install_source_selection(
         editable=effective_editable,
         pypi_version=pypi_version,
+        wheel_path=pypi_wheel_path if pypi_version is None else None,
         github_source=github_source,
     )
 
@@ -1525,6 +1528,8 @@ def install_target(
     install_mode = (
         "pypi"
         if pypi_version is not None
+        else "wheel"
+        if pypi_wheel_path is not None
         else "github"
         if github_source is not None
         else "editable"
@@ -1558,10 +1563,8 @@ def install_target(
         remove_manifest_at(previous_manifest_file)
 
     remember_created_dirs(created_dirs, spec.skill_dir)
-    if pypi_version is not None:
+    if pypi_wheel_path is not None:
         spec.skill_dir.mkdir(parents=True, exist_ok=True)
-        if pypi_wheel_path is None:
-            raise InstallerError("missing PyPI wheel for requested install source")
         skill_files = copy_pypi_wheel_skill(project, pypi_wheel_path, spec.skill_dir)
     elif github_source is not None:
         spec.skill_dir.mkdir(parents=True, exist_ok=True)
@@ -1596,6 +1599,8 @@ def install_target(
         source_path=(
             github_source.path.as_posix()
             if github_source is not None and github_source.path is not None
+            else str(pypi_wheel_path)
+            if install_mode == "wheel" and pypi_wheel_path is not None
             else None
         ),
     )
@@ -1616,6 +1621,8 @@ def install_target(
         source_path=(
             github_source.path.as_posix()
             if github_source is not None and github_source.path is not None
+            else str(pypi_wheel_path)
+            if install_mode == "wheel" and pypi_wheel_path is not None
             else None
         ),
     )

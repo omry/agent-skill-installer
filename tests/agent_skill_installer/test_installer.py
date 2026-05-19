@@ -1636,6 +1636,12 @@ def test_installation_option_choices_offer_install_locations(tmp_path: Path) -> 
             "value": "repo",
             "kind": "scope",
         },
+        {
+            "name": "Specific directory",
+            "description": "Prompt for a repository directory",
+            "value": "specific",
+            "kind": "scope",
+        },
     ]
 
 
@@ -1848,6 +1854,41 @@ def test_complete_with_ui_selects_specific_targets(tmp_path: Path) -> None:
     ]
     assert prompter.checkbox_defaults == [["all"]]
     assert prompter.submit_labels == ["Continue", "Continue", "Install"]
+
+
+def test_complete_with_ui_selects_specific_directory(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "chosen-repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        editable=False,
+    )
+    prompter = ScriptedPrompter("install", ["codex"], "specific", repo)
+
+    complete_with_ui(project, args, prompter)
+
+    assert args.command == "install"
+    assert args.targets == [("codex", "repo")]
+    assert args.repo == repo
+    assert prompter.calls == [
+        ("select", "What would you like to do with example-agent-skill?"),
+        ("checkbox", "Select agents for example-agent-skill"),
+        ("select", "Install location for example-agent-skill"),
+        ("path", "Repository path"),
+    ]
+    assert prompter.previews == [
+        "example-agent-skill --no-ui install --agent all --scope global",
+        "example-agent-skill --no-ui install --agent codex --scope global",
+        None,
+        "example-agent-skill --no-ui install --agent codex --scope repo --repo "
+        f"{shlex.quote(str(repo))}",
+    ]
+    assert prompter.submit_labels == ["Continue", "Continue", "Install", "Install"]
 
 
 def test_complete_with_ui_selects_pypi_source(
@@ -2089,7 +2130,12 @@ def test_generic_install_source_choices_keep_remote_first_without_local_skill(
 
     choices = generic_install_source_choices()
 
-    assert [choice["value"] for choice in choices] == ["pypi", "github", "local"]
+    assert [choice["value"] for choice in choices] == [
+        "pypi",
+        "wheel",
+        "github",
+        "local",
+    ]
 
 
 @pytest.mark.parametrize("layout", ["root", "nested"])
@@ -2128,7 +2174,14 @@ def test_generic_complete_with_ui_preview_uses_detected_local_source(
         no_ui=False,
         verbose=False,
     )
-    prompter = ScriptedPrompter("install", "local", source, ["codex"], "global")
+    prompter = ScriptedPrompter(
+        "install",
+        "local",
+        source,
+        "editable",
+        ["codex"],
+        "global",
+    )
 
     complete_generic_with_ui(args, prompter)
 
@@ -2156,12 +2209,20 @@ def test_generic_complete_with_ui_selects_local_install_source(
         no_ui=False,
         verbose=False,
     )
-    prompter = ScriptedPrompter("install", "local", source, ["codex"], "repo")
+    prompter = ScriptedPrompter(
+        "install",
+        "local",
+        source,
+        "editable",
+        ["codex"],
+        "repo",
+    )
 
     complete_generic_with_ui(args, prompter)
 
     assert args.command == "install"
     assert args.skill_path == source
+    assert args.editable is True
     assert args.agent == "codex"
     assert args.scope == "repo"
     assert args.repo == repo
@@ -2169,13 +2230,11 @@ def test_generic_complete_with_ui_selects_local_install_source(
         ("select", "What would you like to do?"),
         ("select", "Install source"),
         ("path", "Local repo or skill directory"),
+        ("select", "Local install mode"),
         ("checkbox", "Select agents"),
         ("select", "Install location"),
     ]
-    assert prompter.previews[0] == (
-        "agent-skill-installer --no-ui install "
-        "--pypi-package agent-workflow-dsl --agent all --scope global"
-    )
+    assert prompter.previews[0] is None
     assert prompter.previews[1] == (
         "agent-skill-installer --no-ui install "
         "--skill-path skill --agent all --scope global"
@@ -2184,13 +2243,110 @@ def test_generic_complete_with_ui_selects_local_install_source(
         "agent-skill-installer --no-ui install "
         f"--skill-path {shlex.quote(str(source))} --agent all --scope global"
     )
+    assert prompter.previews[3] == (
+        "agent-skill-installer --no-ui install "
+        f"--skill-path {shlex.quote(str(source))} --editable "
+        "--agent all --scope global"
+    )
     assert prompter.summaries[1] == (
-        f"Installing agent-skill-installer from editable local path {Path.cwd()}"
+        f"Installing agent-skill-installer from local path {Path.cwd()}"
     )
     assert prompter.summaries[2] == (
-        f"Installing skill-source from editable local path {source}"
+        f"Installing skill-source from local path {source}"
+    )
+    assert prompter.summaries[3] == (
+        f"Installing skill-source as editable symlink from {source}"
     )
     assert prompter.submit_labels[-1] == "Install"
+
+
+def test_generic_complete_with_ui_selects_local_copy_install_source(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "local", source, "copy", ["codex"], "repo")
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.editable is False
+    assert prompter.previews[3] == (
+        "agent-skill-installer --no-ui install "
+        f"--skill-path {shlex.quote(str(source))} --copy --agent all --scope global"
+    )
+    assert prompter.summaries[3] == (
+        f"Installing a copy of skill-source from {source}"
+    )
+
+    results = run_generic_install(args)
+    assert [result.install_mode for result in results] == ["copy"]
+    skill_dir = repo / ".codex" / "skills" / "skill-source"
+    assert skill_dir.is_dir()
+    assert not skill_dir.is_symlink()
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+
+def test_generic_complete_with_ui_selects_specific_directory(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "chosen-repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "local",
+        source,
+        "editable",
+        ["codex"],
+        "specific",
+        repo,
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.command == "install"
+    assert args.skill_path == source
+    assert args.editable is True
+    assert args.agent == "codex"
+    assert args.scope == "repo"
+    assert args.repo == repo
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("path", "Local repo or skill directory"),
+        ("select", "Local install mode"),
+        ("checkbox", "Select agents"),
+        ("select", "Install location"),
+        ("path", "Repository path"),
+    ]
+    assert prompter.previews[5] is None
+    assert prompter.previews[6] == (
+        "agent-skill-installer --no-ui install "
+        f"--skill-path {shlex.quote(str(source))} --editable --agent codex "
+        f"--scope repo --repo {shlex.quote(str(repo))}"
+    )
+    assert prompter.submit_labels[-2:] == ["Install", "Install"]
 
 
 def test_generic_install_source_selection_summary_excludes_target(
@@ -2208,20 +2364,25 @@ def test_generic_install_source_selection_summary_excludes_target(
         no_ui=False,
         verbose=False,
     )
-    prompter = ScriptedPrompter("local", source)
+    prompter = ScriptedPrompter("local", source, "copy")
 
     complete_generic_with_ui(args, prompter)
 
     assert prompter.calls == [
         ("select", "Install source"),
         ("path", "Local repo or skill directory"),
+        ("select", "Local install mode"),
     ]
     assert prompter.summaries[0] == (
-        f"Installing agent-skill-installer from editable local path {Path.cwd()}"
+        f"Installing agent-skill-installer from local path {Path.cwd()}"
     )
     assert "Into" not in prompter.summaries[0]
     assert prompter.summaries[1] == (
-        f"Installing skill from editable local path {source}\n"
+        f"Installing skill from local path {source}\n"
+        "Into Codex Global, Claude Global"
+    )
+    assert prompter.summaries[2] == (
+        f"Installing a copy of skill from {source}\n"
         "Into Codex Global, Claude Global"
     )
 
@@ -2248,6 +2409,7 @@ def test_generic_complete_with_ui_escape_goes_back_one_screen(
         source,
         BackRequested(),
         source,
+        "editable",
         ["codex"],
         "global",
     )
@@ -2262,8 +2424,9 @@ def test_generic_complete_with_ui_escape_goes_back_one_screen(
         ("select", "What would you like to do?"),
         ("select", "Install source"),
         ("path", "Local repo or skill directory"),
-        ("checkbox", "Select agents"),
+        ("select", "Local install mode"),
         ("path", "Local repo or skill directory"),
+        ("select", "Local install mode"),
         ("checkbox", "Select agents"),
         ("select", "Install location"),
     ]
@@ -2415,9 +2578,11 @@ def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
             for index in range(1, 10)
         ],
     ]
+    assert prompter.previews[0] is None
+    assert prompter.previews[1] is None
     assert prompter.summaries == [
         "Installing a skill",
-        "Installing PyPI package agent-workflow-dsl",
+        "Installing from PyPI",
         "Installing PyPI package example-agent-skill",
         "Installing PyPI package example-agent-skill 9.9.9",
         "Installing PyPI package example-agent-skill 9.9.9\nInto Codex Global",
@@ -2425,7 +2590,42 @@ def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
     ]
 
 
-def test_generic_complete_with_ui_defaults_pypi_package_to_agent_workflow_dsl(
+def test_generic_complete_with_ui_requires_pypi_package_without_recent_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    seen_packages: list[str] = []
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.published_pypi_versions",
+        lambda project, *, limit=10: seen_packages.append(project.package_name) or [],
+    )
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=tmp_path / "home",
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "pypi", "")
+
+    with pytest.raises(InstallerError, match="PyPI package name must not be empty"):
+        complete_generic_with_ui(args, prompter)
+
+    assert not hasattr(args, "pypi_package") or args.pypi_package is None
+    assert seen_packages == []
+    assert prompter.previews == [None, None, None]
+    assert prompter.summaries == [
+        "Installing a skill",
+        "Installing from PyPI",
+        "Installing from PyPI",
+    ]
+
+
+def test_generic_complete_with_ui_uses_entered_pypi_package(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2472,7 +2672,14 @@ def test_generic_complete_with_ui_defaults_pypi_package_to_agent_workflow_dsl(
         no_ui=False,
         verbose=False,
     )
-    prompter = ScriptedPrompter("install", "pypi", "", "0.0.1", ["codex"], "global")
+    prompter = ScriptedPrompter(
+        "install",
+        "pypi",
+        "agent-workflow-dsl",
+        "0.0.1",
+        ["codex"],
+        "global",
+    )
 
     complete_generic_with_ui(args, prompter)
 
@@ -2546,6 +2753,8 @@ def test_generic_complete_with_ui_selects_github_url_from_dropdown(
             "value": "https://github.com/example/recent-skill",
         },
     ]
+    assert prompter.previews[0] is None
+    assert prompter.previews[1] is None
     assert prompter.previews[2] == (
         "agent-skill-installer --no-ui install "
         "--github-url https://github.com/example/recent-skill "
@@ -2864,6 +3073,62 @@ def test_generic_console_installs_and_uninstalls_local_skill(
     assert uninstall_code == 0
     assert "Removed example-agent-skill local from Codex repo:" in output.out
     assert not (repo / ".codex" / "skills" / "example-agent-skill").exists()
+
+
+def test_generic_console_can_copy_local_skill(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+
+    install_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--skill-name",
+            "example-agent-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert install_code == 0
+    assert "Installed example-agent-skill local to Codex repo:" in output.out
+    skill_dir = repo / ".codex" / "skills" / "example-agent-skill"
+    assert skill_dir.is_dir()
+    assert not skill_dir.is_symlink()
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+    (source / "SKILL.md").write_text("edited source\n")
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+
+def test_generic_console_rejects_copy_without_local_skill_path(capsys) -> None:
+    exit_code = generic_main(
+        [
+            "--no-ui",
+            "install",
+            "--pypi-package",
+            "example-agent-skill",
+            "--copy",
+            "--agent",
+            "codex",
+            "--scope",
+            "global",
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "--copy requires --skill-path" in output.err
 
 
 def test_generic_console_installs_local_repo_with_skill_subdir(
