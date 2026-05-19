@@ -15,6 +15,8 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping
 
+from .config import CONFIG_FILE_NAME, AgentInstructions, InstallerConfig, load_installer_config_text
+
 
 MANIFEST_VERSION = 1
 PYPI_BASE_URL = "https://pypi.org/pypi"
@@ -36,9 +38,11 @@ class SkillProject:
     skill_name: str
     description: str
     hook_blocks: Mapping[str, str] = field(default_factory=dict)
+    installer_config: InstallerConfig | None = None
     bundled_skill_path: str = "_skill"
     bundled_skill_source: Path | None = None
     pypi_project_name: str | None = None
+    cli_name: str | None = None
     pypi_base_url: str = PYPI_BASE_URL
     manifest_package_aliases: frozenset[str] = field(default_factory=frozenset)
     marker_slug_override: str | None = None
@@ -73,10 +77,35 @@ class SkillProject:
         return self.pypi_project_name or self.package_name
 
     @property
+    def command_name(self) -> str:
+        return self.cli_name or self.package_name
+
+    @property
     def wheel_skill_prefix(self) -> PurePosixPath:
         return PurePosixPath(self.import_name, self.bundled_skill_path)
 
+    def config_instructions(self, agent: str) -> AgentInstructions | None:
+        config = self.installer_config
+        if config is None:
+            config = load_packaged_installer_config(self)
+        if config is None:
+            return None
+        agents = config.installer.agents
+        if agent == "codex" and agents.codex is not None:
+            return agents.codex.instructions
+        if agent == "claude" and agents.claude is not None:
+            return agents.claude.instructions
+        return None
+
     def hook_block(self, agent: str) -> str:
+        instructions = self.config_instructions(agent)
+        if instructions is not None:
+            return (
+                f"{self.marker_start}\n"
+                f"## {instructions.title}\n\n"
+                f"{instructions.body.rstrip()}\n"
+                f"{self.marker_end}\n"
+            )
         if agent in self.hook_blocks:
             return self.hook_blocks[agent]
         trigger = f"${self.skill_name}" if agent == "codex" else f"/{self.skill_name}"
@@ -87,6 +116,25 @@ class SkillProject:
             f"Use `{trigger}` when a prompt explicitly asks for this skill.\n"
             f"{self.marker_end}\n"
         )
+
+
+def load_packaged_installer_config(project: SkillProject) -> InstallerConfig | None:
+    if project.bundled_skill_source is not None:
+        source = project.bundled_skill_source / CONFIG_FILE_NAME
+        if source.is_file():
+            return load_installer_config_text(source.read_text(), source=source)
+        return None
+
+    config = resources.files(project.import_name).joinpath(
+        project.bundled_skill_path,
+        CONFIG_FILE_NAME,
+    )
+    if not config.is_file():
+        return None
+    return load_installer_config_text(
+        config.read_text(),
+        source=f"{project.import_name}/{project.bundled_skill_path}/{CONFIG_FILE_NAME}",
+    )
 
 
 @dataclass(frozen=True)

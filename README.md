@@ -17,15 +17,15 @@ not know about any specific skill package.
 
 The `examples/` directory contains runnable integration examples:
 
-- [`examples/demo-installer/`](https://github.com/omry/agent-skill-installer/blob/main/examples/demo-installer/README.md)
+- [`examples/demo-installer/`](https://github.com/omry/agent-skill-installer/blob/main/examples/README.md#demo-installer-package)
   is a complete skill-carrying Python package with a bundled demo skill and a
   project-specific CLI wrapper.
-- [`examples/api-install/`](https://github.com/omry/agent-skill-installer/blob/main/examples/api-install/README.md)
+- [`examples/api-install/`](https://github.com/omry/agent-skill-installer/blob/main/examples/README.md#api-install-script)
   shows how to install and uninstall a skill directly through the Python API
   without exposing a package CLI.
 
-Each example directory has its own README with the files to inspect and the
-commands to run.
+See [`examples/README.md`](https://github.com/omry/agent-skill-installer/blob/main/examples/README.md)
+for the files to inspect and the commands to run.
 
 ## What It Provides
 

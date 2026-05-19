@@ -25,7 +25,10 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development",
 ]
-dependencies = []
+dependencies = [
+  "omegaconf>=2.3.0",
+  "textual>=0.89.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
