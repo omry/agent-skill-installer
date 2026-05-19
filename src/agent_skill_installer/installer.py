@@ -1205,7 +1205,7 @@ def install(
     if pypi_version is None:
         return install_targets()
 
-    with tempfile.TemporaryDirectory(prefix="skill-installer-pypi-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="agent-skill-installer-pypi-") as temp_dir:
         wheel_path = download_pypi_wheel(project, pypi_version, Path(temp_dir))
         return install_targets(wheel_path)
 

@@ -5,8 +5,8 @@ import sys
 
 def main() -> int:
     print(
-        "skill-installer is a library. Project-specific packages should call "
-        "skill_installer.cli.main(..., project=SkillProject(...)).",
+        "agent-skill-installer is a library. Project-specific packages should call "
+        "agent_skill_installer.cli.main(..., project=SkillProject(...)).",
         file=sys.stderr,
     )
     return 2

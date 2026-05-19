@@ -1,8 +1,9 @@
-# Skill Installer
+# Agent Skill Installer
 
-`skill-installer` is a generic Python library for projects that distribute
-agent skills. A project supplies metadata for its own skill package, and this
-library handles installation into supported agent homes or repositories.
+`agent-skill-installer` provides the `agent_skill_installer` Python package, a generic
+library for projects that distribute agent skills. A project supplies metadata
+for its own skill package, and this library handles installation into supported
+agent homes or repositories.
 
 The core is intentionally project-neutral. It does not ship a skill, and it does
 not know about Agent Workflow DSL or any other specific skill.
@@ -22,7 +23,7 @@ not know about Agent Workflow DSL or any other specific skill.
 ## Library Usage
 
 ```python
-from skill_installer import Installer, SkillProject
+from agent_skill_installer import Installer, SkillProject
 
 PROJECT = SkillProject(
     package_name="my-agent-skill",
@@ -46,8 +47,8 @@ can point `bundled_skill_source` at a filesystem directory.
 Projects can expose their own console script by delegating to the generic CLI:
 
 ```python
-from skill_installer import SkillProject
-from skill_installer.cli import main as installer_main
+from agent_skill_installer import SkillProject
+from agent_skill_installer.cli import main as installer_main
 
 from . import __version__
 

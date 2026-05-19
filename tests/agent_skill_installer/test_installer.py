@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from skill_installer.cli import build_no_ui_command, format_status_line, main
-from skill_installer.installer import (
+from agent_skill_installer import __version__
+from agent_skill_installer.cli import build_no_ui_command, format_status_line, main
+from agent_skill_installer.installer import (
     PYPI_METADATA_TIMEOUT_SECONDS,
     Installer,
     InstallerError,
@@ -228,7 +229,7 @@ def test_pypi_wheel_install_extracts_only_project_skill(
     wheel = make_skill_wheel(tmp_path / "example.whl", project, skill_text="pypi\n")
 
     monkeypatch.setattr(
-        "skill_installer.installer.download_pypi_wheel",
+        "agent_skill_installer.installer.download_pypi_wheel",
         lambda _project, _version, _download_dir: wheel,
     )
 
@@ -297,7 +298,7 @@ def test_install_source_metadata_requires_vcs_repo(
     (checkout / ".git").rmdir()
     monkeypatch.chdir(checkout)
     monkeypatch.setattr(
-        "skill_installer.installer.find_repo_root",
+        "agent_skill_installer.installer.find_repo_root",
         lambda _start=None: None,
     )
 
@@ -348,7 +349,7 @@ def test_published_pypi_versions_filters_wheel_releases(
 ) -> None:
     project = make_project(tmp_path)
     monkeypatch.setattr(
-        "skill_installer.installer.fetch_json_url",
+        "agent_skill_installer.installer.fetch_json_url",
         lambda _url, **_kwargs: {
             "releases": {
                 "1.0.0": [{"packagetype": "bdist_wheel"}],
@@ -380,7 +381,7 @@ def test_fetch_json_url_uses_metadata_timeout(monkeypatch) -> None:
         return FakeResponse()
 
     monkeypatch.setattr(
-        "skill_installer.installer.urllib.request.urlopen",
+        "agent_skill_installer.installer.urllib.request.urlopen",
         fake_urlopen,
     )
 
@@ -677,7 +678,7 @@ def test_cli_no_ui_pypi_version_install(
     repo = make_repo(tmp_path / "repo")
     wheel = make_skill_wheel(tmp_path / "example.whl", project)
     monkeypatch.setattr(
-        "skill_installer.installer.download_pypi_wheel",
+        "agent_skill_installer.installer.download_pypi_wheel",
         lambda _project, _version, _download_dir: wheel,
     )
 
@@ -714,7 +715,7 @@ def test_cli_no_ui_pypi_version_download_error_names_attempted_package(
     def fail_download(_project: SkillProject, _version: str, _download_dir: Path) -> Path:
         raise InstallerError("metadata not found")
 
-    monkeypatch.setattr("skill_installer.installer.download_pypi_wheel", fail_download)
+    monkeypatch.setattr("agent_skill_installer.installer.download_pypi_wheel", fail_download)
 
     with pytest.raises(SystemExit) as error:
         main(
@@ -785,7 +786,7 @@ def test_cli_no_ui_command_preview_uses_project_package_name(tmp_path: Path) -> 
 
 
 def test_code_does_not_carry_awd_specific_constants() -> None:
-    root = Path(__file__).resolve().parents[2] / "src" / "skill_installer"
+    root = Path(__file__).resolve().parents[2] / "src" / "agent_skill_installer"
     source = "\n".join(path.read_text() for path in root.glob("*.py"))
 
     assert "agent-workflow-dsl" not in source
@@ -797,7 +798,8 @@ def test_code_does_not_carry_awd_specific_constants() -> None:
 def test_package_metadata_is_generic() -> None:
     pyproject = Path(__file__).resolve().parents[2].joinpath("pyproject.toml").read_text()
 
-    assert 'name = "skill-installer"' in pyproject
+    assert 'name = "agent-skill-installer"' in pyproject
+    assert f'version = "{__version__}"' in pyproject
     assert "agent-workflow-dsl" not in pyproject
     assert "agent_workflow_dsl" not in pyproject
     assert "[project.scripts]" not in pyproject
@@ -808,7 +810,7 @@ def test_python_module_entry_point_explains_library_usage() -> None:
     src_dir = Path(__file__).resolve().parents[2] / "src"
     env["PYTHONPATH"] = str(src_dir)
     completed = subprocess.run(
-        [sys.executable, "-m", "skill_installer"],
+        [sys.executable, "-m", "agent_skill_installer"],
         text=True,
         capture_output=True,
         check=False,
@@ -816,4 +818,4 @@ def test_python_module_entry_point_explains_library_usage() -> None:
     )
 
     assert completed.returncode == 2
-    assert "skill-installer is a library" in completed.stderr
+    assert "agent-skill-installer is a library" in completed.stderr
