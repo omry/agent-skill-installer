@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agent_skill_installer.config import load_installer_config
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -147,6 +149,15 @@ def test_wheel_skill_example_builds_and_installs(tmp_path: Path) -> None:
     )
     skill_dir = repo / ".codex" / "skills" / "wheel-agent-skill"
     assert "Wheel Agent Skill" in skill_dir.joinpath("SKILL.md").read_text()
+    config = load_installer_config(skill_dir / "agent-skill-installer.yaml")
+    assert config.installer.agents.codex is not None
+    codex_hooks = config.installer.agents.codex.hooks.UserPromptSubmit
+    assert codex_hooks[0].hooks[0].statusMessage == (
+        "Running wheel-agent-skill hello hook"
+    )
+    hook = repo.joinpath("AGENTS.md").read_text()
+    assert "<!-- WHEEL-AGENT-SKILL-DISCOVERABILITY-START -->" in hook
+    assert "Use this wheel-packaged demo skill to verify local wheel installs." in hook
 
     uninstall = run_example(
         [

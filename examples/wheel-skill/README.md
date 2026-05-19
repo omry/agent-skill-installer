@@ -17,4 +17,5 @@ agent-skill-installer --no-ui install \
 ```
 
 The Python package files are only there to produce the wheel. The skill payload
-is `src/wheel_agent_skill/_skill/`.
+is `src/wheel_agent_skill/_skill/`, including `agent-skill-installer.yaml` for
+configured discoverability text and typed hook entries.

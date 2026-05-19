@@ -1,0 +1,34 @@
+installer:
+  version: 1
+
+  shared:
+    instructions:
+      discoverability:
+        title: Wheel Agent Skill
+        body: |
+          Use this wheel-packaged demo skill to verify local wheel installs.
+    hooks:
+      hello:
+        type: command
+        command: python3 .codex/skills/wheel-agent-skill/scripts/hello.py
+        timeout: 5
+        statusMessage: Running wheel-agent-skill hello hook
+
+  agents:
+    codex:
+      version: 1
+      instructions: ${installer.shared.instructions.discoverability}
+      hooks:
+        UserPromptSubmit:
+          - hooks:
+              - ${installer.shared.hooks.hello}
+
+    claude:
+      version: 1
+      instructions: ${installer.shared.instructions.discoverability}
+      hooks:
+        UserPromptSubmit:
+          - hooks:
+              - type: command
+                command: python3 .claude/skills/wheel-agent-skill/scripts/hello.py
+                timeout: 5

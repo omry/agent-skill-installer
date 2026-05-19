@@ -59,6 +59,8 @@ The important files are:
 - `wheel-skill/MANIFEST.in`: includes the bundled skill files in the wheel.
 - `wheel-skill/src/wheel_agent_skill/_skill/SKILL.md`: the bundled skill
   payload.
+- `wheel-skill/src/wheel_agent_skill/_skill/agent-skill-installer.yaml`:
+  configured discoverability text and typed hook entries.
 
 ## API Install Script
 
