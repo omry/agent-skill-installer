@@ -490,6 +490,25 @@ def test_manifest_package_aliases_are_project_specific(tmp_path: Path) -> None:
     assert read_raw_manifest(compatible, skill_dir) is not None
 
 
+def test_project_can_override_discoverability_marker_slug(tmp_path: Path) -> None:
+    project = SkillProject(
+        package_name="example-agent-skill",
+        import_name="example_agent_skill",
+        version="1.2.3",
+        skill_name="example-agent-skill",
+        description="Example agent skill for installer tests.",
+        bundled_skill_source=make_skill(tmp_path / "bundled-skill"),
+        marker_slug_override="EXAMPLE",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    hook_text = (repo / "AGENTS.md").read_text()
+    assert "<!-- EXAMPLE-DISCOVERABILITY-START -->" in hook_text
+    assert "<!-- EXAMPLE-DISCOVERABILITY-END -->" in hook_text
+
+
 def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
     project = make_project(tmp_path)
     repo = make_repo(tmp_path / "repo")

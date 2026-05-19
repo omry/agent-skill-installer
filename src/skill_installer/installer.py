@@ -41,9 +41,12 @@ class SkillProject:
     pypi_project_name: str | None = None
     pypi_base_url: str = PYPI_BASE_URL
     manifest_package_aliases: frozenset[str] = field(default_factory=frozenset)
+    marker_slug_override: str | None = None
 
     @property
     def marker_slug(self) -> str:
+        if self.marker_slug_override is not None:
+            return self.marker_slug_override
         return "".join(
             character.upper() if character.isalnum() else "-"
             for character in self.skill_name
