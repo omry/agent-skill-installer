@@ -21,6 +21,7 @@ from skill_installer.installer import (
     install_source_metadata,
     manifest_path,
     published_pypi_versions,
+    read_manifest as read_raw_manifest,
 )
 
 
@@ -84,7 +85,7 @@ def make_skill_wheel(
     return path
 
 
-def read_manifest(project: SkillProject, skill_dir: Path) -> dict[str, object]:
+def read_install_manifest(project: SkillProject, skill_dir: Path) -> dict[str, object]:
     return json.loads(manifest_path(project, skill_dir).read_text())
 
 
@@ -108,7 +109,7 @@ def test_installs_and_uninstalls_codex_repo_scope(tmp_path: Path) -> None:
     skill_dir = repo / ".codex" / "skills" / project.skill_name
     assert result.status == "installed"
     assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
-    manifest = read_manifest(project, skill_dir)
+    manifest = read_install_manifest(project, skill_dir)
     assert manifest["package"] == project.package_name
     assert manifest["skill_name"] == project.skill_name
     assert manifest["package_version"] == project.version
@@ -197,7 +198,7 @@ def test_editable_install_links_local_checkout_skill_files(
     assert skill_dir.is_symlink()
     assert skill_dir.resolve() == checkout / "skill"
     assert (skill_dir / "SKILL.md").read_text() == "editable skill\n"
-    manifest = read_manifest(project, skill_dir)
+    manifest = read_install_manifest(project, skill_dir)
     assert manifest["manifest_path"] == str(
         repo / ".codex" / "skills" / project.sidecar_manifest_name
     )
@@ -395,7 +396,7 @@ def test_reinstall_reports_upgrade_from_previous_manifest_version(
     installer = Installer(project)
     installer.install(["codex"], "repo", repo=repo)
     skill_dir = repo / ".codex" / "skills" / project.skill_name
-    manifest = read_manifest(project, skill_dir)
+    manifest = read_install_manifest(project, skill_dir)
     manifest["package_version"] = "0.0.0"
     write_manifest(project, skill_dir, manifest)
 
@@ -415,7 +416,7 @@ def test_reinstall_reports_downgrade_from_previous_manifest_version(
     installer = Installer(project)
     installer.install(["codex"], "repo", repo=repo)
     skill_dir = repo / ".codex" / "skills" / project.skill_name
-    manifest = read_manifest(project, skill_dir)
+    manifest = read_install_manifest(project, skill_dir)
     manifest["package_version"] = "9.0.0"
     write_manifest(project, skill_dir, manifest)
 
@@ -461,6 +462,32 @@ def test_install_refuses_to_replace_unowned_skill_dir(tmp_path: Path) -> None:
 
     with pytest.raises(InstallerError, match="unowned skill directory"):
         Installer(project).install(["codex"], "repo", repo=repo)
+
+
+def test_manifest_package_aliases_are_project_specific(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+    installer.install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    manifest = read_raw_manifest(project, skill_dir)
+    assert manifest is not None
+    manifest["package"] = "old-example-skill"
+    write_manifest(project, skill_dir, manifest)
+
+    with pytest.raises(InstallerError, match="not for example-agent-skill"):
+        read_raw_manifest(project, skill_dir)
+
+    compatible = SkillProject(
+        package_name=project.package_name,
+        import_name=project.import_name,
+        version=project.version,
+        skill_name=project.skill_name,
+        description=project.description,
+        bundled_skill_source=project.bundled_skill_source,
+        manifest_package_aliases=frozenset({"old-example-skill"}),
+    )
+    assert read_raw_manifest(compatible, skill_dir) is not None
 
 
 def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:

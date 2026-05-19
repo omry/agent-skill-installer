@@ -40,6 +40,7 @@ class SkillProject:
     bundled_skill_source: Path | None = None
     pypi_project_name: str | None = None
     pypi_base_url: str = PYPI_BASE_URL
+    manifest_package_aliases: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def marker_slug(self) -> str:
@@ -571,7 +572,8 @@ def read_manifest(
         raise InstallerError(f"invalid install manifest: {path}") from error
     if not isinstance(data, dict):
         raise InstallerError(f"install manifest must be a JSON object: {path}")
-    if data.get("package") != project.package_name:
+    accepted_packages = {project.package_name, *project.manifest_package_aliases}
+    if data.get("package") not in accepted_packages:
         raise InstallerError(
             f"install manifest is not for {project.package_name}: {path}"
         )
