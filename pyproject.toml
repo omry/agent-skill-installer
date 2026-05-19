@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-skill-installer"
-version = "0.1.2"
+version = "0.1.3"
 description = "Generic installer core for projects that distribute agent skills"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,12 @@ dependencies = [
   "omegaconf>=2.3.0",
   "textual>=0.89.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/omry/agent-skill-installer"
+Repository = "https://github.com/omry/agent-skill-installer"
+Issues = "https://github.com/omry/agent-skill-installer/issues"
+Documentation = "https://github.com/omry/agent-skill-installer#readme"
 
 [project.scripts]
 agent-skill-installer = "agent_skill_installer.__main__:main"
