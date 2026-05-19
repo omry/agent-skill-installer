@@ -63,7 +63,7 @@ def test_demo_installer_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
 
     assert install.returncode == 0, install.stderr
-    assert "installed: codex/repo version 0.1.0" in install.stdout
+    assert "Installed demo-agent-skill 0.1.0 to Codex repo:" in install.stdout
     skill_dir = repo / ".codex" / "skills" / "demo-agent-skill"
     assert "Demo Agent Skill" in skill_dir.joinpath("SKILL.md").read_text()
     hook = repo.joinpath("AGENTS.md").read_text()
@@ -88,7 +88,10 @@ def test_demo_installer_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
 
     assert uninstall.returncode == 0, uninstall.stderr
-    assert "removed: codex/repo version 0.1.0" in uninstall.stdout
+    assert (
+        "Removed demo-agent-skill 0.1.0 from Codex repo:"
+        in uninstall.stdout
+    )
     assert not skill_dir.exists()
 
 
@@ -113,7 +116,10 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
 
     assert install.returncode == 0, install.stderr
-    assert "installed: codex/repo version 0.1.0" in install.stdout
+    assert (
+        "Installed api-demo-agent-skill 0.1.0 to Codex repo:"
+        in install.stdout
+    )
     skill_dir = repo / ".codex" / "skills" / "api-demo-agent-skill"
     assert "API Demo Agent Skill" in skill_dir.joinpath("SKILL.md").read_text()
     hook = repo.joinpath("AGENTS.md").read_text()
@@ -136,5 +142,8 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
 
     assert uninstall.returncode == 0, uninstall.stderr
-    assert "removed: codex/repo version 0.1.0" in uninstall.stdout
+    assert (
+        "Removed api-demo-agent-skill 0.1.0 from Codex repo:"
+        in uninstall.stdout
+    )
     assert not skill_dir.exists()

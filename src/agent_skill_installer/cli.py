@@ -52,9 +52,21 @@ AGENT_TARGET_VALUES = set(AGENTS)
 INSTALLATION_TARGET_SEPARATOR = ":"
 TEXTUAL_APP_TITLE = "Agent Skill Installer"
 CommandPreviewBuilder = Callable[[object], str | None]
+PromptValidator = Callable[[str], str | None]
 PROMPT_BACK = "__agent_skill_installer_prompt_back__"
 NO_PYPI_VERSION_CHOICE = "__agent_skill_installer_no_pypi_versions__"
 DEFAULT_SUBMIT_LABEL = "Continue"
+DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE = "Complete the selections to build the no-UI command."
+ACTION_BUTTON_IDS = ("continue", "back", "quit")
+
+
+def focus_prompt_action(app, focused_id: str | None, button_type, offset: int) -> None:
+    try:
+        current_index = ACTION_BUTTON_IDS.index(focused_id or "")
+    except ValueError:
+        current_index = 0
+    target_id = ACTION_BUTTON_IDS[(current_index + offset) % len(ACTION_BUTTON_IDS)]
+    app.query_one(f"#{target_id}", button_type).focus()
 
 
 class Prompter(Protocol):
@@ -79,6 +91,7 @@ class Prompter(Protocol):
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
         summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
         default_values: Sequence[str] | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> list[str]:
@@ -92,6 +105,7 @@ class Prompter(Protocol):
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
         summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> Path:
         ...
@@ -103,6 +117,8 @@ class Prompter(Protocol):
         *,
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
+        summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> str:
         ...
@@ -115,6 +131,9 @@ class Prompter(Protocol):
         *,
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
+        summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
+        validator: PromptValidator | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> str:
         ...
@@ -165,6 +184,7 @@ class TextualPrompter:
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
         summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
         default_values: Sequence[str] | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> list[str]:
@@ -174,6 +194,7 @@ class TextualPrompter:
             command_preview=command_preview,
             command_preview_builder=command_preview_builder,
             summary=summary,
+            summary_builder=summary_builder,
             default_values=default_values,
             submit_label=submit_label,
         )
@@ -191,6 +212,7 @@ class TextualPrompter:
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
         summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> Path:
         result = run_textual_path(
@@ -199,6 +221,7 @@ class TextualPrompter:
             command_preview=command_preview,
             command_preview_builder=command_preview_builder,
             summary=summary,
+            summary_builder=summary_builder,
             submit_label=submit_label,
         )
         if result == PROMPT_BACK:
@@ -215,6 +238,8 @@ class TextualPrompter:
         *,
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
+        summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> str:
         result = run_textual_text(
@@ -222,6 +247,8 @@ class TextualPrompter:
             default,
             command_preview=command_preview,
             command_preview_builder=command_preview_builder,
+            summary=summary,
+            summary_builder=summary_builder,
             submit_label=submit_label,
         )
         if result == PROMPT_BACK:
@@ -239,6 +266,9 @@ class TextualPrompter:
         *,
         command_preview: str | None = None,
         command_preview_builder: CommandPreviewBuilder | None = None,
+        summary: str | None = None,
+        summary_builder: CommandPreviewBuilder | None = None,
+        validator: PromptValidator | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> str:
         result = run_textual_version(
@@ -247,6 +277,9 @@ class TextualPrompter:
             choices,
             command_preview=command_preview,
             command_preview_builder=command_preview_builder,
+            summary=summary,
+            summary_builder=summary_builder,
+            validator=validator,
             submit_label=submit_label,
         )
         if result == PROMPT_BACK:
@@ -266,12 +299,13 @@ def render_command_preview(
     Vertical,
     force: bool = False,
     empty_message: str = "",
+    preview_class: str | None = None,
 ):
     if not command_preview and not force:
         return
     with Vertical(
         id="command-preview",
-        classes=command_preview_classes(command_preview),
+        classes=preview_class or command_preview_classes(command_preview),
     ):
         with Horizontal(id="command-preview-header"):
             yield Static("Non-interactive command", id="command-preview-title")
@@ -292,7 +326,7 @@ def render_command_preview(
 def render_installation_summary(
     summary: str | None,
     *,
-    title: str = "Installed skills",
+    title: str = "Current selection",
     Static,
     Vertical,
 ):
@@ -315,21 +349,75 @@ def command_preview_classes(command_preview: str | None) -> str:
     return ""
 
 
-def update_command_preview_display(app, command_preview: str | None, Static) -> None:
+def command_preview_class_for_value(value: object) -> str:
+    text = str(value)
+    if text in {"install", "pypi", "github", "local", "editable"}:
+        return "install-preview"
+    if text == "uninstall":
+        return "uninstall-preview"
+    return ""
+
+
+def command_preview_class_for_summary(summary: str | None) -> str:
+    text = (summary or "").strip().lower()
+    if text.startswith("installing "):
+        return "install-preview"
+    if text.startswith("uninstalling ") or text.startswith("removing "):
+        return "uninstall-preview"
+    return ""
+
+
+def effective_command_preview_class(
+    command_preview: str | None,
+    value: object | None = None,
+    summary: str | None = None,
+) -> str:
+    return (
+        command_preview_classes(command_preview)
+        or (
+            command_preview_class_for_value(value)
+            if value is not None
+            else ""
+        )
+        or command_preview_class_for_summary(summary)
+    )
+
+
+def update_command_preview_display(
+    app,
+    command_preview: str | None,
+    Static,
+    *,
+    empty_message: str = "Choose at least one target.",
+    preview_class: str | None = None,
+) -> None:
     panels = list(app.query("#command-preview"))
     if not panels:
         return
     app.query_one("#command-preview-command", Static).update(
-        command_preview or "Choose at least one target."
+        command_preview or empty_message
     )
     for copy_button in app.query("#copy-command"):
         copy_button.disabled = not bool(command_preview)
     panel = panels[0]
+    existing_class = ""
+    for class_name in ("install-preview", "uninstall-preview"):
+        if (
+            panel.has_class(class_name)
+            if hasattr(panel, "has_class")
+            else class_name in getattr(panel, "classes", set())
+        ):
+            existing_class = class_name
+            break
     for class_name in ("install-preview", "uninstall-preview"):
         panel.remove_class(class_name)
-    preview_class = command_preview_classes(command_preview or "")
-    if preview_class:
-        panel.add_class(preview_class)
+    active_class = (
+        preview_class
+        or command_preview_classes(command_preview or "")
+        or existing_class
+    )
+    if active_class:
+        panel.add_class(active_class)
 
 
 def update_installation_summary_display(app, summary: str | None, Static) -> None:
@@ -406,6 +494,11 @@ def make_textual_select_app(
         if summary_builder is not None and values
         else summary
     )
+    initial_preview_class = effective_command_preview_class(
+        initial_command_preview,
+        values[0] if command_preview_builder is not None and values else None,
+        initial_summary,
+    )
     has_summary_panel = summary is not None or summary_builder is not None
 
     class PromptRadioSet(RadioSet):
@@ -420,11 +513,17 @@ def make_textual_select_app(
             selected_index = getattr(self, "_selected", -1)
             return selected_index if isinstance(selected_index, int) else -1
 
+        def sync_active_option(self) -> None:
+            selected_index = self.current_option_index()
+            if selected_index >= 0:
+                self.app.update_active_choice(selected_index)
+
         def press_current_option(self) -> None:
             selected_index = self.current_option_index()
             if selected_index < 0:
                 return
             self._nodes[selected_index].value = True
+            self.app.update_active_choice(selected_index)
 
         def on_key(self, event: events.Key) -> None:
             if event.key == "space":
@@ -441,19 +540,23 @@ def make_textual_select_app(
                 self.app.action_focus_actions()
                 return
             super().action_next_button()
+            self.sync_active_option()
 
         def focus_last_option(self) -> None:
             while self.current_option_index() < len(values) - 1:
                 super().action_next_button()
+            self.sync_active_option()
 
         def focus_first_option(self) -> None:
             while self.current_option_index() > 0:
                 super().action_previous_button()
+            self.sync_active_option()
 
         def action_previous_button(self) -> None:
             if self.current_option_index() <= 0:
                 return
             super().action_previous_button()
+            self.sync_active_option()
 
         def action_select_current_option(self) -> None:
             self.press_current_option()
@@ -492,6 +595,7 @@ def make_textual_select_app(
             ("down", "focus_actions", "Actions"),
             Binding("escape", "back", "Back", key_display="ESC"),
             ("ctrl+c", "copy_or_cancel", "Copy"),
+            Binding("ctrl+q", "quit_prompt", "Quit", key_display="Ctrl+Q"),
         ]
         current_command_preview = initial_command_preview
         ctrl_c_copied = False
@@ -499,19 +603,22 @@ def make_textual_select_app(
         def compose(self) -> ComposeResult:
             self.title = TEXTUAL_APP_TITLE
             yield Header()
-            yield from render_command_preview(
-                self.current_command_preview,
-                Button=CopyButton,
-                Horizontal=Horizontal,
-                Static=Static,
-                Vertical=Vertical,
-            )
             if has_summary_panel:
                 yield from render_installation_summary(
                     initial_summary,
                     Static=Static,
                     Vertical=Vertical,
                 )
+            yield from render_command_preview(
+                self.current_command_preview,
+                Button=CopyButton,
+                Horizontal=Horizontal,
+                Static=Static,
+                Vertical=Vertical,
+                force=command_preview_builder is not None,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=initial_preview_class,
+            )
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
                 with PromptRadioSet(id="choice"):
@@ -521,7 +628,8 @@ def make_textual_select_app(
                     yield Static(choice_details[0], id="choice-details")
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
-                    yield PromptButton("Cancel", id="cancel")
+                    yield PromptButton("Back (ESC)", id="back")
+                    yield PromptButton("Quit Ctrl+Q", id="quit")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -532,7 +640,7 @@ def make_textual_select_app(
         def focused_id(self) -> str | None:
             return getattr(self.screen.focused, "id", None)
 
-        def action_cancel(self) -> None:
+        def action_quit_prompt(self) -> None:
             self.exit(None)
 
         def action_back(self) -> None:
@@ -570,18 +678,26 @@ def make_textual_select_app(
             self.exit(str(values[selected_index or 0]))
 
         def action_focus_previous_action(self) -> None:
-            target = "#continue" if self.focused_id() == "cancel" else "#cancel"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, -1)
 
         def action_focus_next_action(self) -> None:
-            target = "#cancel" if self.focused_id() == "continue" else "#continue"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, 1)
 
         def update_command_preview(self, value: str) -> None:
             if command_preview_builder is None:
                 return
             self.current_command_preview = command_preview_builder(value)
-            update_command_preview_display(self, self.current_command_preview, Static)
+            update_command_preview_display(
+                self,
+                self.current_command_preview,
+                Static,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=effective_command_preview_class(
+                    self.current_command_preview,
+                    value,
+                    summary_builder(value) if summary_builder is not None else summary,
+                ),
+            )
 
         def update_installation_summary(self, value: str) -> None:
             if summary_builder is None:
@@ -594,19 +710,26 @@ def make_textual_select_app(
             detail = choice_details[selected_index] if selected_index >= 0 else ""
             self.query_one("#choice-details", Static).update(detail)
 
+        def update_active_choice(self, selected_index: int) -> None:
+            if selected_index < 0:
+                return
+            value = str(values[selected_index])
+            self.update_command_preview(value)
+            self.update_installation_summary(value)
+            self.update_choice_details(selected_index)
+
         def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
             selected_index = event.radio_set.pressed_index
-            if selected_index >= 0:
-                value = str(values[selected_index])
-                self.update_command_preview(value)
-                self.update_installation_summary(value)
-                self.update_choice_details(selected_index)
+            self.update_active_choice(selected_index)
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "copy-command":
                 copy_command_to_clipboard(self, self.current_command_preview)
                 return
-            if event.button.id == "cancel":
+            if event.button.id == "back":
+                self.exit(PROMPT_BACK)
+                return
+            if event.button.id == "quit":
                 self.exit(None)
                 return
             if event.button.id == "continue":
@@ -623,6 +746,7 @@ def run_textual_checkbox(
     command_preview: str | None = None,
     command_preview_builder: CommandPreviewBuilder | None = None,
     summary: str | None = None,
+    summary_builder: CommandPreviewBuilder | None = None,
     default_values: Sequence[str] | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> list[str] | None:
@@ -632,6 +756,7 @@ def run_textual_checkbox(
         command_preview=command_preview,
         command_preview_builder=command_preview_builder,
         summary=summary,
+        summary_builder=summary_builder,
         default_values=default_values,
         submit_label=submit_label,
     ).run()
@@ -644,6 +769,7 @@ def make_textual_checkbox_app(
     command_preview: str | None = None,
     command_preview_builder: CommandPreviewBuilder | None = None,
     summary: str | None = None,
+    summary_builder: CommandPreviewBuilder | None = None,
     default_values: Sequence[str] | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ):
@@ -684,6 +810,16 @@ def make_textual_checkbox_app(
         if command_preview_builder is not None
         else command_preview
     )
+    initial_summary = (
+        summary_builder(initial_selected_values)
+        if summary_builder is not None
+        else summary
+    )
+    initial_preview_class = effective_command_preview_class(
+        initial_command_preview,
+        summary=initial_summary,
+    )
+    has_summary_panel = summary is not None or summary_builder is not None
 
     class PromptSelectionList(SelectionList[str]):
         BINDINGS = [
@@ -748,6 +884,7 @@ def make_textual_checkbox_app(
         BINDINGS = [
             Binding("escape", "back", "Back", key_display="ESC"),
             ("ctrl+c", "copy_or_cancel", "Copy"),
+            Binding("ctrl+q", "quit_prompt", "Quit", key_display="Ctrl+Q"),
         ]
         all_mode = False
         syncing_all = False
@@ -758,6 +895,12 @@ def make_textual_checkbox_app(
         def compose(self) -> ComposeResult:
             self.title = TEXTUAL_APP_TITLE
             yield Header()
+            if has_summary_panel:
+                yield from render_installation_summary(
+                    initial_summary,
+                    Static=Static,
+                    Vertical=Vertical,
+                )
             yield from render_command_preview(
                 self.current_command_preview,
                 Button=Button,
@@ -766,26 +909,24 @@ def make_textual_checkbox_app(
                 Vertical=Vertical,
                 force=command_preview_builder is not None,
                 empty_message="Choose at least one target.",
+                preview_class=initial_preview_class,
             )
-            if summary is not None:
-                yield from render_installation_summary(
-                    summary,
-                    Static=Static,
-                    Vertical=Vertical,
-                )
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
                 yield PromptSelectionList(*selections, id="choices")
                 yield Static("", id="error")
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
-                    yield PromptButton("Cancel", id="cancel")
+                    yield PromptButton("Back (ESC)", id="back")
+                    yield PromptButton("Quit Ctrl+Q", id="quit")
             yield Footer()
 
         def on_mount(self) -> None:
             choices_list = self.query_one("#choices", PromptSelectionList)
             if has_all_control and TARGET_ALL in initial_selected_values:
                 self.enable_all_mode(choices_list)
+                if has_summary_panel:
+                    update_installation_summary_display(self, initial_summary, Static)
                 choices_list.focus()
                 return
             self.syncing_all = True
@@ -795,11 +936,13 @@ def make_textual_checkbox_app(
             finally:
                 self.syncing_all = False
             choices_list.focus()
+            if has_summary_panel:
+                update_installation_summary_display(self, initial_summary, Static)
 
         def focused_id(self) -> str | None:
             return getattr(self.screen.focused, "id", None)
 
-        def action_cancel(self) -> None:
+        def action_quit_prompt(self) -> None:
             self.exit(None)
 
         def action_back(self) -> None:
@@ -812,12 +955,10 @@ def make_textual_checkbox_app(
             self.query_one("#choices", PromptSelectionList).focus()
 
         def action_focus_previous_action(self) -> None:
-            target = "#continue" if self.focused_id() == "cancel" else "#cancel"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, -1)
 
         def action_focus_next_action(self) -> None:
-            target = "#cancel" if self.focused_id() == "continue" else "#continue"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, 1)
 
         def selected_values(self, choices_list: PromptSelectionList) -> list[str]:
             return [str(item) for item in choices_list.selected]
@@ -831,7 +972,32 @@ def make_textual_checkbox_app(
             self.current_command_preview = command_preview_builder(
                 self.selected_values(choices_list)
             )
-            update_command_preview_display(self, self.current_command_preview, Static)
+            selected = self.selected_values(choices_list)
+            update_command_preview_display(
+                self,
+                self.current_command_preview,
+                Static,
+                preview_class=effective_command_preview_class(
+                    self.current_command_preview,
+                    summary=(
+                        summary_builder(selected)
+                        if summary_builder is not None
+                        else summary
+                    ),
+                ),
+            )
+
+        def update_installation_summary(
+            self,
+            choices_list: PromptSelectionList,
+        ) -> None:
+            if summary_builder is None:
+                return
+            update_installation_summary_display(
+                self,
+                summary_builder(self.selected_values(choices_list)),
+                Static,
+            )
 
         def on_selection_list_selection_toggled(
             self,
@@ -874,6 +1040,7 @@ def make_textual_checkbox_app(
             event: SelectionList.SelectedChanged[str],
         ) -> None:
             self.update_command_preview(event.selection_list)
+            self.update_installation_summary(event.selection_list)
 
         def enable_all_mode(self, choices_list: PromptSelectionList) -> None:
             self.all_mode = True
@@ -917,7 +1084,10 @@ def make_textual_checkbox_app(
                     return
                 copy_command_to_clipboard(self, self.current_command_preview)
                 return
-            if event.button.id == "cancel":
+            if event.button.id == "back":
+                self.exit(PROMPT_BACK)
+                return
+            if event.button.id == "quit":
                 self.exit(None)
                 return
             if event.button.id != "continue":
@@ -943,6 +1113,7 @@ def run_textual_path(
     command_preview: str | None = None,
     command_preview_builder: CommandPreviewBuilder | None = None,
     summary: str | None = None,
+    summary_builder: CommandPreviewBuilder | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> str | None:
     from textual.app import App, ComposeResult
@@ -955,6 +1126,16 @@ def run_textual_path(
         if command_preview_builder is not None
         else command_preview
     )
+    initial_summary = (
+        summary_builder(default)
+        if summary_builder is not None
+        else summary
+    )
+    initial_preview_class = effective_command_preview_class(
+        initial_command_preview,
+        summary=initial_summary,
+    )
+    has_summary_panel = summary is not None or summary_builder is not None
 
     class PromptInput(Input):
         BINDINGS = [
@@ -985,6 +1166,7 @@ def run_textual_path(
         BINDINGS = [
             Binding("escape", "back", "Back", key_display="ESC"),
             ("ctrl+c", "copy_or_cancel", "Copy"),
+            Binding("ctrl+q", "quit_prompt", "Quit", key_display="Ctrl+Q"),
         ]
         current_command_preview = initial_command_preview
         ctrl_c_copied = False
@@ -992,31 +1174,39 @@ def run_textual_path(
         def compose(self) -> ComposeResult:
             self.title = TEXTUAL_APP_TITLE
             yield Header()
+            if has_summary_panel:
+                yield from render_installation_summary(
+                    initial_summary,
+                    Static=Static,
+                    Vertical=Vertical,
+                )
             yield from render_command_preview(
                 self.current_command_preview,
                 Button=Button,
                 Horizontal=Horizontal,
                 Static=Static,
                 Vertical=Vertical,
+                force=command_preview_builder is not None,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=initial_preview_class,
             )
-            if summary is not None:
-                yield from render_installation_summary(
-                    summary,
-                    Static=Static,
-                    Vertical=Vertical,
-                )
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
                 yield PromptInput(value=str(default), id="path")
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
-                    yield PromptButton("Cancel", id="cancel")
+                    yield PromptButton("Back (ESC)", id="back")
+                    yield PromptButton("Quit Ctrl+Q", id="quit")
             yield Footer()
+
+        def on_mount(self) -> None:
+            if has_summary_panel:
+                update_installation_summary_display(self, initial_summary, Static)
 
         def focused_id(self) -> str | None:
             return getattr(self.screen.focused, "id", None)
 
-        def action_cancel(self) -> None:
+        def action_quit_prompt(self) -> None:
             self.exit(None)
 
         def action_back(self) -> None:
@@ -1032,22 +1222,45 @@ def run_textual_path(
             self.query_one("#path", PromptInput).focus()
 
         def action_focus_previous_action(self) -> None:
-            target = "#continue" if self.focused_id() == "cancel" else "#cancel"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, -1)
 
         def action_focus_next_action(self) -> None:
-            target = "#cancel" if self.focused_id() == "continue" else "#continue"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, 1)
 
         def update_command_preview(self, value: str) -> None:
             if command_preview_builder is None:
                 return
             path = Path(value).expanduser() if value.strip() else default
             self.current_command_preview = command_preview_builder(path)
-            update_command_preview_display(self, self.current_command_preview, Static)
+            current_summary = (
+                summary_builder(path)
+                if summary_builder is not None
+                else summary
+            )
+            update_command_preview_display(
+                self,
+                self.current_command_preview,
+                Static,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=effective_command_preview_class(
+                    self.current_command_preview,
+                    summary=current_summary,
+                ),
+            )
+
+        def update_installation_summary(self, value: str) -> None:
+            if summary_builder is None:
+                return
+            path = Path(value).expanduser() if value.strip() else default
+            update_installation_summary_display(
+                self,
+                summary_builder(path),
+                Static,
+            )
 
         def on_input_changed(self, event: Input.Changed) -> None:
             self.update_command_preview(event.value)
+            self.update_installation_summary(event.value)
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
             self.exit(event.value.strip() or str(default))
@@ -1056,7 +1269,10 @@ def run_textual_path(
             if event.button.id == "copy-command":
                 copy_command_to_clipboard(self, self.current_command_preview)
                 return
-            if event.button.id == "cancel":
+            if event.button.id == "back":
+                self.exit(PROMPT_BACK)
+                return
+            if event.button.id == "quit":
                 self.exit(None)
                 return
             if event.button.id == "continue":
@@ -1072,6 +1288,8 @@ def run_textual_text(
     *,
     command_preview: str | None = None,
     command_preview_builder: CommandPreviewBuilder | None = None,
+    summary: str | None = None,
+    summary_builder: CommandPreviewBuilder | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> str | None:
     from textual.app import App, ComposeResult
@@ -1084,6 +1302,16 @@ def run_textual_text(
         if command_preview_builder is not None
         else command_preview
     )
+    initial_summary = (
+        summary_builder(default)
+        if summary_builder is not None
+        else summary
+    )
+    initial_preview_class = effective_command_preview_class(
+        initial_command_preview,
+        summary=initial_summary,
+    )
+    has_summary_panel = summary is not None or summary_builder is not None
 
     class PromptInput(Input):
         BINDINGS = [
@@ -1114,6 +1342,7 @@ def run_textual_text(
         BINDINGS = [
             Binding("escape", "back", "Back", key_display="ESC"),
             ("ctrl+c", "copy_or_cancel", "Copy"),
+            Binding("ctrl+q", "quit_prompt", "Quit", key_display="Ctrl+Q"),
         ]
         current_command_preview = initial_command_preview
         ctrl_c_copied = False
@@ -1121,25 +1350,39 @@ def run_textual_text(
         def compose(self) -> ComposeResult:
             self.title = TEXTUAL_APP_TITLE
             yield Header()
+            if has_summary_panel:
+                yield from render_installation_summary(
+                    initial_summary,
+                    Static=Static,
+                    Vertical=Vertical,
+                )
             yield from render_command_preview(
                 self.current_command_preview,
                 Button=Button,
                 Horizontal=Horizontal,
                 Static=Static,
                 Vertical=Vertical,
+                force=command_preview_builder is not None,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=initial_preview_class,
             )
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
                 yield PromptInput(value=default, id="text")
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
-                    yield PromptButton("Cancel", id="cancel")
+                    yield PromptButton("Back (ESC)", id="back")
+                    yield PromptButton("Quit Ctrl+Q", id="quit")
             yield Footer()
+
+        def on_mount(self) -> None:
+            if has_summary_panel:
+                update_installation_summary_display(self, initial_summary, Static)
 
         def focused_id(self) -> str | None:
             return getattr(self.screen.focused, "id", None)
 
-        def action_cancel(self) -> None:
+        def action_quit_prompt(self) -> None:
             self.exit(None)
 
         def action_back(self) -> None:
@@ -1155,22 +1398,45 @@ def run_textual_text(
             self.query_one("#text", PromptInput).focus()
 
         def action_focus_previous_action(self) -> None:
-            target = "#continue" if self.focused_id() == "cancel" else "#cancel"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, -1)
 
         def action_focus_next_action(self) -> None:
-            target = "#cancel" if self.focused_id() == "continue" else "#continue"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, 1)
 
         def update_command_preview(self, value: str) -> None:
             if command_preview_builder is None:
                 return
             text = value.strip() or default
             self.current_command_preview = command_preview_builder(text)
-            update_command_preview_display(self, self.current_command_preview, Static)
+            current_summary = (
+                summary_builder(text)
+                if summary_builder is not None
+                else summary
+            )
+            update_command_preview_display(
+                self,
+                self.current_command_preview,
+                Static,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=effective_command_preview_class(
+                    self.current_command_preview,
+                    summary=current_summary,
+                ),
+            )
+
+        def update_installation_summary(self, value: str) -> None:
+            if summary_builder is None:
+                return
+            text = value.strip() or default
+            update_installation_summary_display(
+                self,
+                summary_builder(text),
+                Static,
+            )
 
         def on_input_changed(self, event: Input.Changed) -> None:
             self.update_command_preview(event.value)
+            self.update_installation_summary(event.value)
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
             self.exit(event.value.strip() or default)
@@ -1179,7 +1445,10 @@ def run_textual_text(
             if event.button.id == "copy-command":
                 copy_command_to_clipboard(self, self.current_command_preview)
                 return
-            if event.button.id == "cancel":
+            if event.button.id == "back":
+                self.exit(PROMPT_BACK)
+                return
+            if event.button.id == "quit":
                 self.exit(None)
                 return
             if event.button.id == "continue":
@@ -1196,6 +1465,9 @@ def run_textual_version(
     *,
     command_preview: str | None = None,
     command_preview_builder: CommandPreviewBuilder | None = None,
+    summary: str | None = None,
+    summary_builder: CommandPreviewBuilder | None = None,
+    validator: PromptValidator | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> str | None:
     return make_textual_version_app(
@@ -1204,6 +1476,9 @@ def run_textual_version(
         choices,
         command_preview=command_preview,
         command_preview_builder=command_preview_builder,
+        summary=summary,
+        summary_builder=summary_builder,
+        validator=validator,
         submit_label=submit_label,
     ).run()
 
@@ -1215,77 +1490,78 @@ def make_textual_version_app(
     *,
     command_preview: str | None = None,
     command_preview_builder: CommandPreviewBuilder | None = None,
+    summary: str | None = None,
+    summary_builder: CommandPreviewBuilder | None = None,
+    validator: PromptValidator | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ):
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
-    from textual.widgets import Button, Footer, Header, Input, Select, Static
+    from textual.widgets import Button, Footer, Header, Input, OptionList, Static
 
-    option_values = [choice["value"] for choice in choices]
-    select_options = (
-        [(choice["name"], choice["value"]) for choice in choices]
-        if choices
-        else [("No published versions found", NO_PYPI_VERSION_CHOICE)]
-    )
-    dropdown_enabled = bool(choices)
-    selected_value = default if default in option_values else (
-        option_values[0] if option_values else NO_PYPI_VERSION_CHOICE
-    )
+    option_values = [str(choice["value"]) for choice in choices]
+    initial_value = default or (option_values[0] if option_values else "")
     initial_command_preview = (
-        command_preview_builder(default)
+        command_preview_builder(initial_value)
         if command_preview_builder is not None
         else command_preview
     )
+    initial_summary = (
+        summary_builder(initial_value)
+        if summary_builder is not None
+        else summary
+    )
+    initial_preview_class = effective_command_preview_class(
+        initial_command_preview,
+        summary=initial_summary,
+    )
+    has_summary_panel = summary is not None or summary_builder is not None
 
     class VersionInput(Input):
         BINDINGS = [
-            ("left", "focus_version_select", "Versions"),
             ("up", "focus_copy_command", "Copy command"),
-            ("down", "focus_input_action", "Actions"),
+            ("down", "focus_version_options", "Suggestions"),
         ]
-
-        def action_focus_version_select(self) -> None:
-            self.app.action_focus_version_select()
 
         def action_focus_copy_command(self) -> None:
             self.app.action_focus_copy_command()
 
-        def action_focus_input_action(self) -> None:
-            self.app.action_focus_input_action()
+        def action_focus_version_options(self) -> None:
+            self.app.action_focus_version_options()
 
-        def action_cursor_left(self, select: bool = False) -> None:
-            self.app.action_focus_version_select()
-
-        def action_delete_left(self) -> None:
-            if not self.value:
-                return
-            self.value = self.value[:-1]
-            self.cursor_position = len(self.value)
-
-    class VersionSelect(Select[str]):
+    class VersionOptions(OptionList):
         BINDINGS = [
-            ("right", "focus_version_input", "Input"),
-            ("up", "focus_copy_command", "Copy command"),
-            ("down", "focus_select_action", "Actions"),
+            Binding("up", "cursor_up_or_input", "Up", show=False),
+            Binding("down", "cursor_down_or_actions", "Down", show=False),
+            Binding("enter", "select", "Select", show=False),
+            Binding("left,right", "focus_version_input", "Version", show=False),
         ]
+
+        def action_cursor_up_or_input(self) -> None:
+            highlighted = self.highlighted
+            if highlighted is None or highlighted <= 0:
+                self.app.action_focus_version_input()
+                return
+            self.action_cursor_up()
+
+        def action_cursor_down_or_actions(self) -> None:
+            highlighted = self.highlighted
+            if highlighted is None or highlighted >= self.option_count - 1:
+                self.app.action_focus_actions()
+                return
+            self.action_cursor_down()
 
         def action_focus_version_input(self) -> None:
             self.app.action_focus_version_input()
 
-        def action_focus_copy_command(self) -> None:
-            self.app.action_focus_copy_command()
-
-        def action_focus_select_action(self) -> None:
-            self.app.action_focus_select_action()
-
     class CopyButton(Button):
         BINDINGS = [
-            ("down", "focus_version_select", "Versions"),
+            ("down", "focus_version_input", "Version"),
         ]
 
-        def action_focus_version_select(self) -> None:
-            self.app.action_focus_version_select()
+        def action_focus_version_input(self) -> None:
+            self.app.action_focus_version_input()
 
     class PromptButton(Button):
         BINDINGS = [
@@ -1308,6 +1584,7 @@ def make_textual_version_app(
         BINDINGS = [
             Binding("escape", "back", "Back", key_display="ESC"),
             ("ctrl+c", "copy_or_cancel", "Copy"),
+            Binding("ctrl+q", "quit_prompt", "Quit", key_display="Ctrl+Q"),
         ]
         current_command_preview = initial_command_preview
         ctrl_c_copied = False
@@ -1315,48 +1592,69 @@ def make_textual_version_app(
         def compose(self) -> ComposeResult:
             self.title = TEXTUAL_APP_TITLE
             yield Header()
+            if has_summary_panel:
+                yield from render_installation_summary(
+                    initial_summary,
+                    Static=Static,
+                    Vertical=Vertical,
+                )
             yield from render_command_preview(
                 self.current_command_preview,
                 Button=CopyButton,
                 Horizontal=Horizontal,
                 Static=Static,
                 Vertical=Vertical,
+                force=command_preview_builder is not None,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=initial_preview_class,
             )
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
-                with Horizontal(id="version-row"):
-                    yield VersionSelect(
-                        select_options,
-                        prompt="Published versions",
-                        allow_blank=False,
-                        value=selected_value,
-                        id="version-select",
-                        disabled=not dropdown_enabled,
-                    )
-                    yield VersionInput(
-                        value=default,
-                        placeholder="Manual version",
-                        id="version",
-                    )
+                yield VersionInput(
+                    value=initial_value,
+                    placeholder=message,
+                    select_on_focus=False,
+                    id="version",
+                )
+                if option_values:
+                    yield VersionOptions(*option_values, id="version-options")
+                yield Static("", id="error")
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
-                    yield PromptButton("Cancel", id="cancel")
+                    yield PromptButton("Back (ESC)", id="back")
+                    yield PromptButton("Quit Ctrl+Q", id="quit")
             yield Footer()
 
         def on_mount(self) -> None:
-            if dropdown_enabled:
-                self.action_focus_version_select()
-            else:
-                self.action_focus_version_input()
+            if has_summary_panel:
+                update_installation_summary_display(self, initial_summary, Static)
+            self.action_focus_version_input()
 
         def focused_id(self) -> str | None:
             return getattr(self.screen.focused, "id", None)
 
         def current_value(self) -> str:
             value = self.query_one("#version", VersionInput).value.strip()
-            return value or default
+            return value or initial_value
 
-        def action_cancel(self) -> None:
+        def filtered_versions(self, value: str) -> list[str]:
+            query = value.strip().lower()
+            if not query or value.strip() == initial_value:
+                return option_values
+            return [
+                option
+                for option in option_values
+                if query in option.lower()
+            ]
+
+        def refresh_version_options(self, value: str) -> None:
+            options = self.query_one("#version-options", VersionOptions)
+            filtered = self.filtered_versions(value)
+            options.set_options(filtered)
+            if filtered:
+                options.highlighted = 0
+
+        def action_quit_prompt(self) -> None:
             self.exit(None)
 
         def action_back(self) -> None:
@@ -1368,12 +1666,6 @@ def make_textual_version_app(
         def action_focus_actions(self) -> None:
             self.query_one("#continue", PromptButton).focus()
 
-        def action_focus_select_action(self) -> None:
-            self.query_one("#continue", PromptButton).focus()
-
-        def action_focus_input_action(self) -> None:
-            self.query_one("#cancel", PromptButton).focus()
-
         def action_focus_copy_command(self) -> None:
             return
 
@@ -1382,60 +1674,118 @@ def make_textual_version_app(
             version_input.focus()
             version_input.cursor_position = len(version_input.value)
 
-        def action_focus_version_select(self) -> None:
-            version_select = self.query_one("#version-select", VersionSelect)
-            if version_select.disabled:
-                self.action_focus_version_input()
+        def action_focus_version_options(self) -> None:
+            options = self.query_one_optional("#version-options", VersionOptions)
+            if options is None or not options.display or options.option_count == 0:
+                self.action_focus_actions()
                 return
-            version_select.focus()
+            if options.highlighted is None:
+                options.highlighted = 0
+            options.focus()
 
         def action_focus_options(self) -> None:
-            if self.focused_id() == "cancel":
-                self.action_focus_version_input()
+            if self.focused_id() == "continue":
+                self.action_focus_version_options()
             else:
-                self.action_focus_version_select()
+                self.action_focus_version_input()
 
         def action_focus_previous_action(self) -> None:
-            target = "#continue" if self.focused_id() == "cancel" else "#cancel"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, -1)
 
         def action_focus_next_action(self) -> None:
-            target = "#cancel" if self.focused_id() == "continue" else "#continue"
-            self.query_one(target, PromptButton).focus()
+            focus_prompt_action(self, self.focused_id(), PromptButton, 1)
 
         def update_command_preview(self, value: str) -> None:
             if command_preview_builder is None:
                 return
             self.current_command_preview = command_preview_builder(
-                value.strip() or default
+                value.strip() or initial_value
             )
-            update_command_preview_display(self, self.current_command_preview, Static)
+            selected = value.strip() or initial_value
+            current_summary = (
+                summary_builder(selected)
+                if summary_builder is not None
+                else summary
+            )
+            update_command_preview_display(
+                self,
+                self.current_command_preview,
+                Static,
+                empty_message=DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
+                preview_class=effective_command_preview_class(
+                    self.current_command_preview,
+                    summary=current_summary,
+                ),
+            )
+
+        def update_installation_summary(self, value: str) -> None:
+            if summary_builder is None:
+                return
+            update_installation_summary_display(
+                self,
+                summary_builder(value.strip() or initial_value),
+                Static,
+            )
 
         def on_input_changed(self, event: Input.Changed) -> None:
             if event.input.id == "version":
+                self.query_one("#error", Static).update("")
                 self.update_command_preview(event.value)
+                self.update_installation_summary(event.value)
+                if option_values:
+                    self.refresh_version_options(event.value)
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
             if event.input.id == "version":
-                self.exit(event.value.strip() or default)
+                self.accept_value(event.value)
 
-        def on_select_changed(self, event: Select.Changed) -> None:
-            if event.select.id != "version-select":
+        def on_option_list_option_selected(
+            self,
+            event: OptionList.OptionSelected,
+        ) -> None:
+            if event.option_list.id != "version-options":
                 return
-            if event.value in {Select.NULL, NO_PYPI_VERSION_CHOICE}:
+            versions = self.filtered_versions(
+                self.query_one("#version", VersionInput).value
+            )
+            selected_index = event.option_index
+            if selected_index >= len(versions):
                 return
+            version = versions[selected_index]
             version_input = self.query_one("#version", VersionInput)
-            version_input.value = str(event.value)
-            version_input.cursor_position = len(version_input.value)
+            version_input.value = version
+            self.update_command_preview(version)
+            self.update_installation_summary(version)
+            self.accept_value(version)
 
         def action_accept_version(self) -> None:
-            self.exit(self.current_value())
+            self.accept_value(self.current_value())
+
+        def validation_error(self, value: str) -> str | None:
+            if validator is None:
+                return None
+            try:
+                return validator(value)
+            except (InstallerError, UsageError) as error:
+                return str(error)
+
+        def accept_value(self, value: str) -> None:
+            selected = value.strip() or initial_value
+            error = self.validation_error(selected)
+            if error:
+                self.query_one("#error", Static).update(error)
+                self.action_focus_version_input()
+                return
+            self.exit(selected)
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "copy-command":
                 copy_command_to_clipboard(self, self.current_command_preview)
                 return
-            if event.button.id == "cancel":
+            if event.button.id == "back":
+                self.exit(PROMPT_BACK)
+                return
+            if event.button.id == "quit":
                 self.exit(None)
                 return
             if event.button.id == "continue":
@@ -1446,28 +1796,30 @@ def make_textual_version_app(
 
 PROMPT_CSS = """
 Screen {
-    align: center middle;
+    layout: vertical;
+    padding: 1 2;
 }
 
 #command-preview,
 #installation-summary,
 #dialog {
-    width: 96;
-    max-width: 96%;
+    width: 100%;
+    max-width: 100%;
     height: auto;
     padding: 1 2;
     border: solid $accent;
 }
 
 #command-preview {
+    height: 11;
     margin-bottom: 1;
 }
 
 #installation-summary {
     margin-bottom: 1;
-    background: #eda9a9;
-    color: #2c1010;
-    border: solid #b64242;
+    background: #cfefff;
+    color: #0b2a3a;
+    border: solid #5aaed6;
 }
 
 #installation-summary-title {
@@ -1477,7 +1829,7 @@ Screen {
 
 #installation-summary-content {
     width: 100%;
-    color: #302222;
+    color: #12384a;
 }
 
 #command-preview.install-preview {
@@ -1504,6 +1856,7 @@ Screen {
 
 #command-preview-command {
     width: 100%;
+    height: 3;
     color: $text-muted;
 }
 
@@ -1531,17 +1884,8 @@ Screen {
     margin-top: 1;
 }
 
-#version-row {
-    height: auto;
-}
-
-#version-select {
-    width: 1fr;
-    margin-right: 1;
-}
-
 #version {
-    width: 1fr;
+    width: 100%;
 }
 
 #error {
@@ -1551,8 +1895,15 @@ Screen {
 
 Select,
 Input,
+OptionList,
 SelectionList {
     width: 100%;
+}
+
+#version-options {
+    height: 8;
+    margin-top: 1;
+    border: round $accent;
 }
 
 RadioSet {
@@ -1658,6 +2009,24 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
                     "its bundled skill files without installing the package."
                 ),
             )
+            subparser.add_argument(
+                "--github-url",
+                metavar="URL",
+                help=(
+                    "Download a GitHub repository archive and install SKILL.md "
+                    "from the repository root, skill/, or a tree URL path."
+                ),
+            )
+            subparser.add_argument(
+                "--github-ref",
+                metavar="REF",
+                help="Git ref to archive when --github-url points at a repository root.",
+            )
+            subparser.add_argument(
+                "--github-path",
+                metavar="PATH",
+                help="Skill directory inside the GitHub archive.",
+            )
     return parser
 
 
@@ -1693,6 +2062,13 @@ def install_source_choices(project: SkillProject) -> list[dict[str, str]]:
                 "(requires network; choose published or manual version)"
             ),
             "value": "pypi",
+        },
+        {
+            "name": (
+                "GitHub repository URL "
+                "(requires network; accepts root or /tree/ref/path URLs)"
+            ),
+            "value": "github",
         },
     ]
     if not metadata.editable_available:
@@ -1856,6 +2232,9 @@ def build_no_ui_command(
     scope: str | None = None,
     editable: bool | None = None,
     pypi_version: str | None = None,
+    github_url: str | None = None,
+    github_ref: str | None = None,
+    github_path: str | None = None,
     repo: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
@@ -1881,6 +2260,9 @@ def build_no_ui_command(
                     agent=agent,
                     editable=editable,
                     pypi_version=pypi_version,
+                    github_url=github_url,
+                    github_ref=github_ref,
+                    github_path=github_path,
                     repo=repo,
                     codex_home=codex_home,
                     claude_home=claude_home,
@@ -1906,7 +2288,21 @@ def build_no_ui_command(
         if pypi_version is not None
         else getattr(args, "pypi_version", None)
     )
-
+    github_url = (
+        github_url
+        if github_url is not None
+        else getattr(args, "github_url", None)
+    )
+    github_ref = (
+        github_ref
+        if github_ref is not None
+        else getattr(args, "github_ref", None)
+    )
+    github_path = (
+        github_path
+        if github_path is not None
+        else getattr(args, "github_path", None)
+    )
     parts: list[object] = [project.command_name, "--no-ui", command]
     if bool(getattr(args, "verbose", False)):
         parts.append("--verbose")
@@ -1917,6 +2313,12 @@ def build_no_ui_command(
             parts.append("--editable")
         elif pypi_version:
             parts.extend(["--pypi-version", pypi_version])
+        elif github_url:
+            parts.extend(["--github-url", github_url])
+            if github_ref:
+                parts.extend(["--github-ref", github_ref])
+            if github_path:
+                parts.extend(["--github-path", github_path])
 
     parts.extend(["--agent", agent, "--scope", scope])
 
@@ -2141,9 +2543,9 @@ def installation_option_choices(
         return choices
 
     installed_by_target = (
-            installed_statuses_by_target(
-                project,
-                repo=repo,
+        installed_statuses_by_target(
+            project,
+            repo=repo,
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
@@ -2417,6 +2819,9 @@ def complete_with_ui(
                     "command",
                     "editable",
                     "pypi_version",
+                    "github_url",
+                    "github_ref",
+                    "github_path",
                     "scope",
                     "selected_agents",
                     "targets",
@@ -2439,6 +2844,7 @@ def complete_with_ui(
             args.command == "install"
             and getattr(args, "editable", None) is None
             and getattr(args, "pypi_version", None) is None
+            and getattr(args, "github_url", None) is None
         ):
             source_choices = install_source_choices(project)
             if len(source_choices) > 1:
@@ -2451,10 +2857,15 @@ def complete_with_ui(
                         pypi_version=(
                             project.version if source_value == "pypi" else None
                         ),
+                        github_url=(
+                            f"https://github.com/OWNER/{project.skill_name}"
+                            if source_value == "github"
+                            else None
+                        ),
                     )
 
                 install_source = prompt_step(
-                    ["editable", "pypi_version"],
+                    ["editable", "pypi_version", "github_url", "github_ref", "github_path"],
                     lambda: prompter.select(
                         f"Install source for {project.skill_name}",
                         source_choices,
@@ -2466,12 +2877,25 @@ def complete_with_ui(
                 if install_source == "editable":
                     args.editable = True
                     args.pypi_version = None
+                    args.github_url = None
+                    args.github_ref = None
+                    args.github_path = None
                 elif install_source == "pypi":
                     args.editable = False
                     args.pypi_version = ""
+                    args.github_url = None
+                    args.github_ref = None
+                    args.github_path = None
+                elif install_source == "github":
+                    args.editable = False
+                    args.pypi_version = None
+                    args.github_url = ""
                 else:
                     args.editable = False
                     args.pypi_version = None
+                    args.github_url = None
+                    args.github_ref = None
+                    args.github_path = None
                 continue
             args.editable = False
 
@@ -2500,6 +2924,30 @@ def complete_with_ui(
             if pypi_version == PROMPT_BACK:
                 continue
             args.pypi_version = str(pypi_version).strip() or default_pypi_version
+            continue
+
+        if args.command == "install" and getattr(args, "github_url", None) == "":
+            def github_url_preview(url: object) -> str | None:
+                value = str(url).strip()
+                return build_no_ui_command(
+                    project,
+                    args,
+                    github_url=value or f"https://github.com/OWNER/{project.skill_name}",
+                )
+
+            github_url = prompt_step(
+                ["github_url"],
+                lambda: prompter.text(
+                    "GitHub repository URL",
+                    "",
+                    command_preview_builder=github_url_preview,
+                ),
+            )
+            if github_url == PROMPT_BACK:
+                continue
+            args.github_url = str(github_url).strip()
+            if not args.github_url:
+                raise UsageError("GitHub URL must not be empty")
             continue
 
         targets = getattr(args, "targets", None)
@@ -2542,6 +2990,11 @@ def complete_with_ui(
                         f"Select agents for {project.skill_name}",
                         target_choices(),
                         command_preview_builder=agent_preview,
+                        summary=(
+                            f"Uninstalling {project.skill_name}"
+                            if getattr(args, "command", None) == "uninstall"
+                            else None
+                        ),
                         default_values=(
                             [TARGET_ALL]
                             if getattr(args, "command", None) == "install"
@@ -2685,6 +3138,12 @@ def complete_with_ui(
         args.editable = False
     if not hasattr(args, "pypi_version"):
         args.pypi_version = None
+    if not hasattr(args, "github_url"):
+        args.github_url = None
+    if not hasattr(args, "github_ref"):
+        args.github_ref = None
+    if not hasattr(args, "github_path"):
+        args.github_path = None
     if not hasattr(args, "verbose"):
         args.verbose = False
     return args
@@ -2704,15 +3163,46 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
         args.editable = False
     if not hasattr(args, "pypi_version"):
         args.pypi_version = None
+    if not hasattr(args, "github_url"):
+        args.github_url = None
+    if not hasattr(args, "github_ref"):
+        args.github_ref = None
+    if not hasattr(args, "github_path"):
+        args.github_path = None
     if not hasattr(args, "verbose"):
         args.verbose = False
     if args.command == "install":
-        if args.editable and args.pypi_version is not None:
-            raise UsageError("--editable and --pypi-version cannot be used together")
+        selected_sources = [
+            name
+            for name, enabled in (
+                ("--editable", args.editable),
+                ("--pypi-version", args.pypi_version is not None),
+                ("--github-url", args.github_url is not None),
+            )
+            if enabled
+        ]
+        if len(selected_sources) > 1:
+            raise UsageError(f"{', '.join(selected_sources)} cannot be combined")
         if args.pypi_version is not None:
             args.pypi_version = args.pypi_version.strip()
             if not args.pypi_version:
                 raise UsageError("--pypi-version must not be empty")
+        if args.github_url is not None:
+            args.github_url = args.github_url.strip()
+            if not args.github_url:
+                raise UsageError("--github-url must not be empty")
+        if args.github_ref is not None:
+            args.github_ref = args.github_ref.strip()
+            if not args.github_ref:
+                raise UsageError("--github-ref must not be empty")
+        if args.github_path is not None:
+            args.github_path = args.github_path.strip()
+            if not args.github_path:
+                raise UsageError("--github-path must not be empty")
+        if args.github_url is None and (
+            args.github_ref is not None or args.github_path is not None
+        ):
+            raise UsageError("--github-ref and --github-path require --github-url")
 
 
 def style_text(text: str, code: str, *, color: bool) -> str:
@@ -2736,6 +3226,8 @@ def version_suffix(result: InstallResult) -> str:
         details.append("editable")
     elif result.install_mode == "pypi":
         details.append("PyPI wheel")
+    elif result.install_mode == "github":
+        details.append("GitHub archive")
 
     suffix = f" version {result.version}"
     if details:
@@ -2743,13 +3235,45 @@ def version_suffix(result: InstallResult) -> str:
     return suffix
 
 
+def version_label(result: InstallResult) -> str:
+    return version_suffix(result).removeprefix(" version").strip()
+
+
+def skill_label(result: InstallResult) -> str:
+    return result.skill_dir.name
+
+
+def result_target_label(result: InstallResult) -> str:
+    agent = AGENT_LABELS.get(result.agent, result.agent)
+    if result.scope == "global":
+        return f"{agent} global"
+    if result.scope == "repo":
+        repo_name = result.hook_path.parent.name
+        if repo_name and repo_name != "repo":
+            return f"{agent} repo ({repo_name})"
+        return f"{agent} repo"
+    return f"{agent} {result.scope}"
+
+
 def format_status_line(result: InstallResult, *, color: bool) -> str:
-    line = (
-        f"{result.status}: {describe_target(result.agent, result.scope)}"
-        f"{version_suffix(result)}"
-    )
+    version = version_label(result)
+    version_part = f" {version}" if version else ""
+    target = result_target_label(result)
     if result.action == "install":
-        line += f" at {result.skill_dir}"
+        line = (
+            f"Installed {skill_label(result)}{version_part} "
+            f"to {target}: {result.skill_dir}"
+        )
+    elif result.action == "uninstall":
+        line = (
+            f"Removed {skill_label(result)}{version_part} "
+            f"from {target}: {result.skill_dir}"
+        )
+    else:
+        line = (
+            f"{result.status}: {describe_target(result.agent, result.scope)}"
+            f"{version_suffix(result)}"
+        )
     color_code = VERSION_CHANGE_COLORS.get(result.version_change or "")
     if color_code is None:
         return line
@@ -2765,6 +3289,8 @@ def print_results(results: Sequence[InstallResult], *, verbose: bool = False) ->
         print(f"  skill: {result.skill_dir}")
         if result.source_dir is not None:
             print(f"  source: {result.source_dir}")
+        if result.source_url is not None:
+            print(f"  source: {result.source_url}")
         print(f"  hook:  {result.hook_path}")
 
 
@@ -2785,6 +3311,9 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 force=args.force,
                 editable=args.editable,
                 pypi_version=args.pypi_version,
+                github_url=args.github_url,
+                github_ref=args.github_ref,
+                github_path=args.github_path,
             )
         if args.command == "uninstall":
             return installer.uninstall(
@@ -2814,6 +3343,9 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     force=args.force,
                     editable=args.editable,
                     pypi_version=args.pypi_version,
+                    github_url=args.github_url,
+                    github_ref=args.github_ref,
+                    github_path=args.github_path,
                 )
             )
         elif args.command == "uninstall":
@@ -2849,6 +3381,17 @@ def print_pypi_install_attempt(project: SkillProject, args: argparse.Namespace) 
     )
 
 
+def print_github_install_attempt(args: argparse.Namespace) -> None:
+    if args.command != "install" or getattr(args, "github_url", None) is None:
+        return
+    print(f"Installing from GitHub: {args.github_url}", file=sys.stderr)
+
+
+def print_install_attempt(project: SkillProject, args: argparse.Namespace) -> None:
+    print_pypi_install_attempt(project, args)
+    print_github_install_attempt(args)
+
+
 def prepare_args(args: argparse.Namespace) -> None:
     if not hasattr(args, "force"):
         args.force = False
@@ -2862,6 +3405,12 @@ def prepare_args(args: argparse.Namespace) -> None:
         args.editable = False
     if not hasattr(args, "pypi_version"):
         args.pypi_version = None
+    if not hasattr(args, "github_url"):
+        args.github_url = None
+    if not hasattr(args, "github_ref"):
+        args.github_ref = None
+    if not hasattr(args, "github_path"):
+        args.github_path = None
     if not hasattr(args, "verbose"):
         args.verbose = False
 
@@ -2882,7 +3431,7 @@ def main(
         else:
             prepare_args(args)
             require_noninteractive_args(args)
-        print_pypi_install_attempt(project, args)
+        print_install_attempt(project, args)
         results = run(project, args)
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)

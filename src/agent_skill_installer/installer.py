@@ -22,6 +22,8 @@ MANIFEST_VERSION = 1
 PYPI_BASE_URL = "https://pypi.org/pypi"
 PYPI_METADATA_TIMEOUT_SECONDS = 2.0
 PYPI_DOWNLOAD_TIMEOUT_SECONDS = 10.0
+GITHUB_DOWNLOAD_TIMEOUT_SECONDS = 10.0
+DEFAULT_GITHUB_REF = "main"
 AGENTS = ("codex", "claude")
 SCOPES = ("repo", "global")
 
@@ -161,6 +163,9 @@ class InstallResult:
     version_change: str | None = None
     install_mode: str = "copy"
     source_dir: Path | None = None
+    source_url: str | None = None
+    source_ref: str | None = None
+    source_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +181,19 @@ class InstallSourceMetadata:
 
 
 @dataclass(frozen=True)
+class GithubSource:
+    url: str
+    owner: str
+    repo: str
+    ref: str = DEFAULT_GITHUB_REF
+    path: PurePosixPath | None = None
+
+    @property
+    def version_label(self) -> str:
+        return self.ref
+
+
+@dataclass(frozen=True)
 class InstallationStatus:
     agent: str
     scope: str
@@ -183,6 +201,13 @@ class InstallationStatus:
     status: str
     version: str | None = None
     install_mode: str | None = None
+    skill_name: str | None = None
+    package_name: str | None = None
+    manifest_path: Path | None = None
+    hook_path: Path | None = None
+    source_url: str | None = None
+    source_ref: str | None = None
+    source_path: str | None = None
     error: str | None = None
 
 
@@ -202,6 +227,9 @@ class Installer:
         force: bool = False,
         editable: bool = False,
         pypi_version: str | None = None,
+        github_url: str | None = None,
+        github_ref: str | None = None,
+        github_path: str | None = None,
     ) -> list[InstallResult]:
         return install(
             self.project,
@@ -214,6 +242,9 @@ class Installer:
             force=force,
             editable=editable,
             pypi_version=pypi_version,
+            github_url=github_url,
+            github_ref=github_ref,
+            github_path=github_path,
         )
 
     def uninstall(
@@ -230,6 +261,22 @@ class Installer:
             self.project,
             agents,
             scope,
+            repo=repo,
+            home=home,
+            codex_home=codex_home,
+            claude_home=claude_home,
+        )
+
+    def discover_managed_installations(
+        self,
+        *,
+        repo: Path | None = None,
+        home: Path | None = None,
+        codex_home: Path | None = None,
+        claude_home: Path | None = None,
+    ) -> list[InstallationStatus]:
+        return discover_managed_installations(
+            self.project,
             repo=repo,
             home=home,
             codex_home=codex_home,
@@ -510,6 +557,96 @@ def local_checkout_skill_root(
     return metadata.source_dir
 
 
+def normalize_github_skill_path(value: str | None) -> PurePosixPath | None:
+    if value is None:
+        return None
+    text = value.strip().strip("/")
+    if not text or text == ".":
+        return None
+    path = PurePosixPath(urllib.parse.unquote(text))
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise InstallerError(f"unsafe GitHub skill path: {value}")
+    if path.name == "SKILL.md":
+        path = path.parent
+    return None if path == PurePosixPath(".") else path
+
+
+def strip_dot_git(repo: str) -> str:
+    return repo[:-4] if repo.endswith(".git") else repo
+
+
+def parse_github_url(
+    url: str,
+    *,
+    ref: str | None = None,
+    path: str | None = None,
+) -> GithubSource:
+    text = url.strip()
+    if not text:
+        raise InstallerError("GitHub URL must not be empty")
+
+    owner: str
+    repo: str
+    url_ref: str | None = None
+    url_path: str | None = None
+
+    if text.startswith("git@github.com:"):
+        rest = text.removeprefix("git@github.com:").strip("/")
+        parts = [part for part in rest.split("/") if part]
+        if len(parts) != 2:
+            raise InstallerError("GitHub SSH URL must look like git@github.com:OWNER/REPO.git")
+        owner, repo = parts
+        repo = strip_dot_git(repo)
+    else:
+        parsed = urllib.parse.urlparse(text)
+        host = parsed.netloc.lower()
+        if parsed.scheme not in {"http", "https"} or host not in {
+            "github.com",
+            "www.github.com",
+        }:
+            raise InstallerError("GitHub URL must use https://github.com/OWNER/REPO")
+        parts = [
+            urllib.parse.unquote(part)
+            for part in parsed.path.split("/")
+            if part
+        ]
+        if len(parts) < 2:
+            raise InstallerError("GitHub URL must include OWNER/REPO")
+        owner, repo = parts[:2]
+        repo = strip_dot_git(repo)
+        remaining = parts[2:]
+        query = urllib.parse.parse_qs(parsed.query)
+        url_ref = query.get("ref", [None])[0]
+        url_path = query.get("path", [None])[0]
+        if remaining:
+            kind = remaining[0]
+            if kind not in {"tree", "blob"} or len(remaining) < 2:
+                raise InstallerError(
+                    "GitHub URL path must be a repository root or "
+                    "/tree/REF/SKILL_PATH"
+                )
+            url_ref = remaining[1]
+            if len(remaining) > 2:
+                url_path = "/".join(remaining[2:])
+
+    owner = owner.strip()
+    repo = repo.strip()
+    if not owner or not repo:
+        raise InstallerError("GitHub URL must include OWNER/REPO")
+
+    selected_ref = (ref or url_ref or DEFAULT_GITHUB_REF).strip()
+    if not selected_ref:
+        raise InstallerError("GitHub ref must not be empty")
+    selected_path = normalize_github_skill_path(path if path is not None else url_path)
+    return GithubSource(
+        url=text,
+        owner=owner,
+        repo=repo,
+        ref=selected_ref,
+        path=selected_path,
+    )
+
+
 def is_repo_root(path: Path) -> bool:
     return (path / ".sl").exists() or (path / ".git").exists()
 
@@ -617,18 +754,129 @@ def read_manifest(
     path = manifest_path(project, skill_dir)
     if not path.exists():
         return None
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as error:
-        raise InstallerError(f"invalid install manifest: {path}") from error
-    if not isinstance(data, dict):
-        raise InstallerError(f"install manifest must be a JSON object: {path}")
+    data = read_manifest_file(path)
     accepted_packages = {project.package_name, *project.manifest_package_aliases}
     if data.get("package") not in accepted_packages:
         raise InstallerError(
             f"install manifest is not for {project.package_name}: {path}"
         )
     return data
+
+
+def read_manifest_file(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise InstallerError(f"invalid install manifest: {path}") from error
+    if not isinstance(data, dict):
+        raise InstallerError(f"install manifest must be a JSON object: {path}")
+    if data.get("version") != MANIFEST_VERSION:
+        raise InstallerError(f"unsupported install manifest version: {path}")
+    for field_name in ("agent", "scope", "skill_dir", "hook_path"):
+        if not isinstance(data.get(field_name), str):
+            raise InstallerError(f"install manifest missing {field_name}: {path}")
+    return data
+
+
+def manifest_str(manifest: dict[str, object], key: str, path: Path) -> str:
+    value = manifest.get(key)
+    if not isinstance(value, str) or not value:
+        raise InstallerError(f"install manifest missing {key}: {path}")
+    return value
+
+
+def status_from_manifest(
+    manifest: dict[str, object],
+    manifest_file: Path,
+) -> InstallationStatus:
+    agent = manifest_str(manifest, "agent", manifest_file)
+    scope = manifest_str(manifest, "scope", manifest_file)
+    skill_dir = Path(manifest_str(manifest, "skill_dir", manifest_file))
+    hook_path = Path(manifest_str(manifest, "hook_path", manifest_file))
+    install_mode = manifest.get("install_mode")
+    skill_name = manifest.get("skill_name")
+    package_name = manifest.get("package")
+    source_url = manifest.get("source_url")
+    source_ref = manifest.get("source_ref")
+    source_path = manifest.get("source_path")
+    return InstallationStatus(
+        agent=agent,
+        scope=scope,
+        skill_dir=skill_dir,
+        status="installed",
+        version=manifest_package_version(manifest),
+        install_mode=install_mode if isinstance(install_mode, str) else None,
+        skill_name=skill_name if isinstance(skill_name, str) else skill_dir.name,
+        package_name=package_name if isinstance(package_name, str) else None,
+        manifest_path=manifest_file,
+        hook_path=hook_path,
+        source_url=source_url if isinstance(source_url, str) else None,
+        source_ref=source_ref if isinstance(source_ref, str) else None,
+        source_path=source_path if isinstance(source_path, str) else None,
+    )
+
+
+def skills_dir_for_target(spec: TargetSpec) -> Path:
+    return spec.skill_dir.parent
+
+
+def iter_managed_manifest_paths(skills_dir: Path):
+    if not skills_dir.is_dir():
+        return
+    seen: set[Path] = set()
+    patterns = ("*/scripts/.*-install.json", ".*-install.json")
+    for pattern in patterns:
+        for path in sorted(skills_dir.glob(pattern)):
+            if path in seen or not path.is_file():
+                continue
+            seen.add(path)
+            yield path
+
+
+def discover_managed_installations_for_target(spec: TargetSpec) -> list[InstallationStatus]:
+    statuses: list[InstallationStatus] = []
+    for path in iter_managed_manifest_paths(skills_dir_for_target(spec)) or ():
+        try:
+            manifest = read_manifest_file(path)
+            status = status_from_manifest(manifest, path)
+        except InstallerError:
+            continue
+        if status.agent != spec.agent or status.scope != spec.scope:
+            continue
+        statuses.append(status)
+    return statuses
+
+
+def discover_managed_installations(
+    project: SkillProject,
+    *,
+    repo: Path | None = None,
+    home: Path | None = None,
+    codex_home: Path | None = None,
+    claude_home: Path | None = None,
+) -> list[InstallationStatus]:
+    statuses: list[InstallationStatus] = []
+    seen: set[Path] = set()
+    for agent in AGENTS:
+        for scope in SCOPES:
+            try:
+                spec = target_spec(
+                    project,
+                    agent,
+                    scope,
+                    repo=repo,
+                    home=home,
+                    codex_home=codex_home,
+                    claude_home=claude_home,
+                )
+            except InstallerError:
+                continue
+            for status in discover_managed_installations_for_target(spec):
+                if status.manifest_path is None or status.manifest_path in seen:
+                    continue
+                seen.add(status.manifest_path)
+                statuses.append(status)
+    return statuses
 
 
 def inspect_installation(
@@ -854,6 +1102,7 @@ def download_url(
     target: Path,
     *,
     timeout: float = PYPI_DOWNLOAD_TIMEOUT_SECONDS,
+    description: str = "PyPI wheel",
 ) -> Path:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response, target.open(
@@ -861,9 +1110,9 @@ def download_url(
         ) as output:
             shutil.copyfileobj(response, output)
     except (TimeoutError, urllib.error.URLError) as error:
-        raise InstallerError(f"failed to download PyPI wheel: {error}") from error
+        raise InstallerError(f"failed to download {description}: {error}") from error
     except OSError as error:
-        raise InstallerError(f"failed to write PyPI wheel: {target}") from error
+        raise InstallerError(f"failed to write {description}: {target}") from error
     return target
 
 
@@ -880,6 +1129,121 @@ def download_pypi_wheel(
         fetch_json_url(pypi_release_url(project, version)),
     )
     return download_url(url, download_dir / filename)
+
+
+def github_archive_url(source: GithubSource) -> str:
+    owner = urllib.parse.quote(source.owner, safe="")
+    repo = urllib.parse.quote(source.repo, safe="")
+    ref = urllib.parse.quote(source.ref, safe="/")
+    return f"https://codeload.github.com/{owner}/{repo}/zip/{ref}"
+
+
+def download_github_archive(source: GithubSource, download_dir: Path) -> Path:
+    return download_url(
+        github_archive_url(source),
+        download_dir / "github-source.zip",
+        timeout=GITHUB_DOWNLOAD_TIMEOUT_SECONDS,
+        description="GitHub archive",
+    )
+
+
+def github_archive_relative_path(filename: str) -> PurePosixPath | None:
+    path = PurePosixPath(filename)
+    if path.is_absolute() or ".." in path.parts:
+        raise InstallerError(f"unsafe path in GitHub archive: {filename}")
+    if len(path.parts) < 2:
+        return None
+    relative = PurePosixPath(*path.parts[1:])
+    if not relative.parts:
+        return None
+    if "__pycache__" in relative.parts or relative.suffix == ".pyc":
+        return None
+    return relative
+
+
+def prefixed_skill_file(prefix: PurePosixPath) -> PurePosixPath:
+    return prefix / "SKILL.md" if prefix.parts else PurePosixPath("SKILL.md")
+
+
+def github_archive_skill_prefix(
+    archive: zipfile.ZipFile,
+    source_path: PurePosixPath | None,
+) -> PurePosixPath:
+    files = {
+        relative
+        for info in archive.infolist()
+        if not info.is_dir()
+        for relative in [github_archive_relative_path(info.filename)]
+        if relative is not None
+    }
+    candidates = (
+        [source_path]
+        if source_path is not None
+        else [PurePosixPath("skill"), PurePosixPath(".")]
+    )
+    for candidate in candidates:
+        assert candidate is not None
+        if prefixed_skill_file(candidate) in files:
+            return candidate
+    if source_path is not None:
+        raise InstallerError(
+            "GitHub archive did not contain "
+            f"{prefixed_skill_file(source_path).as_posix()}"
+        )
+    raise InstallerError("GitHub archive did not contain SKILL.md or skill/SKILL.md")
+
+
+def github_archive_skill_relative_path(
+    project: SkillProject,
+    filename: str,
+    skill_prefix: PurePosixPath,
+) -> Path | None:
+    relative = github_archive_relative_path(filename)
+    if relative is None:
+        return None
+    if skill_prefix.parts:
+        if relative.parts[: len(skill_prefix.parts)] != skill_prefix.parts:
+            return None
+        relative = PurePosixPath(*relative.parts[len(skill_prefix.parts) :])
+    if not relative.parts:
+        return None
+    if relative == PurePosixPath(project.manifest_relative_path.as_posix()):
+        return None
+    return Path(*relative.parts)
+
+
+def copy_github_archive_skill(
+    project: SkillProject,
+    archive_path: Path,
+    skill_dir: Path,
+    source_path: PurePosixPath | None = None,
+) -> list[str]:
+    copied: list[str] = []
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            skill_prefix = github_archive_skill_prefix(archive, source_path)
+            for info in sorted(archive.infolist(), key=lambda item: item.filename):
+                if info.is_dir():
+                    continue
+                relative_path = github_archive_skill_relative_path(
+                    project,
+                    info.filename,
+                    skill_prefix,
+                )
+                if relative_path is None:
+                    continue
+                target = skill_dir / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(info))
+                copied.append(relative_path.as_posix())
+    except zipfile.BadZipFile as error:
+        raise InstallerError(
+            f"GitHub archive is not a valid zip file: {archive_path}"
+        ) from error
+
+    if "SKILL.md" not in copied:
+        raise InstallerError("GitHub archive did not contain a usable SKILL.md")
+    return copied
 
 
 def wheel_skill_relative_path(
@@ -1029,13 +1393,19 @@ def install_hook(spec: TargetSpec) -> None:
     )
 
 
-def uninstall_hook(spec: TargetSpec, *, delete_if_empty: bool) -> bool:
+def uninstall_hook(
+    spec: TargetSpec,
+    *,
+    delete_if_empty: bool,
+    start_marker: str | None = None,
+    end_marker: str | None = None,
+) -> bool:
     if not spec.hook_path.exists():
         return False
     updated, changed = remove_marked_block(
         spec.hook_path.read_text(),
-        start_marker=spec.marker_start,
-        end_marker=spec.marker_end,
+        start_marker=start_marker or spec.marker_start,
+        end_marker=end_marker or spec.marker_end,
     )
     if not changed:
         return False
@@ -1056,6 +1426,9 @@ def write_manifest(
     package_version: str,
     install_mode: str,
     source_dir: Path | None = None,
+    source_url: str | None = None,
+    source_ref: str | None = None,
+    source_path: str | None = None,
 ) -> None:
     path = manifest_path(project, spec.skill_dir)
     manifest_files = [] if spec.skill_dir.is_symlink() else [
@@ -1081,8 +1454,33 @@ def write_manifest(
     }
     if source_dir is not None:
         data["source_dir"] = str(source_dir)
+    if source_url is not None:
+        data["source_url"] = source_url
+    if source_ref is not None:
+        data["source_ref"] = source_ref
+    if source_path is not None:
+        data["source_path"] = source_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def validate_install_source_selection(
+    *,
+    editable: bool = False,
+    pypi_version: str | None = None,
+    github_source: GithubSource | None = None,
+) -> None:
+    selected = [
+        name
+        for name, enabled in (
+            ("--editable", editable),
+            ("--pypi-version", pypi_version is not None),
+            ("--github-url", github_source is not None),
+        )
+        if enabled
+    ]
+    if len(selected) > 1:
+        raise InstallerError(f"{', '.join(selected)} cannot be combined")
 
 
 def install_target(
@@ -1091,11 +1489,18 @@ def install_target(
     *,
     force: bool = False,
     editable: bool = False,
+    editable_source_dir: Path | None = None,
     pypi_version: str | None = None,
     pypi_wheel_path: Path | None = None,
+    github_source: GithubSource | None = None,
+    github_archive_path: Path | None = None,
 ) -> InstallResult:
-    if editable and pypi_version is not None:
-        raise InstallerError("--editable cannot be combined with --pypi-version")
+    effective_editable = editable or editable_source_dir is not None
+    validate_install_source_selection(
+        editable=effective_editable,
+        pypi_version=pypi_version,
+        github_source=github_source,
+    )
 
     skill_exists = path_exists(spec.skill_dir)
     previous_manifest = read_manifest(project, spec.skill_dir) if skill_exists else None
@@ -1105,11 +1510,27 @@ def install_target(
         else None
     )
     previous_version = manifest_package_version(previous_manifest)
-    package_version = pypi_version or project.version
-    install_mode = (
-        "pypi" if pypi_version is not None else "editable" if editable else "copy"
+    package_version = (
+        pypi_version
+        or (github_source.version_label if github_source is not None else None)
+        or project.version
     )
-    source_dir = local_checkout_skill_root(project) if editable else None
+    install_mode = (
+        "pypi"
+        if pypi_version is not None
+        else "github"
+        if github_source is not None
+        else "editable"
+        if effective_editable
+        else "copy"
+    )
+    source_dir = (
+        editable_source_dir
+        if editable_source_dir is not None
+        else local_checkout_skill_root(project)
+        if editable
+        else None
+    )
     if skill_exists and previous_manifest is None and not force:
         raise InstallerError(
             f"refusing to replace unowned skill directory: {spec.skill_dir}"
@@ -1135,6 +1556,16 @@ def install_target(
         if pypi_wheel_path is None:
             raise InstallerError("missing PyPI wheel for requested install source")
         skill_files = copy_pypi_wheel_skill(project, pypi_wheel_path, spec.skill_dir)
+    elif github_source is not None:
+        spec.skill_dir.mkdir(parents=True, exist_ok=True)
+        if github_archive_path is None:
+            raise InstallerError("missing GitHub archive for requested install source")
+        skill_files = copy_github_archive_skill(
+            project,
+            github_archive_path,
+            spec.skill_dir,
+            github_source.path,
+        )
     elif source_dir is not None:
         spec.skill_dir.parent.mkdir(parents=True, exist_ok=True)
         skill_files = symlink_local_skill(project, spec.skill_dir, source_dir)
@@ -1153,6 +1584,13 @@ def install_target(
         package_version=package_version,
         install_mode=install_mode,
         source_dir=source_dir,
+        source_url=github_source.url if github_source is not None else None,
+        source_ref=github_source.ref if github_source is not None else None,
+        source_path=(
+            github_source.path.as_posix()
+            if github_source is not None and github_source.path is not None
+            else None
+        ),
     )
     return InstallResult(
         action="install",
@@ -1166,6 +1604,13 @@ def install_target(
         version_change=version_change(previous_version, package_version),
         install_mode=install_mode,
         source_dir=source_dir,
+        source_url=github_source.url if github_source is not None else None,
+        source_ref=github_source.ref if github_source is not None else None,
+        source_path=(
+            github_source.path.as_posix()
+            if github_source is not None and github_source.path is not None
+            else None
+        ),
     )
 
 
@@ -1191,7 +1636,14 @@ def uninstall_target(project: SkillProject, spec: TargetSpec) -> InstallResult:
         )
 
     delete_hook_if_empty = bool((manifest or {}).get("created_hook_file", False))
-    uninstall_hook(spec, delete_if_empty=delete_hook_if_empty)
+    marker_start = (manifest or {}).get("hook_marker_start")
+    marker_end = (manifest or {}).get("hook_marker_end")
+    uninstall_hook(
+        spec,
+        delete_if_empty=delete_hook_if_empty,
+        start_marker=marker_start if isinstance(marker_start, str) else None,
+        end_marker=marker_end if isinstance(marker_end, str) else None,
+    )
 
     if manifest_file is not None:
         remove_manifest_at(manifest_file)
@@ -1223,13 +1675,29 @@ def install(
     force: bool = False,
     editable: bool = False,
     pypi_version: str | None = None,
+    github_url: str | None = None,
+    github_ref: str | None = None,
+    github_path: str | None = None,
 ) -> list[InstallResult]:
-    if editable and pypi_version is not None:
-        raise InstallerError("--editable cannot be combined with --pypi-version")
+    if github_url is None and (github_ref is not None or github_path is not None):
+        raise InstallerError("--github-ref and --github-path require --github-url")
+    github_source = (
+        parse_github_url(github_url, ref=github_ref, path=github_path)
+        if github_url is not None
+        else None
+    )
+    validate_install_source_selection(
+        editable=editable,
+        pypi_version=pypi_version,
+        github_source=github_source,
+    )
 
     selected_agents = normalize_agents(agents)
 
-    def install_targets(pypi_wheel_path: Path | None = None) -> list[InstallResult]:
+    def install_targets(
+        pypi_wheel_path: Path | None = None,
+        github_archive_path: Path | None = None,
+    ) -> list[InstallResult]:
         return [
             install_target(
                 project,
@@ -1246,16 +1714,26 @@ def install(
                 editable=editable,
                 pypi_version=pypi_version,
                 pypi_wheel_path=pypi_wheel_path,
+                github_source=github_source,
+                github_archive_path=github_archive_path,
             )
             for agent in selected_agents
         ]
 
-    if pypi_version is None:
+    if pypi_version is None and github_source is None:
         return install_targets()
 
-    with tempfile.TemporaryDirectory(prefix="agent-skill-installer-pypi-") as temp_dir:
-        wheel_path = download_pypi_wheel(project, pypi_version, Path(temp_dir))
-        return install_targets(wheel_path)
+    if pypi_version is not None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skill-installer-pypi-"
+        ) as temp_dir:
+            wheel_path = download_pypi_wheel(project, pypi_version, Path(temp_dir))
+            return install_targets(pypi_wheel_path=wheel_path)
+
+    assert github_source is not None
+    with tempfile.TemporaryDirectory(prefix="agent-skill-installer-github-") as temp_dir:
+        archive_path = download_github_archive(github_source, Path(temp_dir))
+        return install_targets(github_archive_path=archive_path)
 
 
 def uninstall(

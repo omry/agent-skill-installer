@@ -14,8 +14,21 @@ from pathlib import Path
 import pytest
 
 from agent_skill_installer import __version__
+from agent_skill_installer.__main__ import (
+    complete_with_ui as complete_generic_with_ui,
+    load_recent_github_urls,
+    install_source_choices as generic_install_source_choices,
+    load_recent_pypi_packages,
+    main as generic_main,
+    recent_installations_path,
+    remember_recent_github_url,
+    remember_recent_pypi_package,
+    run_install as run_generic_install,
+    run_uninstall as run_generic_uninstall,
+)
 from agent_skill_installer.cli import (
     BackRequested,
+    DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
     PROMPT_BACK,
     build_no_ui_command,
     command_preview_classes,
@@ -38,10 +51,12 @@ from agent_skill_installer.installer import (
     Installer,
     InstallerError,
     SkillProject,
+    copy_github_archive_skill,
     copy_pypi_wheel_skill,
     fetch_json_url,
     install_source_metadata,
     manifest_path,
+    parse_github_url,
     published_pypi_versions,
     read_manifest as read_raw_manifest,
 )
@@ -104,6 +119,23 @@ def make_skill_wheel(
         wheel.writestr(f"{prefix}/scripts/tool.py", "print('wheel')\n")
         wheel.writestr(f"{project.import_name}/__init__.py", "__version__ = '9.9.9'\n")
         wheel.writestr(f"{project.import_name}-1.2.3.dist-info/METADATA", "ignored\n")
+    return path
+
+
+def make_github_archive(
+    path: Path,
+    *,
+    root: str = "example-agent-skill-main",
+    skill_path: str = "skill",
+    skill_text: str = "github skill\n",
+) -> Path:
+    prefix = f"{root}/{skill_path}".rstrip("/")
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(f"{prefix}/SKILL.md", skill_text)
+        archive.writestr(f"{prefix}/agents/openai.yaml", "agent: github\n")
+        archive.writestr(f"{prefix}/scripts/tool.py", "print('github')\n")
+        if skill_path:
+            archive.writestr(f"{root}/unrelated/SKILL.md", "ignored\n")
     return path
 
 
@@ -268,6 +300,111 @@ def test_pypi_wheel_install_extracts_only_project_skill(
     assert not (skill_dir / project.import_name / "__init__.py").exists()
 
 
+def test_github_install_extracts_skill_from_repository_archive(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    archive = make_github_archive(tmp_path / "github.zip", skill_text="github\n")
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+
+    result = Installer(project).install(
+        ["codex"],
+        "repo",
+        repo=repo,
+        github_url="https://github.com/example/example-agent-skill",
+    )[0]
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert result.install_mode == "github"
+    assert result.version == "main"
+    assert result.source_url == "https://github.com/example/example-agent-skill"
+    assert result.source_ref == "main"
+    assert (skill_dir / "SKILL.md").read_text() == "github\n"
+    assert (skill_dir / "agents" / "openai.yaml").read_text() == "agent: github\n"
+    assert not (skill_dir / "unrelated" / "SKILL.md").exists()
+    manifest = read_install_manifest(project, skill_dir)
+    assert manifest["install_mode"] == "github"
+    assert manifest["source_url"] == "https://github.com/example/example-agent-skill"
+    assert manifest["source_ref"] == "main"
+
+
+def test_github_install_accepts_tree_url_for_nested_skill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    archive = make_github_archive(
+        tmp_path / "github.zip",
+        skill_path="packages/demo/skill",
+        skill_text="nested github\n",
+    )
+    captured = {}
+
+    def fake_download(source, _download_dir):
+        captured["source"] = source
+        return archive
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_github_archive",
+        fake_download,
+    )
+
+    result = Installer(project).install(
+        ["codex"],
+        "repo",
+        repo=repo,
+        github_url=(
+            "https://github.com/example/example-agent-skill/"
+            "tree/v2/packages/demo/skill"
+        ),
+    )[0]
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert result.version == "v2"
+    assert captured["source"].path.as_posix() == "packages/demo/skill"
+    assert (skill_dir / "SKILL.md").read_text() == "nested github\n"
+
+
+def test_copy_github_archive_skill_extracts_root_skill(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    archive = make_github_archive(
+        tmp_path / "github.zip",
+        skill_path="",
+        skill_text="root github\n",
+    )
+    skill_dir = tmp_path / "skill"
+
+    copied = copy_github_archive_skill(project, archive, skill_dir)
+
+    assert copied == [
+        "SKILL.md",
+        "agents/openai.yaml",
+        "scripts/tool.py",
+    ]
+    assert (skill_dir / "SKILL.md").read_text() == "root github\n"
+
+
+def test_parse_github_url_supports_overrides_and_blob_path() -> None:
+    source = parse_github_url(
+        "https://github.com/example/demo/blob/main/skill/SKILL.md",
+        ref="release/v1",
+        path="packages/demo/skill",
+    )
+
+    assert source.owner == "example"
+    assert source.repo == "demo"
+    assert source.ref == "release/v1"
+    assert source.path is not None
+    assert source.path.as_posix() == "packages/demo/skill"
+
+
 def test_copy_pypi_wheel_skill_extracts_only_bundled_skill(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     wheel = make_skill_wheel(tmp_path / "example.whl", project)
@@ -307,6 +444,20 @@ def test_install_rejects_editable_and_pypi_version_together(tmp_path: Path) -> N
             repo=repo,
             editable=True,
             pypi_version="1.2.3",
+        )
+
+
+def test_install_rejects_conflicting_github_source(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(InstallerError, match="cannot be combined"):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            editable=True,
+            github_url="https://github.com/example/demo",
         )
 
 
@@ -531,6 +682,36 @@ def test_project_can_override_discoverability_marker_slug(tmp_path: Path) -> Non
     assert "<!-- EXAMPLE-DISCOVERABILITY-END -->" in hook_text
 
 
+def test_generic_uninstall_uses_manifest_hook_markers(tmp_path: Path) -> None:
+    project = SkillProject(
+        package_name="example-agent-skill",
+        import_name="example_agent_skill",
+        version="1.2.3",
+        skill_name="example-agent-skill",
+        description="Example agent skill for installer tests.",
+        bundled_skill_source=make_skill(tmp_path / "bundled-skill"),
+        marker_slug_override="EXAMPLE",
+    )
+    repo = make_repo(tmp_path / "repo")
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    run_generic_uninstall(
+        Namespace(
+            skill_name=project.skill_name,
+            package_name=project.package_name,
+            agent="codex",
+            scope="repo",
+            repo=repo,
+            home=None,
+            codex_home=None,
+            claude_home=None,
+        )
+    )
+
+    assert not (repo / "AGENTS.md").exists()
+    assert not (repo / ".codex" / "skills" / project.skill_name).exists()
+
+
 def test_project_uses_installer_config_instructions_when_present(tmp_path: Path) -> None:
     skill = make_skill(tmp_path / "bundled-skill")
     (skill / "agent-skill-installer.yaml").write_text(
@@ -581,7 +762,7 @@ def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
     output = capsys.readouterr()
 
     assert install_code == 0
-    assert "installed: codex/repo version 1.2.3" in output.out
+    assert "Installed example-agent-skill 1.2.3 to Codex repo:" in output.out
 
     uninstall_code = main(
         [
@@ -599,7 +780,7 @@ def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
     output = capsys.readouterr()
 
     assert uninstall_code == 0
-    assert "removed: codex/repo version 1.2.3" in output.out
+    assert "Removed example-agent-skill 1.2.3 from Codex repo:" in output.out
 
 
 def test_cli_no_ui_verbose_lists_paths(tmp_path: Path, capsys) -> None:
@@ -653,8 +834,11 @@ def test_cli_no_ui_uses_per_agent_home_directories(
     output = capsys.readouterr()
 
     assert exit_code == 0
-    assert "installed: codex/global version 1.2.3" in output.out
-    assert "installed: claude/global version 1.2.3" in output.out
+    assert "Installed example-agent-skill 1.2.3 to Codex global:" in output.out
+    assert (
+        "Installed example-agent-skill 1.2.3 to Claude Code global:"
+        in output.out
+    )
     assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (claude_home / "skills" / project.skill_name / "SKILL.md").exists()
 
@@ -685,8 +869,11 @@ def test_cli_no_ui_accepts_comma_separated_agents(
     output = capsys.readouterr()
 
     assert exit_code == 0
-    assert "installed: codex/global version 1.2.3" in output.out
-    assert "installed: claude/global version 1.2.3" in output.out
+    assert "Installed example-agent-skill 1.2.3 to Codex global:" in output.out
+    assert (
+        "Installed example-agent-skill 1.2.3 to Claude Code global:"
+        in output.out
+    )
 
 
 def test_cli_no_ui_editable_install(
@@ -716,7 +903,10 @@ def test_cli_no_ui_editable_install(
     output = capsys.readouterr()
 
     assert exit_code == 0
-    assert "installed: codex/repo version 1.2.3 (editable)" in output.out
+    assert (
+        "Installed example-agent-skill 1.2.3 (editable) to Codex repo:"
+        in output.out
+    )
     assert (repo / ".codex" / "skills" / project.skill_name).is_symlink()
 
 
@@ -752,7 +942,57 @@ def test_cli_no_ui_pypi_version_install(
 
     assert exit_code == 0
     assert "Installing from PyPI: example-agent-skill==2.0.0" in output.err
-    assert "installed: codex/repo version 2.0.0 (PyPI wheel)" in output.out
+    assert (
+        "Installed example-agent-skill 2.0.0 (PyPI wheel) "
+        "to Codex repo:"
+        in output.out
+    )
+
+
+def test_cli_no_ui_github_url_install(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    archive = make_github_archive(tmp_path / "github.zip")
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--github-url",
+            "https://github.com/example/example-agent-skill",
+            "--github-ref",
+            "v2",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installing from GitHub: https://github.com/example/example-agent-skill" in (
+        output.err
+    )
+    assert (
+        "Installed example-agent-skill v2 (GitHub archive) "
+        "to Codex repo:"
+        in output.out
+    )
+    assert (
+        repo / ".codex" / "skills" / project.skill_name / "SKILL.md"
+    ).read_text() == "github skill\n"
 
 
 def test_cli_no_ui_pypi_version_download_error_names_attempted_package(
@@ -813,7 +1053,7 @@ def test_cli_no_ui_rejects_conflicting_install_sources(
     output = capsys.readouterr()
 
     assert exit_code == 2
-    assert "--editable and --pypi-version cannot be used together" in output.err
+    assert "--editable, --pypi-version cannot be combined" in output.err
 
 
 def test_cli_no_ui_command_preview_uses_project_package_name(tmp_path: Path) -> None:
@@ -831,6 +1071,25 @@ def test_cli_no_ui_command_preview_uses_project_package_name(tmp_path: Path) -> 
         "example-agent-skill --no-ui install --editable --agent all --scope global "
         f"--codex-home {shlex.quote(str(tmp_path / 'codex'))} "
         f"--claude-home {shlex.quote(str(tmp_path / 'claude'))}"
+    )
+
+
+def test_cli_no_ui_command_preview_includes_github_source(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+
+    assert build_no_ui_command(
+        project,
+        "install",
+        agent="codex",
+        scope="repo",
+        repo=tmp_path / "repo",
+        github_url="https://github.com/example/demo",
+        github_ref="v1",
+        github_path="skill",
+    ) == (
+        "example-agent-skill --no-ui install "
+        "--github-url https://github.com/example/demo --github-ref v1 "
+        f"--github-path skill --agent codex --scope repo --repo {tmp_path / 'repo'}"
     )
 
 
@@ -859,7 +1118,18 @@ def test_textual_command_radio_arrow_navigation() -> None:
     if importlib.util.find_spec("textual") is None:
         pytest.skip("Textual is not installed")
 
-    from textual.widgets import Button, RadioSet
+    from textual.widgets import Button, RadioSet, Static
+
+    def preview(command: object) -> str | None:
+        if command == "uninstall":
+            return None
+        return (
+            f"agent-skill-installer --no-ui {command} "
+            "--agent all --scope global"
+        )
+
+    def summary(command: object) -> str:
+        return f"{command} summary"
 
     app = make_textual_select_app(
         "What would you like to do?",
@@ -867,31 +1137,148 @@ def test_textual_command_radio_arrow_navigation() -> None:
             {"name": "Install", "value": "install"},
             {"name": "Uninstall", "value": "uninstall"},
         ],
-        command_preview="example-agent-skill --no-ui install --agent all --scope repo",
+        command_preview_builder=preview,
+        summary_builder=summary,
     )
 
     async def run_scenario() -> None:
         async with app.run_test() as pilot:
             choice = app.query_one("#choice", RadioSet)
             copy_button = app.query_one("#copy-command", Button)
+            command = app.query_one("#command-preview-command", Static)
+            command_panel = app.query_one("#command-preview")
+            summary_panel = app.query_one("#installation-summary")
+            summary_content = app.query_one("#installation-summary-content", Static)
+            command_panel_height = command_panel.region.height
+            assert command_panel.has_class("install-preview")
+            assert summary_panel.region.y < command.region.y
+            assert command.region.height >= 3
+            assert str(summary_content.content) == summary("install")
             assert copy_button.can_focus is False
+            assert str(command.content) == preview("install")
             await pilot.press("up")
             assert choice.has_focus
             assert not copy_button.has_focus
             assert choice.pressed_index == 0
             await pilot.press("down")
+            await pilot.pause()
             assert choice.has_focus
             assert choice.pressed_index == 0
+            assert str(command.content) == DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE
+            assert command_panel.region.height == command_panel_height
+            assert command_panel.has_class("uninstall-preview")
+            assert not command_panel.has_class("install-preview")
+            assert str(summary_content.content) == summary("uninstall")
+            assert summary_panel.display is True
             await pilot.press("down")
             assert app.query_one("#continue", Button).has_focus
             await pilot.press("up")
             assert choice.has_focus
             assert choice.pressed_index == 0
+            assert str(command.content) == DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE
+            assert command_panel.has_class("uninstall-preview")
             await pilot.press("enter")
 
     asyncio.run(run_scenario())
 
     assert app.return_value == "uninstall"
+
+
+def test_textual_prompt_panels_fill_available_screen_width() -> None:
+    if importlib.util.find_spec("textual") is None:
+        pytest.skip("Textual is not installed")
+
+    app = make_textual_select_app(
+        "What would you like to do?",
+        [
+            {"name": "Install", "value": "install"},
+            {"name": "Uninstall", "value": "uninstall"},
+        ],
+        command_preview_builder=lambda value: (
+            f"agent-skill-installer --no-ui {value} --agent all --scope global"
+        ),
+        summary_builder=lambda value: f"{value} summary",
+    )
+
+    async def run_scenario() -> None:
+        async with app.run_test(size=(120, 40)):
+            expected_width = app.size.width - 4
+            for selector in ("#installation-summary", "#command-preview", "#dialog"):
+                panel = app.query_one(selector)
+                assert panel.region.x == 2
+                assert panel.region.width == expected_width
+                assert panel.styles.border_top[0] == "solid"
+
+    asyncio.run(run_scenario())
+
+
+def test_textual_prompt_actions_show_back_and_quit_without_cancel() -> None:
+    if importlib.util.find_spec("textual") is None:
+        pytest.skip("Textual is not installed")
+
+    from textual.widgets import Button
+
+    app = make_textual_select_app(
+        "What would you like to do?",
+        [
+            {"name": "Install", "value": "install"},
+            {"name": "Uninstall", "value": "uninstall"},
+        ],
+    )
+
+    async def run_scenario() -> None:
+        async with app.run_test() as pilot:
+            assert not app.query("#cancel")
+            assert str(app.query_one("#continue", Button).label) == "Continue"
+            assert str(app.query_one("#back", Button).label) == "Back (ESC)"
+            assert str(app.query_one("#quit", Button).label) == "Quit Ctrl+Q"
+            await pilot.press("ctrl+q")
+
+    asyncio.run(run_scenario())
+
+    assert app.return_value is None
+
+
+def test_textual_command_preview_keeps_flow_background_without_command() -> None:
+    if importlib.util.find_spec("textual") is None:
+        pytest.skip("Textual is not installed")
+
+    from textual.widgets import Static
+
+    install_app = make_textual_version_app(
+        "GitHub repository URL",
+        "",
+        [],
+        command_preview_builder=lambda value: (
+            f"agent-skill-installer --no-ui install --github-url {value}"
+            if str(value).strip()
+            else None
+        ),
+        summary="Installing agent-workflow-dsl from GitHub",
+    )
+    uninstall_app = make_textual_checkbox_app(
+        "Select agents",
+        target_choices(),
+        command_preview_builder=lambda _selected: None,
+        summary="Uninstalling agent-workflow-dsl",
+    )
+
+    async def run_scenario() -> None:
+        async with install_app.run_test():
+            panel = install_app.query_one("#command-preview")
+            command = install_app.query_one("#command-preview-command", Static)
+            assert panel.has_class("install-preview")
+            assert not panel.has_class("uninstall-preview")
+            assert str(command.content) == DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE
+
+        async with uninstall_app.run_test():
+            panel = uninstall_app.query_one("#command-preview")
+            command = uninstall_app.query_one("#command-preview-command", Static)
+            assert panel.has_class("uninstall-preview")
+            assert not panel.has_class("install-preview")
+            assert str(command.content) == "Choose at least one target."
+
+    asyncio.run(run_scenario())
 
 
 def test_textual_checkbox_all_mode_and_empty_selection() -> None:
@@ -941,11 +1328,11 @@ def test_textual_checkbox_all_mode_and_empty_selection() -> None:
     asyncio.run(run_scenario())
 
 
-def test_textual_pypi_version_dropdown_updates_input_and_preview() -> None:
+def test_textual_pypi_version_input_suggests_versions_and_updates_preview() -> None:
     if importlib.util.find_spec("textual") is None:
         pytest.skip("Textual is not installed")
 
-    from textual.widgets import Input, Select, Static
+    from textual.widgets import Input, OptionList, Static
 
     def preview(version: object) -> str:
         return (
@@ -957,7 +1344,7 @@ def test_textual_pypi_version_dropdown_updates_input_and_preview() -> None:
         "PyPI package version",
         "2.0.0",
         [
-            {"name": "2.0.0 (latest)", "value": "2.0.0"},
+            {"name": "2.0.0", "value": "2.0.0"},
             {"name": "1.0.0", "value": "1.0.0"},
         ],
         command_preview_builder=preview,
@@ -965,25 +1352,95 @@ def test_textual_pypi_version_dropdown_updates_input_and_preview() -> None:
 
     async def run_scenario() -> None:
         async with app.run_test() as pilot:
-            select = app.query_one("#version-select", Select)
-            select.value = "1.0.0"
+            assert not app.query("#version-select")
+            version_input = app.query_one("#version", Input)
+            options = app.query_one("#version-options", OptionList)
+            assert version_input.value == "2.0.0"
+            assert tuple(version_input.selection) == (len("2.0.0"), len("2.0.0"))
+            assert options.option_count == 2
+
+            await pilot.press("down")
+            assert options.has_focus
+            await pilot.press("up")
+            assert version_input.has_focus
+            assert tuple(version_input.selection) == (len("2.0.0"), len("2.0.0"))
+
+            version_input.value = "1"
             await pilot.pause()
 
-            assert app.query_one("#version", Input).value == "1.0.0"
             command = app.query_one("#command-preview-command", Static)
-            assert str(command.content) == preview("1.0.0")
+            assert str(command.content) == preview("1")
+            assert options.option_count == 1
+            assert options.display is True
+            assert str(options.get_option_at_index(0).prompt) == "1.0.0"
 
-            app.action_accept_version()
+            version_input.value = "missing"
+            await pilot.pause()
+
+            assert str(command.content) == preview("missing")
+            assert options.option_count == 0
+            assert options.display is True
+
+            version_input.value = "1"
+            await pilot.pause()
+
+            await pilot.press("down")
+            assert options.has_focus
+            await pilot.press("enter")
 
     asyncio.run(run_scenario())
 
     assert app.return_value == "1.0.0"
 
 
+def test_textual_version_validator_blocks_invalid_value() -> None:
+    if importlib.util.find_spec("textual") is None:
+        pytest.skip("Textual is not installed")
+
+    from textual.widgets import Input, Static
+
+    def validate(value: str) -> str | None:
+        if value == "missing-package":
+            return "PyPI package not found: missing-package"
+        return None
+
+    app = make_textual_version_app(
+        "PyPI package name",
+        "",
+        [],
+        command_preview_builder=lambda value: (
+            f"agent-skill-installer --no-ui install --pypi-package {value}"
+            if str(value).strip()
+            else None
+        ),
+        validator=validate,
+    )
+
+    async def run_scenario() -> None:
+        async with app.run_test() as pilot:
+            package_input = app.query_one("#version", Input)
+            package_input.value = "missing-package"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.return_value is None
+            assert str(app.query_one("#error", Static).content) == (
+                "PyPI package not found: missing-package"
+            )
+
+            package_input.value = "valid-package"
+            await pilot.press("enter")
+
+    asyncio.run(run_scenario())
+
+    assert app.return_value == "valid-package"
+
+
 class ScriptedPrompter:
     def __init__(self, *answers) -> None:
         self.answers = iter(answers)
         self.calls: list[tuple[str, str]] = []
+        self.choices: list[list[dict[str, object]]] = []
         self.previews: list[str | None] = []
         self.summaries: list[str | None] = []
         self.checkbox_defaults: list[list[str] | None] = []
@@ -1001,6 +1458,7 @@ class ScriptedPrompter:
         submit_label="Continue",
     ):
         self.calls.append(("select", message))
+        self.choices.append(list(choices))
         self.submit_labels.append(submit_label)
         answer = next(self.answers)
         if isinstance(answer, BaseException):
@@ -1025,10 +1483,12 @@ class ScriptedPrompter:
         command_preview=None,
         command_preview_builder=None,
         summary=None,
+        summary_builder=None,
         default_values=None,
         submit_label="Continue",
     ):
         self.calls.append(("checkbox", message))
+        self.choices.append(list(choices))
         self.submit_labels.append(submit_label)
         self.checkbox_defaults.append(
             list(default_values) if default_values is not None else None
@@ -1041,7 +1501,11 @@ class ScriptedPrompter:
             if command_preview_builder is not None
             else command_preview
         )
-        self.summaries.append(summary)
+        self.summaries.append(
+            summary_builder(answer)
+            if summary_builder is not None
+            else summary
+        )
         return answer
 
     def path(
@@ -1052,6 +1516,7 @@ class ScriptedPrompter:
         command_preview=None,
         command_preview_builder=None,
         summary=None,
+        summary_builder=None,
         submit_label="Continue",
     ):
         self.calls.append(("path", message))
@@ -1065,7 +1530,11 @@ class ScriptedPrompter:
             if command_preview_builder is not None
             else command_preview
         )
-        self.summaries.append(summary)
+        self.summaries.append(
+            summary_builder(path)
+            if summary_builder is not None
+            else summary
+        )
         return path
 
     def text(
@@ -1075,6 +1544,8 @@ class ScriptedPrompter:
         *,
         command_preview=None,
         command_preview_builder=None,
+        summary=None,
+        summary_builder=None,
         submit_label="Continue",
     ):
         self.calls.append(("text", message))
@@ -1088,6 +1559,11 @@ class ScriptedPrompter:
             if command_preview_builder is not None
             else command_preview
         )
+        self.summaries.append(
+            summary_builder(value)
+            if summary_builder is not None
+            else summary
+        )
         return value
 
     def version(
@@ -1098,9 +1574,13 @@ class ScriptedPrompter:
         *,
         command_preview=None,
         command_preview_builder=None,
+        summary=None,
+        summary_builder=None,
+        validator=None,
         submit_label="Continue",
     ):
         self.calls.append(("version", message))
+        self.choices.append(list(choices))
         self.submit_labels.append(submit_label)
         answer = next(self.answers)
         if isinstance(answer, BaseException):
@@ -1111,6 +1591,15 @@ class ScriptedPrompter:
             if command_preview_builder is not None
             else command_preview
         )
+        self.summaries.append(
+            summary_builder(value)
+            if summary_builder is not None
+            else summary
+        )
+        if validator is not None:
+            error = validator(value)
+            if error:
+                raise InstallerError(error)
         return value
 
 
@@ -1194,6 +1683,9 @@ def test_update_command_preview_display_changes_mode_class() -> None:
         def __init__(self) -> None:
             self.classes = {"install-preview"}
 
+        def has_class(self, class_name: str) -> bool:
+            return class_name in self.classes
+
         def add_class(self, class_name: str) -> None:
             self.classes.add(class_name)
 
@@ -1233,6 +1725,18 @@ def test_update_command_preview_display_changes_mode_class() -> None:
     )
     assert app.panel.classes == {"uninstall-preview"}
 
+    update_command_preview_display(
+        app,
+        None,
+        object,
+        empty_message="Choose an install source.",
+        preview_class="install-preview",
+    )
+
+    assert app.command.text == "Choose an install source."
+    assert app.copy_button.disabled is True
+    assert app.panel.classes == {"install-preview"}
+
 
 def test_install_source_choices_offer_bundled_pypi_and_editable(
     tmp_path: Path,
@@ -1256,6 +1760,7 @@ def test_install_source_choices_offer_bundled_pypi_and_editable(
         "name": "Editable local checkout (version 1.2.4, git abc1234, dirty)",
         "value": "editable",
     }
+    assert install_source_choices(project)[-1]["value"] == "github"
 
 
 def test_pypi_version_choices_include_latest_ten_published_versions(
@@ -1403,6 +1908,65 @@ def test_complete_with_ui_selects_pypi_source(
     ]
 
 
+def test_complete_with_ui_selects_github_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    monkeypatch.setattr(
+        "agent_skill_installer.cli.install_source_choices",
+        lambda _project: [
+            {"name": "Bundled skill copy", "value": "copy"},
+            {"name": "GitHub repository URL", "value": "github"},
+        ],
+    )
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+    )
+    repo = tmp_path / "repo"
+    monkeypatch.setattr("agent_skill_installer.cli.find_ui_repo_root", lambda args: repo)
+    prompter = ScriptedPrompter(
+        "install",
+        "github",
+        "https://github.com/example/demo",
+        ["codex"],
+        "repo",
+    )
+
+    complete_with_ui(project, args, prompter)
+
+    assert args.command == "install"
+    assert args.editable is False
+    assert args.pypi_version is None
+    assert args.github_url == "https://github.com/example/demo"
+    assert args.targets == [("codex", "repo")]
+    assert args.repo == repo
+    assert prompter.calls == [
+        ("select", "What would you like to do with example-agent-skill?"),
+        ("select", "Install source for example-agent-skill"),
+        ("text", "GitHub repository URL"),
+        ("checkbox", "Select agents for example-agent-skill"),
+        ("select", "Install location for example-agent-skill"),
+    ]
+    assert prompter.previews == [
+        "example-agent-skill --no-ui install --agent all --scope global",
+        "example-agent-skill --no-ui install "
+        "--github-url https://github.com/OWNER/example-agent-skill "
+        "--agent all --scope global",
+        "example-agent-skill --no-ui install "
+        "--github-url https://github.com/example/demo --agent all --scope global",
+        "example-agent-skill --no-ui install "
+        "--github-url https://github.com/example/demo --agent codex --scope global",
+        "example-agent-skill --no-ui install "
+        f"--github-url https://github.com/example/demo --agent codex --scope repo --repo {repo}",
+    ]
+
+
 def test_complete_with_ui_escape_goes_back_one_screen(
     tmp_path: Path,
     monkeypatch,
@@ -1456,25 +2020,1052 @@ def test_complete_with_ui_escape_goes_back_one_screen(
     ]
 
 
-def test_package_metadata_is_generic() -> None:
+def test_package_metadata_exposes_generic_console_app() -> None:
     pyproject = Path(__file__).resolve().parents[2].joinpath("pyproject.toml").read_text()
 
     assert 'name = "agent-skill-installer"' in pyproject
     assert f'version = "{__version__}"' in pyproject
-    assert "[project.scripts]" not in pyproject
+    assert "[project.scripts]" in pyproject
+    assert 'agent-skill-installer = "agent_skill_installer.__main__:main"' in pyproject
 
 
-def test_python_module_entry_point_explains_library_usage() -> None:
+def test_python_module_entry_point_shows_generic_help() -> None:
     env = os.environ.copy()
     src_dir = Path(__file__).resolve().parents[2] / "src"
     env["PYTHONPATH"] = str(src_dir)
     completed = subprocess.run(
-        [sys.executable, "-m", "agent_skill_installer"],
+        [sys.executable, "-m", "agent_skill_installer", "--help"],
         text=True,
         capture_output=True,
         check=False,
         env=env,
     )
 
-    assert completed.returncode == 2
-    assert "agent-skill-installer is a library" in completed.stderr
+    assert completed.returncode == 0
+    assert "Install or uninstall agent skills from generic sources." in completed.stdout
+
+
+def test_generic_console_bare_command_uses_interactive_ui(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+
+    def complete(args: Namespace) -> None:
+        args.command = "install"
+        args.skill_path = source
+        args.skill_name = "example-agent-skill"
+        args.agent = "codex"
+        args.scope = "repo"
+        args.repo = repo
+
+    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: True)
+    monkeypatch.setattr("agent_skill_installer.__main__.complete_with_ui", complete)
+
+    exit_code = generic_main([])
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed example-agent-skill local (editable) to Codex repo:"
+        in output.out
+    )
+    skill_dir = repo / ".codex" / "skills" / "example-agent-skill"
+    assert skill_dir.is_symlink()
+    assert skill_dir.resolve() == source
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+
+def test_generic_install_source_choices_keep_remote_first_without_local_skill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    choices = generic_install_source_choices()
+
+    assert [choice["value"] for choice in choices] == ["pypi", "github", "local"]
+
+
+@pytest.mark.parametrize("layout", ["root", "nested"])
+def test_generic_install_source_choices_prioritize_local_development_source(
+    tmp_path: Path,
+    monkeypatch,
+    layout: str,
+) -> None:
+    source = tmp_path if layout == "root" else tmp_path / "skill"
+    make_skill(source)
+    monkeypatch.chdir(tmp_path)
+
+    choices = generic_install_source_choices()
+
+    assert choices[0] == {
+        "name": "Local repo or skill directory (development mode)",
+        "value": "local",
+    }
+
+
+def test_generic_complete_with_ui_preview_uses_detected_local_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = make_skill(tmp_path / "skill")
+    monkeypatch.chdir(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "local", source, ["codex"], "global")
+
+    complete_generic_with_ui(args, prompter)
+
+    assert prompter.choices[1][0]["value"] == "local"
+    assert prompter.previews[0] == (
+        "agent-skill-installer --no-ui install "
+        "--skill-path skill --agent all --scope global"
+    )
+    assert prompter.summaries[0] == "Installing a skill"
+
+
+def test_generic_complete_with_ui_selects_local_install_source(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "local", source, ["codex"], "repo")
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.command == "install"
+    assert args.skill_path == source
+    assert args.agent == "codex"
+    assert args.scope == "repo"
+    assert args.repo == repo
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("path", "Local repo or skill directory"),
+        ("checkbox", "Select agents"),
+        ("select", "Install location"),
+    ]
+    assert prompter.previews[0] == (
+        "agent-skill-installer --no-ui install "
+        "--pypi-package agent-workflow-dsl --agent all --scope global"
+    )
+    assert prompter.previews[1] == (
+        "agent-skill-installer --no-ui install "
+        "--skill-path skill --agent all --scope global"
+    )
+    assert prompter.previews[2] == (
+        "agent-skill-installer --no-ui install "
+        f"--skill-path {source} --agent all --scope global"
+    )
+    assert prompter.summaries[1] == (
+        f"Installing agent-skill-installer from editable local path {Path.cwd()}"
+    )
+    assert prompter.summaries[2] == (
+        f"Installing skill-source from editable local path {source}"
+    )
+    assert prompter.submit_labels[-1] == "Install"
+
+
+def test_generic_install_source_selection_summary_excludes_target(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "skill")
+    args = Namespace(
+        command="install",
+        agent="all",
+        scope="global",
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("local", source)
+
+    complete_generic_with_ui(args, prompter)
+
+    assert prompter.calls == [
+        ("select", "Install source"),
+        ("path", "Local repo or skill directory"),
+    ]
+    assert prompter.summaries[0] == (
+        f"Installing agent-skill-installer from editable local path {Path.cwd()}"
+    )
+    assert "Into" not in prompter.summaries[0]
+    assert prompter.summaries[1] == (
+        f"Installing skill from editable local path {source}\n"
+        "Into Codex Global, Claude Global"
+    )
+
+
+def test_generic_complete_with_ui_escape_goes_back_one_screen(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "local",
+        source,
+        BackRequested(),
+        source,
+        ["codex"],
+        "global",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.command == "install"
+    assert args.skill_path == source
+    assert args.agent == "codex"
+    assert args.scope == "global"
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("path", "Local repo or skill directory"),
+        ("checkbox", "Select agents"),
+        ("path", "Local repo or skill directory"),
+        ("checkbox", "Select agents"),
+        ("select", "Install location"),
+    ]
+
+
+def test_generic_complete_with_ui_escape_on_first_screen_exits() -> None:
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(BackRequested())
+
+    with pytest.raises(KeyboardInterrupt):
+        complete_generic_with_ui(args, prompter)
+
+
+def test_recent_installs_keep_last_ten_and_ignore_load_errors(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    for index in range(12):
+        remember_recent_pypi_package(f"skill-{index}", home=home)
+    remember_recent_pypi_package("skill-5", home=home)
+    for index in range(12):
+        remember_recent_github_url(
+            f"https://github.com/example/skill-{index}",
+            home=home,
+        )
+    remember_recent_github_url("https://github.com/example/skill-5", home=home)
+
+    assert load_recent_pypi_packages(home) == [
+        "skill-5",
+        "skill-11",
+        "skill-10",
+        "skill-9",
+        "skill-8",
+        "skill-7",
+        "skill-6",
+        "skill-4",
+        "skill-3",
+        "skill-2",
+    ]
+    assert load_recent_github_urls(home) == [
+        "https://github.com/example/skill-5",
+        "https://github.com/example/skill-11",
+        "https://github.com/example/skill-10",
+        "https://github.com/example/skill-9",
+        "https://github.com/example/skill-8",
+        "https://github.com/example/skill-7",
+        "https://github.com/example/skill-6",
+        "https://github.com/example/skill-4",
+        "https://github.com/example/skill-3",
+        "https://github.com/example/skill-2",
+    ]
+
+    recent_installations_path(home).write_text("{")
+
+    assert load_recent_pypi_packages(home) == []
+    assert load_recent_github_urls(home) == []
+
+
+def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    versions = [f"1.{index}.0" for index in range(12)]
+    wheel = make_skill_wheel(tmp_path / "example.whl", make_project(tmp_path))
+    downloads: list[str | None] = []
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.published_pypi_versions",
+        lambda _project, *, limit=10: versions[:limit],
+    )
+
+    def fake_download(
+        project: SkillProject,
+        version: str | None,
+        _download_dir: Path,
+    ) -> Path:
+        downloads.append(version)
+        return wheel
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        fake_download,
+    )
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    remember_recent_pypi_package("recent-agent-skill", home=home)
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=home,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "pypi",
+        "example-agent-skill",
+        "9.9.9",
+        ["codex"],
+        "global",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.command == "install"
+    assert args.pypi_package == "example-agent-skill"
+    assert args.pypi_version == "9.9.9"
+    assert downloads == ["9.9.9"]
+    assert getattr(args, "_validated_pypi_wheel_path").is_file()
+    assert load_recent_pypi_packages(home) == ["recent-agent-skill"]
+    results = run_generic_install(args)
+    assert [result.status for result in results] == ["installed"]
+    assert downloads == ["9.9.9"]
+    assert load_recent_pypi_packages(home) == [
+        "example-agent-skill",
+        "recent-agent-skill",
+    ]
+    assert (
+        home / ".codex" / "skills" / "example-agent-skill" / "SKILL.md"
+    ).read_text() == "wheel skill\n"
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("version", "PyPI package name"),
+        ("version", "PyPI package version"),
+        ("checkbox", "Select agents"),
+        ("select", "Install location"),
+    ]
+    assert prompter.choices[2] == [
+        {"name": "recent-agent-skill", "value": "recent-agent-skill"},
+    ]
+    assert prompter.choices[3] == [
+        {"name": "1.0.0", "value": "1.0.0"},
+        *[
+            {"name": f"1.{index}.0", "value": f"1.{index}.0"}
+            for index in range(1, 10)
+        ],
+    ]
+    assert prompter.summaries == [
+        "Installing a skill",
+        "Installing PyPI package agent-workflow-dsl",
+        "Installing PyPI package example-agent-skill",
+        "Installing PyPI package example-agent-skill 9.9.9",
+        "Installing PyPI package example-agent-skill 9.9.9\nInto Codex Global",
+        "Installing PyPI package example-agent-skill 9.9.9\nInto Codex Global",
+    ]
+
+
+def test_generic_complete_with_ui_defaults_pypi_package_to_agent_workflow_dsl(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = SkillProject(
+        package_name="agent-workflow-dsl",
+        import_name="agent_workflow_dsl",
+        version="0.0.1",
+        skill_name="agent-workflow-dsl",
+        description="AWD skill.",
+        bundled_skill_source=make_skill(tmp_path / "awd-skill"),
+    )
+    wheel = make_skill_wheel(tmp_path / "awd.whl", project)
+    seen_packages: list[str] = []
+
+    def fake_versions(project: SkillProject, *, limit=10) -> list[str]:
+        seen_packages.append(project.pypi_project_name or project.package_name)
+        return ["0.0.1"]
+
+    def fake_download(
+        project: SkillProject,
+        version: str | None,
+        _download_dir: Path,
+    ) -> Path:
+        assert project.pypi_project_name == "agent-workflow-dsl"
+        assert version == "0.0.1"
+        return wheel
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.published_pypi_versions",
+        fake_versions,
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        fake_download,
+    )
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=tmp_path / "home",
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "pypi", "", "0.0.1", ["codex"], "global")
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.pypi_package == "agent-workflow-dsl"
+    assert args.pypi_version == "0.0.1"
+    assert seen_packages == ["agent-workflow-dsl"]
+    assert prompter.previews[2] == (
+        "agent-skill-installer --no-ui install --pypi-package agent-workflow-dsl "
+        "--agent all --scope global"
+    )
+
+
+def test_generic_complete_with_ui_selects_github_url_from_dropdown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    archive = make_github_archive(tmp_path / "github.zip")
+    downloads: list[str] = []
+
+    def fake_download(source, _download_dir: Path) -> Path:
+        downloads.append(source.url)
+        return archive
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        fake_download,
+    )
+    remember_recent_github_url("https://github.com/example/recent-skill", home=home)
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=home,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "github",
+        "https://github.com/example/recent-skill",
+        ["codex"],
+        "global",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.command == "install"
+    assert args.github_url == "https://github.com/example/recent-skill"
+    assert downloads == ["https://github.com/example/recent-skill"]
+    assert getattr(args, "_validated_github_archive_path").is_file()
+    results = run_generic_install(args)
+    assert [result.status for result in results] == ["installed"]
+    assert downloads == ["https://github.com/example/recent-skill"]
+    assert args.agent == "codex"
+    assert args.scope == "global"
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("version", "GitHub repository URL"),
+        ("checkbox", "Select agents"),
+        ("select", "Install location"),
+    ]
+    assert prompter.choices[2] == [
+        {
+            "name": "https://github.com/example/recent-skill",
+            "value": "https://github.com/example/recent-skill",
+        },
+    ]
+    assert prompter.previews[2] == (
+        "agent-skill-installer --no-ui install "
+        "--github-url https://github.com/example/recent-skill "
+        "--agent all --scope global"
+    )
+    assert prompter.summaries[2] == (
+        "Installing recent-skill from GitHub "
+        "https://github.com/example/recent-skill at main"
+    )
+
+
+def test_generic_complete_with_ui_validates_pypi_package_contains_skill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wheel = tmp_path / "plain-package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("plain_package/__init__.py", "")
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.published_pypi_versions",
+        lambda _project, *, limit=10: ["1.0.0"],
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        lambda _project, _version, _download_dir: wheel,
+    )
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "pypi",
+        "plain-package",
+        "1.0.0",
+        ["codex"],
+        "global",
+    )
+
+    with pytest.raises(InstallerError, match="bundled SKILL.md"):
+        complete_generic_with_ui(args, prompter)
+
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("version", "PyPI package name"),
+        ("version", "PyPI package version"),
+    ]
+
+
+def test_generic_complete_with_ui_validates_github_url_contains_skill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive_path = tmp_path / "github.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("demo-main/README.md", "no skill here\n")
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        lambda _source, _download_dir: archive_path,
+    )
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=tmp_path / "home",
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "github",
+        "https://github.com/example/demo",
+        ["codex"],
+        "global",
+    )
+
+    with pytest.raises(InstallerError, match="SKILL.md"):
+        complete_generic_with_ui(args, prompter)
+
+    assert load_recent_github_urls(args.home) == []
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("version", "GitHub repository URL"),
+    ]
+
+
+def test_generic_complete_with_ui_stops_when_pypi_package_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def missing_package(_project, *, limit=10):
+        raise InstallerError(
+            "failed to fetch PyPI metadata: HTTP Error 404: Not Found"
+        )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.published_pypi_versions",
+        missing_package,
+    )
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "pypi", "missing-package")
+
+    with pytest.raises(
+        InstallerError,
+        match="PyPI package not found: missing-package",
+    ):
+        complete_generic_with_ui(args, prompter)
+
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("version", "PyPI package name"),
+    ]
+
+
+def test_generic_complete_with_ui_selects_installed_uninstall_target(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    home = tmp_path / "home"
+    Installer(project).install(["all"], "global", home=home)
+    args = Namespace(
+        command=None,
+        skill_name=None,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+        home=home,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("uninstall", "0", ["all"])
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.command == "uninstall"
+    assert args.skill_name == project.skill_name
+    assert args.package_name == project.package_name
+    assert args.agent == "all"
+    assert args.scope == "global"
+    assert len(args.uninstall_statuses) == 2
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Skills installed by Agent Skill Installer"),
+        ("checkbox", f"Select targets to uninstall for {project.skill_name}"),
+    ]
+    assert prompter.previews[0] is None
+    assert prompter.summaries[0] == "Uninstalling a skill"
+    assert prompter.previews[1] == (
+        "agent-skill-installer --no-ui uninstall "
+        f"--skill-name {project.skill_name} --agent all --scope global"
+    )
+    assert prompter.summaries[1] == f"Uninstalling {project.skill_name}"
+    assert prompter.choices[1] == [
+        {
+            "name": project.skill_name,
+            "description": "2 installed targets\nPackage: example-agent-skill",
+            "value": "0",
+        }
+    ]
+    assert prompter.choices[2][0] == {
+        "name": project.skill_name,
+        "value": f"skill:{project.skill_name}",
+        "disabled": True,
+        "kind": "group",
+    }
+    assert prompter.choices[2][1] == {
+        "name": "  All installed targets",
+        "description": "Uninstall this skill from every listed target.",
+        "value": "all",
+        "kind": "all",
+    }
+    assert [
+        choice["name"].strip()
+        for choice in prompter.choices[2][2:]
+    ] == [
+        "Claude Code User global - version 1.2.3",
+        "Codex User global - version 1.2.3",
+    ]
+    assert prompter.previews[-1] == (
+        "agent-skill-installer --no-ui uninstall "
+        f"--skill-name {project.skill_name} --agent all --scope global"
+    )
+    results = run_generic_uninstall(args)
+    assert [result.status for result in results] == ["removed", "removed"]
+    assert not (home / ".codex" / "skills" / project.skill_name).exists()
+    assert not (home / ".claude" / "skills" / project.skill_name).exists()
+
+
+def test_generic_uninstall_target_labels_github_ref_as_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    archive = make_github_archive(tmp_path / "github.zip")
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+    assert generic_main(
+        [
+            "install",
+            "--github-url",
+            "https://github.com/example/demo",
+            "--github-ref",
+            "main",
+            "--skill-name",
+            "demo-skill",
+            "--agent",
+            "all",
+            "--scope",
+            "global",
+            "--home",
+            str(home),
+        ]
+    ) == 0
+    args = Namespace(
+        command="uninstall",
+        skill_name=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=home,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("0", ["0", "1"])
+
+    complete_generic_with_ui(args, prompter)
+
+    assert [
+        choice["name"].strip()
+        for choice in prompter.choices[1][2:]
+    ] == [
+        "Claude Code User global - GitHub ref main",
+        "Codex User global - GitHub ref main",
+    ]
+
+
+def test_generic_console_installs_and_uninstalls_local_skill(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+
+    install_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--skill-name",
+            "example-agent-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert install_code == 0
+    assert (
+        "Installed example-agent-skill local (editable) to Codex repo:"
+        in output.out
+    )
+    skill_dir = repo / ".codex" / "skills" / "example-agent-skill"
+    assert skill_dir.is_symlink()
+    assert skill_dir.resolve() == source
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+    uninstall_code = generic_main(
+        [
+            "uninstall",
+            "--skill-name",
+            "example-agent-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert uninstall_code == 0
+    assert "Removed example-agent-skill local from Codex repo:" in output.out
+    assert not (repo / ".codex" / "skills" / "example-agent-skill").exists()
+
+
+def test_generic_console_installs_local_repo_with_skill_subdir(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source_repo = make_skill_checkout(tmp_path / "local-skill-repo")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--local-repo",
+            str(source_repo),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed local-skill-repo local (editable) to Codex repo:"
+        in output.out
+    )
+    skill_dir = repo / ".codex" / "skills" / "local-skill-repo"
+    assert skill_dir.is_symlink()
+    assert skill_dir.resolve() == source_repo / "skill"
+    assert (skill_dir / "SKILL.md").read_text() == "editable skill\n"
+
+
+def test_generic_console_installs_github_skill(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    archive = make_github_archive(tmp_path / "github.zip")
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--github-url",
+            "https://github.com/example/demo",
+            "--github-ref",
+            "v2",
+            "--skill-name",
+            "demo-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed demo-skill v2 (GitHub archive) to Codex repo:"
+        in output.out
+    )
+    skill_dir = repo / ".codex" / "skills" / "demo-skill"
+    assert (skill_dir / "SKILL.md").read_text() == "github skill\n"
+    assert read_install_manifest(
+        SkillProject(
+            package_name="demo-skill",
+            import_name="agent_skill_installer",
+            version="v2",
+            skill_name="demo-skill",
+            description="",
+        ),
+        skill_dir,
+    )["source_url"] == "https://github.com/example/demo"
+    assert load_recent_github_urls(home) == ["https://github.com/example/demo"]
+
+
+def test_generic_console_does_not_remember_failed_github_install(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    archive_path = tmp_path / "github.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("demo-main/README.md", "no skill here\n")
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        lambda _source, _download_dir: archive_path,
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--github-url",
+            "https://github.com/example/demo",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "SKILL.md" in output.err
+    assert load_recent_github_urls(home) == []
+
+
+def test_generic_console_installs_pypi_skill(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        lambda _project, _version, _download_dir: wheel,
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "example-agent-skill",
+            "--pypi-version",
+            "2.0.0",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed example-agent-skill 2.0.0 (PyPI wheel) "
+        "to Codex repo:"
+        in output.out
+    )
+    assert (
+        repo / ".codex" / "skills" / "example-agent-skill" / "SKILL.md"
+    ).read_text() == "wheel skill\n"
+    assert load_recent_pypi_packages(home) == ["example-agent-skill"]
+
+
+def test_generic_console_does_not_remember_failed_pypi_install(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheel = tmp_path / "plain-package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("plain_package/__init__.py", "")
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        lambda _project, _version, _download_dir: wheel,
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "plain-package",
+            "--pypi-version",
+            "1.0.0",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "SKILL.md" in output.err
+    assert load_recent_pypi_packages(home) == []

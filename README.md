@@ -1,9 +1,10 @@
 # Agent Skill Installer
 
-`agent-skill-installer` provides the `agent_skill_installer` Python package, a generic
-library for projects that distribute agent skills. A project supplies metadata
-for its own skill package, and this library handles installation into supported
-agent homes or repositories.
+`agent-skill-installer` provides the `agent-skill-installer` command and the
+`agent_skill_installer` Python package for projects that distribute agent
+skills. The command can install skills from PyPI wheels, GitHub archives, or
+local `SKILL.md` directories; the library exposes the same installer machinery
+for custom integrations.
 
 The core is intentionally project-neutral. It does not ship a skill and does
 not know about any specific skill package.
@@ -35,24 +36,91 @@ for the files to inspect and the commands to run.
 - Editable installs from a local checkout containing `skill/SKILL.md` or a root
   `SKILL.md`.
 - PyPI wheel installs that extract only the project skill payload.
+- GitHub archive installs from repository root, `skill/`, or an explicit tree
+  path.
 - Install manifests for ownership checks and uninstall cleanup.
 - Discoverability hook blocks with project-specific markers.
-- A reusable non-interactive CLI entry point for project-specific wrappers.
+- A generic console app with a text UI, no-UI mode, and reusable CLI functions
+  for custom tools.
+
+## Command Usage
+
+Run the generic UI and choose an external source:
+
+```bash
+agent-skill-installer
+```
+
+The generic command installs from local repos or skill directories, PyPI
+packages, and GitHub repos. Use `--no-ui` for scripts.
+
+When you run the interactive command from a development checkout that contains
+`SKILL.md` or `skill/SKILL.md`, the UI shows the local repo or skill directory
+source first and uses that detected path as the default. This is the fastest
+development-mode path for testing a skill before publishing it.
+
+Install a published skill package by extracting its bundled skill payload from a
+wheel:
+
+```bash
+agent-skill-installer --no-ui install \
+  --pypi-package your-skill-package \
+  --pypi-version 1.2.3 \
+  --agent all \
+  --scope global
+```
+
+The interactive PyPI package and GitHub URL prompts remember the 10 most recent
+successful installs for each source in
+`~/.agent-skill-installer/recent-installations.json` and offer them in
+filterable dropdowns. If that state file cannot be read, the installer ignores
+it and continues with an empty recent list.
+
+After a PyPI package and version are selected in the UI, the installer downloads
+the wheel to a temporary directory and validates that it contains a bundled
+`SKILL.md`. The final install reuses that same downloaded wheel.
+
+Install directly from GitHub without cloning:
+
+```bash
+agent-skill-installer --no-ui install \
+  --github-url https://github.com/OWNER/REPO/tree/main/skill \
+  --agent codex \
+  --scope repo
+```
+
+Install a local repo or skill directory:
+
+```bash
+agent-skill-installer --no-ui install \
+  --local-repo ./your-skill-package \
+  --skill-name your-skill-package \
+  --agent codex \
+  --scope repo
+```
+
+Uninstall a skill installed by the generic command:
+
+```bash
+agent-skill-installer --no-ui uninstall \
+  --skill-name your-skill-package \
+  --agent codex \
+  --scope repo
+```
 
 ## Library Usage
 
-Most projects should expose their own command-line wrapper instead of importing
-`Installer` directly. Direct use is still available for tests, custom tooling,
-or applications that want to drive installation themselves:
+Projects may also import `Installer` directly for tests, custom tooling, or
+applications that want to drive installation themselves:
 
 ```python
 from agent_skill_installer import Installer, SkillProject
 
 PROJECT = SkillProject(
-    package_name="my-agent-skill",
-    import_name="my_agent_skill",
+    package_name="your-skill-package",
+    import_name="your_skill_package",
     version="1.2.3",
-    skill_name="my-agent-skill",
+    skill_name="your-skill-package",
     description="Use this skill for my project workflows.",
 )
 
@@ -62,26 +130,25 @@ Installer(PROJECT).uninstall(["codex"], "global")
 ```
 
 By default, bundled installs read skill files from
-`my_agent_skill/_skill` inside the project package. Tests or development tools
+`your_skill_package/_skill` inside the project package. Tests or development tools
 can point `bundled_skill_source` at a filesystem directory.
 
 ## Use In Your Skill Package
 
-`agent-skill-installer` is meant to be a dependency of a package that carries a
-skill. The skill package owns the user-facing package name, console script,
-metadata, and bundled skill files; this library supplies the shared installer
-behavior.
+`agent-skill-installer` can install directly from generic sources, so a skill
+package does not need to expose its own installer command. Packages that still
+want a project-specific command may wrap the shared CLI helpers.
 
 ### Package Layout
 
 A typical setuptools project looks like this:
 
 ```text
-my-agent-skill/
+your-skill-package/
   MANIFEST.in
   pyproject.toml
   src/
-    my_agent_skill/
+    your_skill_package/
       __init__.py
       cli.py
       _skill/
@@ -93,14 +160,14 @@ my-agent-skill/
 ```
 
 The bundled skill directory must contain `SKILL.md`. By default, the installer
-looks for that directory at `my_agent_skill/_skill`, where `my_agent_skill` is
+looks for that directory at `your_skill_package/_skill`, where `your_skill_package` is
 the `SkillProject.import_name` value and `_skill` is the default
 `SkillProject.bundled_skill_path`.
 
 ### Package Configuration
 
-The skill package should depend on this library, expose its own console script,
-and include the bundled skill files in its wheel:
+The skill package should depend on this library and include the bundled skill
+files in its wheel:
 
 ```toml
 [build-system]
@@ -108,17 +175,14 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "my-agent-skill"
+name = "your-skill-package"
 version = "1.2.3"
-description = "Install the my-agent-skill skill for supported agents"
+description = "Install the your-skill-package skill for supported agents"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "agent-skill-installer>=0.1.0",
 ]
-
-[project.scripts]
-my-agent-skill = "my_agent_skill.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -130,11 +194,11 @@ include-package-data = true
 For setuptools, include the bundled skill payload with `MANIFEST.in`:
 
 ```text
-recursive-include src/my_agent_skill/_skill *
+recursive-include src/your_skill_package/_skill *
 ```
 
 If you use another build backend, configure the equivalent package-data rule so
-the built wheel contains `my_agent_skill/_skill/SKILL.md` and any related skill
+the built wheel contains `your_skill_package/_skill/SKILL.md` and any related skill
 files.
 
 ### Project Metadata
@@ -147,7 +211,8 @@ Put the project version somewhere importable by the wrapper:
 __version__ = "1.2.3"
 ```
 
-Then create a wrapper such as `src/my_agent_skill/cli.py`:
+If you want a project-specific wrapper, create a file such as
+`src/your_skill_package/cli.py`:
 
 ```python
 from __future__ import annotations
@@ -159,10 +224,10 @@ from . import __version__
 
 
 PROJECT = SkillProject(
-    package_name="my-agent-skill",
-    import_name="my_agent_skill",
+    package_name="your-skill-package",
+    import_name="your_skill_package",
     version=__version__,
-    skill_name="my-agent-skill",
+    skill_name="your-skill-package",
     description="Use this skill for my project workflows.",
 )
 
@@ -189,18 +254,32 @@ The most important fields are:
 
 ### Local Development
 
-Install the skill package in editable mode and ask its wrapper to symlink the
-checkout skill files:
+Install directly from a local repo or skill directory while developing:
 
 ```bash
-python -m pip install -e .
-my-agent-skill --no-ui install --editable --agent all --scope repo
-my-agent-skill --no-ui uninstall --agent all --scope repo
+agent-skill-installer --no-ui install \
+  --local-repo ./your-skill-package \
+  --skill-name your-skill-package \
+  --agent all \
+  --scope repo
+agent-skill-installer --no-ui uninstall \
+  --skill-name your-skill-package \
+  --agent all \
+  --scope repo
 ```
 
-Editable installs search upward from the current directory for either
-`skill/SKILL.md` or a root `SKILL.md`. Use `--scope repo` from inside the
-repository where the agent should discover the skill, or pass `--repo PATH`.
+Use `--scope repo` from inside the repository where the agent should discover
+the skill, or pass `--repo PATH`.
+
+The interactive generic command also detects local development sources. From a
+directory containing `SKILL.md` or `skill/SKILL.md`, run:
+
+```bash
+agent-skill-installer
+```
+
+The first install source option will be local development mode, with the local
+skill path already selected as the default.
 
 ### Installed Paths
 
@@ -219,43 +298,80 @@ discoverability block, and directories the installer created.
 
 ### PyPI Release Flow
 
-After publishing your skill package to PyPI, users can install the package and
-then install the bundled skill:
+After publishing your skill package to PyPI, users can install the bundled skill
+directly from the published wheel:
 
 ```bash
-python -m pip install my-agent-skill
-my-agent-skill --no-ui install --agent all --scope global
+agent-skill-installer --no-ui install \
+  --pypi-package your-skill-package \
+  --agent all \
+  --scope global
 ```
 
-The wrapper also supports installing the skill payload from a specific published
-wheel version:
+Pin a specific published wheel version when desired:
 
 ```bash
-my-agent-skill --no-ui install --pypi-version 1.2.3 --agent all --scope global
+agent-skill-installer --no-ui install \
+  --pypi-package your-skill-package \
+  --pypi-version 1.2.3 \
+  --agent all \
+  --scope global
 ```
 
-That mode downloads the wheel named by `package_name` or `pypi_project_name` and
-extracts only `my_agent_skill/_skill`, without installing that downloaded wheel
-into the current Python environment.
+That mode downloads the named wheel and extracts only the bundled skill payload,
+without installing that downloaded wheel into the current Python environment.
+
+### GitHub Source Installs
+
+The generic command can also install the skill payload directly from a GitHub
+archive:
+
+```bash
+agent-skill-installer --no-ui install \
+  --github-url https://github.com/example/your-skill-package \
+  --agent all \
+  --scope global
+```
+
+By default this uses the `main` ref and looks for either `skill/SKILL.md` or a
+root `SKILL.md`. For a specific ref or nested skill directory, use either a tree
+URL or explicit flags:
+
+```bash
+agent-skill-installer --no-ui install \
+  --github-url https://github.com/example/your-skill-package/tree/v1/packages/skill \
+  --agent codex \
+  --scope repo
+
+agent-skill-installer --no-ui install \
+  --github-url https://github.com/example/your-skill-package \
+  --github-ref v1 \
+  --github-path packages/skill \
+  --agent codex \
+  --scope repo
+```
 
 Before release, a minimal package check is:
 
 ```bash
 python -m build
 python -m twine check dist/*
-python -m pip install dist/my_agent_skill-1.2.3-py3-none-any.whl
+python -m pip install dist/your_skill_package-1.2.3-py3-none-any.whl
 ```
 
-Then verify the wrapper:
+Then verify the generic command against the published package:
 
 ```bash
-my-agent-skill --version
-my-agent-skill --no-ui install --agent codex --scope repo
-my-agent-skill --no-ui uninstall --agent codex --scope repo
+agent-skill-installer --version
+agent-skill-installer --no-ui install \
+  --pypi-package your-skill-package --pypi-version 1.2.3 \
+  --agent codex --scope repo
+agent-skill-installer --no-ui uninstall \
+  --skill-name your-skill-package --agent codex --scope repo
 ```
 
 ## Status
 
-This is a standalone, generic installer core. Skill packages should integrate
-through thin project-specific adapters that provide their own metadata, bundled
-skill files, and CLI wrappers.
+This is a standalone, generic installer. Skill packages can rely on the
+`agent-skill-installer` command directly, or use the Python APIs for custom
+integration.
