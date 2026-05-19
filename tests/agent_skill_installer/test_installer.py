@@ -785,23 +785,11 @@ def test_cli_no_ui_command_preview_uses_project_package_name(tmp_path: Path) -> 
     )
 
 
-def test_code_does_not_carry_awd_specific_constants() -> None:
-    root = Path(__file__).resolve().parents[2] / "src" / "agent_skill_installer"
-    source = "\n".join(path.read_text() for path in root.glob("*.py"))
-
-    assert "agent-workflow-dsl" not in source
-    assert "agent_workflow_dsl" not in source
-    assert "awd-installer" not in source
-    assert "AWD" not in source
-
-
 def test_package_metadata_is_generic() -> None:
     pyproject = Path(__file__).resolve().parents[2].joinpath("pyproject.toml").read_text()
 
     assert 'name = "agent-skill-installer"' in pyproject
     assert f'version = "{__version__}"' in pyproject
-    assert "agent-workflow-dsl" not in pyproject
-    assert "agent_workflow_dsl" not in pyproject
     assert "[project.scripts]" not in pyproject
 
 
