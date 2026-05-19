@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import zipfile
 from pathlib import Path
 
@@ -294,7 +295,8 @@ def test_cli_no_ui_command_preview_uses_project_package_name(tmp_path: Path) -> 
         editable=True,
     ) == (
         "example-agent-skill --no-ui install --editable --agent all --scope global "
-        f"--codex-home {tmp_path / 'codex'} --claude-home {tmp_path / 'claude'}"
+        f"--codex-home {shlex.quote(str(tmp_path / 'codex'))} "
+        f"--claude-home {shlex.quote(str(tmp_path / 'claude'))}"
     )
 
 
