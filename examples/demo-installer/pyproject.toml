@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "demo-agent-skill"
+version = "0.1.0"
+description = "Demo skill package using agent-skill-installer"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "agent-skill-installer>=0.1.0",
+]
+
+[project.scripts]
+demo-agent-skill = "demo_agent_skill.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+include-package-data = true

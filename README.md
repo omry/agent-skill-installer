@@ -8,6 +8,25 @@ agent homes or repositories.
 The core is intentionally project-neutral. It does not ship a skill and does
 not know about any specific skill package.
 
+## Currently Supported Agents
+
+- Codex
+- Claude Code
+
+## Examples
+
+The `examples/` directory contains runnable integration examples:
+
+- [`examples/demo-installer/`](https://github.com/omry/agent-skill-installer/blob/main/examples/demo-installer/README.md)
+  is a complete skill-carrying Python package with a bundled demo skill and a
+  project-specific CLI wrapper.
+- [`examples/api-install/`](https://github.com/omry/agent-skill-installer/blob/main/examples/api-install/README.md)
+  shows how to install and uninstall a skill directly through the Python API
+  without exposing a package CLI.
+
+Each example directory has its own README with the files to inspect and the
+commands to run.
+
 ## What It Provides
 
 - Codex and Claude Code install targets.
