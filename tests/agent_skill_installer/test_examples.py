@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -92,6 +93,82 @@ def test_demo_installer_example_installs_and_uninstalls(tmp_path: Path) -> None:
         "Removed demo-agent-skill 0.1.0 from Codex repo:"
         in uninstall.stdout
     )
+    assert not skill_dir.exists()
+
+
+def test_wheel_skill_example_builds_and_installs(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    example = tmp_path / "wheel-skill"
+    dist = tmp_path / "dist"
+    shutil.copytree(REPO_ROOT / "examples" / "wheel-skill", example)
+    pythonpath = str(REPO_ROOT / "src")
+
+    build = run_example(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            "--outdir",
+            str(dist),
+            str(example),
+        ],
+        pythonpath=pythonpath,
+    )
+
+    assert build.returncode == 0, build.stderr
+    wheel = dist / "wheel_agent_skill-0.1.0-py3-none-any.whl"
+    assert wheel.is_file()
+
+    install = run_example(
+        [
+            sys.executable,
+            "-m",
+            "agent_skill_installer",
+            "--no-ui",
+            "install",
+            "--wheel-file",
+            str(wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+
+    assert install.returncode == 0, install.stderr
+    assert (
+        "Installed wheel-agent-skill 0.1.0 (wheel) to Codex repo:"
+        in install.stdout
+    )
+    skill_dir = repo / ".codex" / "skills" / "wheel-agent-skill"
+    assert "Wheel Agent Skill" in skill_dir.joinpath("SKILL.md").read_text()
+
+    uninstall = run_example(
+        [
+            sys.executable,
+            "-m",
+            "agent_skill_installer",
+            "--no-ui",
+            "uninstall",
+            "--skill-name",
+            "wheel-agent-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+
+    assert uninstall.returncode == 0, uninstall.stderr
+    assert "Removed wheel-agent-skill 0.1.0 from Codex repo:" in uninstall.stdout
     assert not skill_dir.exists()
 
 

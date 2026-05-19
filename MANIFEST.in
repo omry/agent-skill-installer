@@ -1,8 +1,12 @@
 include LICENSE
 include README.md
-graft docs
+recursive-include docs *.md
+include docs/images/ui-install.png
 graft examples
 prune examples/demo-installer/build
 prune examples/demo-installer/dist
 prune examples/demo-installer/src/demo_agent_skill.egg-info
+prune examples/wheel-skill/build
+prune examples/wheel-skill/dist
+prune examples/wheel-skill/src/wheel_agent_skill.egg-info
 global-exclude *.py[cod]

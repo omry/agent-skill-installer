@@ -118,7 +118,12 @@ def make_skill_wheel(
         wheel.writestr(f"{prefix}/agents/openai.yaml", "agent: wheel\n")
         wheel.writestr(f"{prefix}/scripts/tool.py", "print('wheel')\n")
         wheel.writestr(f"{project.import_name}/__init__.py", "__version__ = '9.9.9'\n")
-        wheel.writestr(f"{project.import_name}-1.2.3.dist-info/METADATA", "ignored\n")
+        wheel.writestr(
+            f"{project.import_name}-{project.version}.dist-info/METADATA",
+            "Metadata-Version: 2.1\n"
+            f"Name: {project.package_name}\n"
+            f"Version: {project.version}\n",
+        )
     return path
 
 
@@ -2590,6 +2595,57 @@ def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
     ]
 
 
+def test_generic_complete_with_ui_selects_wheel_file(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    wheel = make_skill_wheel(
+        tmp_path / "example_agent_skill-1.2.3-py3-none-any.whl",
+        project,
+    )
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "wheel", wheel, ["codex"], "repo")
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.command == "install"
+    assert args.wheel_file == wheel
+    assert args.agent == "codex"
+    assert args.scope == "repo"
+    assert getattr(args, "_validated_wheel_project").skill_name == project.skill_name
+    assert prompter.calls == [
+        ("select", "What would you like to do?"),
+        ("select", "Install source"),
+        ("path", "Wheel file"),
+        ("checkbox", "Select agents"),
+        ("select", "Install location"),
+    ]
+    assert prompter.previews[1] is None
+    assert prompter.previews[2] == (
+        "agent-skill-installer --no-ui install "
+        f"--wheel-file {shlex.quote(str(wheel))} --agent all --scope global"
+    )
+    assert prompter.summaries[1] == "Installing from a local wheel file"
+    assert prompter.summaries[2] == f"Installing from local wheel file {wheel}"
+
+    results = run_generic_install(args)
+    assert [result.install_mode for result in results] == ["wheel"]
+    assert (
+        repo / ".codex" / "skills" / project.skill_name / "SKILL.md"
+    ).read_text() == "wheel skill\n"
+
+
 def test_generic_complete_with_ui_requires_pypi_package_without_recent_default(
     tmp_path: Path,
     monkeypatch,
@@ -3298,6 +3354,49 @@ def test_generic_console_installs_pypi_skill(
         repo / ".codex" / "skills" / "example-agent-skill" / "SKILL.md"
     ).read_text() == "wheel skill\n"
     assert load_recent_pypi_packages(home) == ["example-agent-skill"]
+
+
+def test_generic_console_installs_local_wheel_file(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheel = make_skill_wheel(
+        tmp_path / "example_agent_skill-1.2.3-py3-none-any.whl",
+        project,
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--wheel-file",
+            str(wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed example-agent-skill 1.2.3 (wheel) "
+        "to Codex repo:"
+        in output.out
+    )
+    skill_dir = repo / ".codex" / "skills" / "example-agent-skill"
+    assert (skill_dir / "SKILL.md").read_text() == "wheel skill\n"
+    manifest = read_raw_manifest(project, skill_dir)
+    assert manifest["install_mode"] == "wheel"
+    assert manifest["source_path"] == str(wheel.resolve())
+    assert load_recent_pypi_packages(home) == []
 
 
 def test_generic_console_does_not_remember_failed_pypi_install(

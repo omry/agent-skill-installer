@@ -1,8 +1,15 @@
 # Demo Agent Skill
 
-This example is a complete skill-carrying Python package. It bundles a demo
-skill under `src/demo_agent_skill/_skill` and exposes a `demo-agent-skill`
+This example is a complete Python package that carries a skill. It bundles a
+demo skill under `src/demo_agent_skill/_skill` and exposes a `demo-agent-skill`
 console script that delegates to `agent-skill-installer`.
+
+The package has `pyproject.toml` and `MANIFEST.in` because it is a Python
+distribution. A standalone skill directory only needs `SKILL.md` and any helper
+files the skill uses.
+
+See [Packaging And API](../../docs/packaging-and-api.md) for the packaging
+pattern this demo uses.
 
 From the repository root:
 

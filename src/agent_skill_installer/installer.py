@@ -1563,7 +1563,9 @@ def install_target(
         remove_manifest_at(previous_manifest_file)
 
     remember_created_dirs(created_dirs, spec.skill_dir)
-    if pypi_wheel_path is not None:
+    if pypi_version is not None or pypi_wheel_path is not None:
+        if pypi_wheel_path is None:
+            raise InstallerError("missing PyPI wheel for requested install source")
         spec.skill_dir.mkdir(parents=True, exist_ok=True)
         skill_files = copy_pypi_wheel_skill(project, pypi_wheel_path, spec.skill_dir)
     elif github_source is not None:
