@@ -66,7 +66,8 @@ recursive-include src/your_skill_package/_skill *
 ```
 
 If you use another build backend, configure the equivalent package-data rule so
-the built wheel contains `SKILL.md` and any related files.
+the built wheel contains `SKILL.md`, `agent-skill-installer.yaml` when you use
+one, and any related files.
 
 Before release, run a minimal package check:
 
@@ -106,6 +107,11 @@ agent-skill-installer --no-ui uninstall \
 
 See [`examples/wheel-skill/`](../examples/wheel-skill/) for a minimal package
 that exists only to publish or locally install a wheel-packaged skill.
+
+If the wheel includes `agent-skill-installer.yaml`, the installer validates it
+against the local dataclass schema during the install. Use the local wheel check
+above before publishing so config typos fail against the same artifact you plan
+to release.
 
 ## Optional Wrapper CLI
 

@@ -85,6 +85,106 @@ in typed config sections so typos are caught during install. `installer.shared`
 and per-agent `hooks_direct` are escape hatches for shared or backend-specific
 data.
 
+The installer loads this file with OmegaConf, resolves interpolations, rejects
+unknown fields in typed sections, and merges the result into the local dataclass
+schema. The schema shape is:
+
+```python
+@dataclass
+class InstallerConfig:
+    installer: InstallerRoot = field(default_factory=InstallerRoot)
+
+@dataclass
+class InstallerRoot:
+    version: int = 1
+    shared: dict[str, Any] = field(default_factory=dict)
+    agents: AgentConfigs = field(default_factory=AgentConfigs)
+
+@dataclass
+class AgentConfigs:
+    codex: CodexAgentConfig | None = None
+    claude: ClaudeAgentConfig | None = None
+
+@dataclass
+class CodexAgentConfig:
+    version: int = 1
+    requires: CodexRequires = field(default_factory=CodexRequires)
+    instructions: AgentInstructions | None = None
+    hooks: CodexHooks = field(default_factory=CodexHooks)
+    hooks_direct: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class ClaudeAgentConfig:
+    version: int = 1
+    requires: ClaudeRequires = field(default_factory=ClaudeRequires)
+    instructions: AgentInstructions | None = None
+    hooks: ClaudeHooks = field(default_factory=ClaudeHooks)
+    hooks_direct: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class AgentInstructions:
+    title: str
+    body: str
+
+@dataclass
+class CodexCommandHook:
+    type: str = "command"
+    command: str
+    timeout: int | None = None
+    statusMessage: str | None = None
+
+@dataclass
+class CodexHookMatcher:
+    matcher: str | None = None
+    hooks: list[CodexCommandHook] = field(default_factory=list)
+
+@dataclass
+class CodexHooks:
+    SessionStart: list[CodexHookMatcher] = field(default_factory=list)
+    PreToolUse: list[CodexHookMatcher] = field(default_factory=list)
+    PermissionRequest: list[CodexHookMatcher] = field(default_factory=list)
+    PostToolUse: list[CodexHookMatcher] = field(default_factory=list)
+    UserPromptSubmit: list[CodexHookMatcher] = field(default_factory=list)
+    Stop: list[CodexHookMatcher] = field(default_factory=list)
+
+@dataclass
+class ClaudeHook:
+    type: str = "command"
+    command: str | None = None
+    timeout: int | None = None
+    url: str | None = None
+    prompt: str | None = None
+    tool: str | None = None
+    args: dict[str, Any] | None = None
+
+@dataclass
+class ClaudeHookMatcher:
+    matcher: str | None = None
+    hooks: list[ClaudeHook] = field(default_factory=list)
+
+@dataclass
+class ClaudeHooks:
+    SessionStart: list[ClaudeHookMatcher] = field(default_factory=list)
+    PreToolUse: list[ClaudeHookMatcher] = field(default_factory=list)
+    PostToolUse: list[ClaudeHookMatcher] = field(default_factory=list)
+    Notification: list[ClaudeHookMatcher] = field(default_factory=list)
+    Stop: list[ClaudeHookMatcher] = field(default_factory=list)
+    SubagentStop: list[ClaudeHookMatcher] = field(default_factory=list)
+    UserPromptSubmit: list[ClaudeHookMatcher] = field(default_factory=list)
+    PreCompact: list[ClaudeHookMatcher] = field(default_factory=list)
+```
+
+`instructions` is used today to write the discoverability block. `hooks` and
+`hooks_direct` are parsed and schema-validated when present, so packaged skills
+can carry hook metadata, but this installer does not yet write Codex or Claude
+runtime hook settings.
+
+You can check a config file directly from Python:
+
+```bash
+python -c 'from agent_skill_installer import load_installer_config; load_installer_config("agent-skill-installer.yaml")'
+```
+
 ## Local Testing
 
 From a repository or directory that contains `SKILL.md` or `skill/SKILL.md`,
