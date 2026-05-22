@@ -184,4 +184,9 @@ the installed name, and created directories. Reinstalls replace previously owned
 installs. If an existing skill directory has no matching manifest, the installer
 refuses to replace it unless you pass `--force`.
 
-Pass `--verbose` to print installed skill, source, and hook paths.
+Pass the global `--verbose` option before the subcommand to print installed
+skill, source, and hook paths:
+
+```bash
+agent-skill-installer --no-ui --verbose install ...
+```

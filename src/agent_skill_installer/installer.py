@@ -1477,6 +1477,43 @@ def write_manifest(
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
+def sibling_manifest_candidates(skill_parent: Path) -> Iterable[Path]:
+    yield from skill_parent.glob("*/scripts/.*-install.json")
+    yield from skill_parent.glob(".*-install.json")
+
+
+def sibling_created_ownership(
+    spec: TargetSpec,
+    *,
+    skill_name: str,
+) -> tuple[list[Path], bool]:
+    created_dirs: list[Path] = []
+    created_hook_file = False
+    current_manifest = spec.skill_dir / "scripts" / f".{skill_name}-install.json"
+    current_sidecar = spec.skill_dir.parent / f".{skill_name}-install.json"
+    for candidate in sibling_manifest_candidates(spec.skill_dir.parent):
+        if candidate in {current_manifest, current_sidecar}:
+            continue
+        try:
+            data = json.loads(candidate.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("agent") != spec.agent or data.get("scope") != spec.scope:
+            continue
+        if data.get("hook_path") != str(spec.hook_path):
+            continue
+        if data.get("created_hook_file") is True:
+            created_hook_file = True
+        for path in data.get("created_dirs", []):
+            if isinstance(path, str):
+                directory = Path(path)
+                if directory not in created_dirs:
+                    created_dirs.append(directory)
+    return created_dirs, created_hook_file
+
+
 def validate_install_source_selection(
     *,
     editable: bool = False,
@@ -1559,8 +1596,18 @@ def install_target(
         for path in (previous_manifest or {}).get("created_dirs", [])
         if isinstance(path, str)
     ]
+    sibling_created_dirs, sibling_created_hook_file = sibling_created_ownership(
+        spec,
+        skill_name=project.skill_name,
+    )
+    for directory in sibling_created_dirs:
+        if directory not in created_dirs:
+            created_dirs.append(directory)
+    previous_created_hook_file = (previous_manifest or {}).get("created_hook_file")
     created_hook_file = bool(
-        (previous_manifest or {}).get("created_hook_file", not spec.hook_path.exists())
+        previous_created_hook_file is True
+        or sibling_created_hook_file
+        or (previous_created_hook_file is None and not spec.hook_path.exists())
     )
 
     if skill_exists:

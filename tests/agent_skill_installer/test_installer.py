@@ -865,6 +865,12 @@ def test_cli_no_ui_verbose_lists_paths(tmp_path: Path, capsys) -> None:
     assert f"  hook:  {repo / 'AGENTS.md'}" in output.out
 
 
+def test_installing_skills_docs_show_global_verbose_before_subcommand() -> None:
+    docs = (Path(__file__).parents[2] / "docs" / "installing-skills.md").read_text()
+
+    assert "agent-skill-installer --no-ui --verbose install" in docs
+
+
 def test_cli_no_ui_uses_per_agent_home_directories(
     tmp_path: Path,
     capsys,
@@ -2305,8 +2311,9 @@ def test_generic_complete_with_ui_selects_local_install_source(
         f"--skill-path {shlex.quote(str(source))} --editable "
         "--agent all --scope global"
     )
+    checkout_name = Path.cwd().name
     assert prompter.summaries[1] == (
-        f"Installing agent-skill-installer from local path {Path.cwd()}"
+        f"Installing {checkout_name} from local path {Path.cwd()}"
     )
     assert prompter.summaries[2] == (
         f"Installing skill-source from local path {source}"
@@ -2430,8 +2437,9 @@ def test_generic_install_source_selection_summary_excludes_target(
         ("path", "Local repo or skill directory"),
         ("select", "Local install mode"),
     ]
+    checkout_name = Path.cwd().name
     assert prompter.summaries[0] == (
-        f"Installing agent-skill-installer from local path {Path.cwd()}"
+        f"Installing {checkout_name} from local path {Path.cwd()}"
     )
     assert "Into" not in prompter.summaries[0]
     assert prompter.summaries[1] == (
@@ -3314,6 +3322,210 @@ def test_generic_console_installs_all_selected_local_source_skills_editable(
     assert skill_two.resolve() == source / "skill-two"
     assert (skill_one / "SKILL.md").read_text().endswith("one\n")
     assert (skill_two / "SKILL.md").read_text().endswith("two\n")
+
+
+def test_generic_multi_skill_uninstall_cleans_up_after_creator_removed_first(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    install_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--all-src-skills",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    capsys.readouterr()
+
+    assert install_code == 0
+    assert (repo / ".codex" / "skills" / "skill-one").exists()
+    assert (repo / ".codex" / "skills" / "skill-two").exists()
+
+    first_uninstall = generic_main(
+        [
+            "uninstall",
+            "--skill-name",
+            "skill-one",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    capsys.readouterr()
+
+    assert first_uninstall == 0
+    assert not (repo / ".codex" / "skills" / "skill-one").exists()
+    assert (repo / ".codex" / "skills" / "skill-two").exists()
+    assert (repo / "AGENTS.md").exists()
+    assert "SKILL-TWO-DISCOVERABILITY" in (repo / "AGENTS.md").read_text()
+
+    second_uninstall = generic_main(
+        [
+            "uninstall",
+            "--skill-name",
+            "skill-two",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    capsys.readouterr()
+
+    assert second_uninstall == 0
+    assert not (repo / "AGENTS.md").exists()
+    assert not (repo / ".codex" / "skills").exists()
+    assert not (repo / ".codex").exists()
+
+
+def test_generic_multi_skill_upgrade_propagates_sibling_hook_ownership(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    install_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--all-src-skills",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    capsys.readouterr()
+
+    assert install_code == 0
+
+    skill_two_manifest_path = (
+        repo
+        / ".codex"
+        / "skills"
+        / "skill-two"
+        / "scripts"
+        / ".skill-two-install.json"
+    )
+    skill_two_manifest = json.loads(skill_two_manifest_path.read_text())
+    skill_two_manifest["created_hook_file"] = False
+    skill_two_manifest_path.write_text(
+        json.dumps(skill_two_manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+    upgrade_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--src-skill",
+            "skill-two",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    capsys.readouterr()
+
+    assert upgrade_code == 0
+    skill_two_manifest = json.loads(skill_two_manifest_path.read_text())
+    assert skill_two_manifest["created_hook_file"] is True
+
+    for skill_name in ("skill-one", "skill-two"):
+        uninstall_code = generic_main(
+            [
+                "uninstall",
+                "--skill-name",
+                skill_name,
+                "--agent",
+                "codex",
+                "--scope",
+                "repo",
+                "--repo",
+                str(repo),
+            ]
+        )
+        capsys.readouterr()
+
+        assert uninstall_code == 0
+
+    assert not (repo / "AGENTS.md").exists()
+
+
+def test_generic_multi_skill_uninstall_preserves_preexisting_empty_containers(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+    (repo / ".codex" / "skills").mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("")
+
+    install_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--all-src-skills",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    capsys.readouterr()
+
+    assert install_code == 0
+
+    for skill_name in ("skill-one", "skill-two"):
+        uninstall_code = generic_main(
+            [
+                "uninstall",
+                "--skill-name",
+                skill_name,
+                "--agent",
+                "codex",
+                "--scope",
+                "repo",
+                "--repo",
+                str(repo),
+            ]
+        )
+        capsys.readouterr()
+
+        assert uninstall_code == 0
+
+    assert (repo / "AGENTS.md").exists()
+    assert (repo / "AGENTS.md").read_text() == ""
+    assert (repo / ".codex" / "skills").is_dir()
 
 
 def test_generic_console_installs_all_selected_github_source_skills(
