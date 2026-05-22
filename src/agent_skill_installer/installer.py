@@ -48,6 +48,8 @@ class SkillProject:
     pypi_base_url: str = PYPI_BASE_URL
     manifest_package_aliases: frozenset[str] = field(default_factory=frozenset)
     marker_slug_override: str | None = None
+    source_skill_name: str | None = None
+    source_skill_path: str | None = None
 
     @property
     def marker_slug(self) -> str:
@@ -1459,6 +1461,10 @@ def write_manifest(
         "install_mode": install_mode,
         "manifest_path": str(path),
     }
+    if project.source_skill_name is not None:
+        data["source_skill_name"] = project.source_skill_name
+    if project.source_skill_path is not None:
+        data["source_skill_path"] = project.source_skill_path
     if source_dir is not None:
         data["source_dir"] = str(source_dir)
     if source_url is not None:

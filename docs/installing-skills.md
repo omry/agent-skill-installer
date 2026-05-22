@@ -103,15 +103,32 @@ agent-skill-installer --no-ui install \
   --scope repo
 ```
 
-`--skill-path` accepts a directory that contains `SKILL.md` or a repository that
-contains `skill/SKILL.md`. Local installs default to editable symlinks, so
-changes are visible immediately during development. Use `--copy` to install a
-snapshot of the current files instead. `--local-repo` is an alias for
-`--skill-path`.
+`--skill-path` accepts a directory that contains `SKILL.md`, a repository that
+contains `skill/SKILL.md`, or a parent directory whose immediate children are
+skill directories. Local installs default to editable symlinks, so changes are
+visible immediately during development. Use `--copy` to install a snapshot of
+the current files instead. `--local-repo` is an alias for `--skill-path`.
 
-Use `--skill-name` to override the installed directory name, and
-`--description` to override the default discoverability text when the skill does
-not provide its own installer config.
+When a source contains more than one skill, non-interactive installs require an
+explicit selection:
+
+```bash
+agent-skill-installer --no-ui install \
+  --skill-path ./skills-root \
+  --src-skill skill-one \
+  --src-skill skill-two \
+  --agent codex \
+  --scope repo
+```
+
+Use `--all-src-skills` to intentionally install every discovered source skill,
+including skills added to that source in the future. Use `--rename SRC:DST` to
+select and rename a source skill, or `--src-skill SRC --dst-skill DST` to rename
+one explicitly selected source skill. The older `--skill-name` option remains a
+compatibility alias for single-skill installs.
+
+Use `--description` to override the default discoverability text when the skill
+does not provide its own installer config.
 
 ## Targets
 
@@ -134,7 +151,9 @@ In the text UI, the install location screen offers user global, current
 repository when one is detected, and specific directory. The specific directory
 choice prompts for a repository path and installs with repo scope.
 When the install source is a local repository or skill directory, the UI also
-asks whether to install an editable symlink or a copied snapshot.
+asks whether to install an editable symlink or a copied snapshot. If the source
+contains multiple skills, the UI prompts for source skill selection and defaults
+to no selected skills.
 
 ## Uninstall
 
@@ -160,8 +179,9 @@ local installs write a sidecar file named `.<skill_name>-install.json` next to
 the symlink.
 
 The manifest records the owning package or skill name, version, installed
-files, hook markers, source details, and created directories. Reinstalls replace
-previously owned installs. If an existing skill directory has no matching
-manifest, the installer refuses to replace it unless you pass `--force`.
+files, hook markers, source details, source skill identity when it differs from
+the installed name, and created directories. Reinstalls replace previously owned
+installs. If an existing skill directory has no matching manifest, the installer
+refuses to replace it unless you pass `--force`.
 
 Pass `--verbose` to print installed skill, source, and hook paths.

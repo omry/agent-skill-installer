@@ -106,6 +106,19 @@ def make_root_skill_checkout(path: Path) -> Path:
     return path
 
 
+def make_skill_collection(path: Path) -> Path:
+    path.mkdir()
+    make_skill(
+        path / "skill-one",
+        text="---\nname: skill-one\ndescription: First skill.\n---\n\none\n",
+    )
+    make_skill(
+        path / "skill-two",
+        text="---\nname: skill-two\ndescription: Second skill.\n---\n\ntwo\n",
+    )
+    return path
+
+
 def make_skill_wheel(
     path: Path,
     project: SkillProject,
@@ -127,6 +140,30 @@ def make_skill_wheel(
     return path
 
 
+def make_wheel_skill_collection(
+    path: Path,
+    *,
+    skills: dict[str, str],
+    package_name: str = "example-agent-skill",
+    import_name: str = "example_agent_skill",
+    version: str = "1.2.3",
+) -> Path:
+    with zipfile.ZipFile(path, "w") as wheel:
+        for skill_path, skill_text in skills.items():
+            prefix = f"{import_name}/{skill_path}".rstrip("/")
+            wheel.writestr(f"{prefix}/SKILL.md", skill_text)
+            wheel.writestr(f"{prefix}/agents/openai.yaml", "agent: wheel\n")
+            wheel.writestr(f"{prefix}/scripts/tool.py", "print('wheel')\n")
+        wheel.writestr(f"{import_name}/__init__.py", "__version__ = '9.9.9'\n")
+        wheel.writestr(
+            f"{import_name}-{version}.dist-info/METADATA",
+            "Metadata-Version: 2.1\n"
+            f"Name: {package_name}\n"
+            f"Version: {version}\n",
+        )
+    return path
+
+
 def make_github_archive(
     path: Path,
     *,
@@ -141,6 +178,21 @@ def make_github_archive(
         archive.writestr(f"{prefix}/scripts/tool.py", "print('github')\n")
         if skill_path:
             archive.writestr(f"{root}/unrelated/SKILL.md", "ignored\n")
+    return path
+
+
+def make_github_skill_collection_archive(
+    path: Path,
+    *,
+    skills: dict[str, str],
+    root: str = "example-agent-skill-main",
+) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        for skill_path, skill_text in skills.items():
+            prefix = f"{root}/{skill_path}".rstrip("/")
+            archive.writestr(f"{prefix}/SKILL.md", skill_text)
+            archive.writestr(f"{prefix}/agents/openai.yaml", "agent: github\n")
+            archive.writestr(f"{prefix}/scripts/tool.py", "print('github')\n")
     return path
 
 
@@ -3165,6 +3217,439 @@ def test_generic_console_can_copy_local_skill(
 
     (source / "SKILL.md").write_text("edited source\n")
     assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+
+def test_generic_console_requires_explicit_selection_for_multi_skill_source(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "multiple source skills are available" in output.err
+    assert "--src-skill skill-one" in output.err
+    assert "--all-src-skills" in output.err
+    assert not (repo / ".codex").exists()
+
+
+def test_generic_console_installs_all_selected_local_source_skills(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--all-src-skills",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed skill-one local to Codex repo:" in output.out
+    assert "Installed skill-two local to Codex repo:" in output.out
+    assert (repo / ".codex" / "skills" / "skill-one" / "SKILL.md").exists()
+    assert (repo / ".codex" / "skills" / "skill-two" / "SKILL.md").exists()
+
+
+def test_generic_console_installs_all_selected_local_source_skills_editable(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--all-src-skills",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed skill-one local (editable) to Codex repo:" in output.out
+    assert "Installed skill-two local (editable) to Codex repo:" in output.out
+    skill_one = repo / ".codex" / "skills" / "skill-one"
+    skill_two = repo / ".codex" / "skills" / "skill-two"
+    assert skill_one.is_symlink()
+    assert skill_two.is_symlink()
+    assert skill_one.resolve() == source / "skill-one"
+    assert skill_two.resolve() == source / "skill-two"
+    assert (skill_one / "SKILL.md").read_text().endswith("one\n")
+    assert (skill_two / "SKILL.md").read_text().endswith("two\n")
+
+
+def test_generic_console_installs_all_selected_github_source_skills(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    archive = make_github_skill_collection_archive(
+        tmp_path / "github.zip",
+        skills={
+            "skill-one": "github one\n",
+            "skill-two": "github two\n",
+        },
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--github-url",
+            "https://github.com/example/example-agent-skill",
+            "--all-src-skills",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed skill-one main (GitHub archive) to Codex repo:" in output.out
+    assert "Installed skill-two main (GitHub archive) to Codex repo:" in output.out
+    skill_one = repo / ".codex" / "skills" / "skill-one"
+    skill_two = repo / ".codex" / "skills" / "skill-two"
+    assert (skill_one / "SKILL.md").read_text() == "github one\n"
+    assert (skill_two / "SKILL.md").read_text() == "github two\n"
+    assert json.loads((skill_one / "scripts" / ".skill-one-install.json").read_text())[
+        "source_path"
+    ] == "skill-one"
+    assert json.loads((skill_two / "scripts" / ".skill-two-install.json").read_text())[
+        "source_path"
+    ] == "skill-two"
+
+
+def test_generic_console_src_skill_matches_single_github_child_directory(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    archive = make_github_skill_collection_archive(
+        tmp_path / "github.zip",
+        skills={"skill-one": "github one\n"},
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--github-url",
+            "https://github.com/example/example-agent-skill",
+            "--src-skill",
+            "skill-one",
+            "--dst-skill",
+            "renamed-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    skill_dir = repo / ".codex" / "skills" / "renamed-skill"
+    assert "Installed renamed-skill main (GitHub archive) to Codex repo:" in output.out
+    assert (skill_dir / "SKILL.md").read_text() == "github one\n"
+    manifest = json.loads(
+        (skill_dir / "scripts" / ".renamed-skill-install.json").read_text()
+    )
+    assert manifest["source_skill_name"] == "skill-one"
+    assert manifest["source_skill_path"] == "skill-one"
+    assert manifest["source_path"] == "skill-one"
+
+
+def test_generic_console_src_skill_matches_single_wheel_child_directory(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    wheel = make_wheel_skill_collection(
+        tmp_path / "example_agent_skill-1.2.3-py3-none-any.whl",
+        skills={"_skills/skill-one": "wheel one\n"},
+    )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--wheel-file",
+            str(wheel),
+            "--src-skill",
+            "skill-one",
+            "--dst-skill",
+            "renamed-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    skill_dir = repo / ".codex" / "skills" / "renamed-skill"
+    assert "Installed renamed-skill 1.2.3 (wheel) to Codex repo:" in output.out
+    assert (skill_dir / "SKILL.md").read_text() == "wheel one\n"
+    manifest = json.loads(
+        (skill_dir / "scripts" / ".renamed-skill-install.json").read_text()
+    )
+    assert manifest["source_skill_name"] == "skill-one"
+    assert manifest["source_skill_path"] == "example_agent_skill/_skills/skill-one"
+
+
+def test_generic_console_renames_single_selected_source_skill(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--src-skill",
+            "skill-two",
+            "--dst-skill",
+            "renamed-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    skill_dir = repo / ".codex" / "skills" / "renamed-skill"
+    assert "Installed renamed-skill local to Codex repo:" in output.out
+    assert not (repo / ".codex" / "skills" / "skill-one").exists()
+    assert not (repo / ".codex" / "skills" / "skill-two").exists()
+    assert (skill_dir / "SKILL.md").read_text().endswith("two\n")
+    manifest = json.loads(
+        (skill_dir / "scripts" / ".renamed-skill-install.json").read_text()
+    )
+    assert manifest["skill_name"] == "renamed-skill"
+    assert manifest["source_skill_name"] == "skill-two"
+    assert manifest["source_skill_path"] == "skill-two"
+
+
+def test_generic_console_rejects_dst_skill_without_explicit_source(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--dst-skill",
+            "renamed-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "--dst-skill requires exactly one --src-skill" in output.err
+    assert "--rename skill-one:renamed-skill" in output.err
+
+
+def test_generic_console_rename_implies_source_selection(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--copy",
+            "--rename",
+            "skill-one:first-installed",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+
+    assert exit_code == 0
+    capsys.readouterr()
+    assert (repo / ".codex" / "skills" / "first-installed" / "SKILL.md").exists()
+    assert not (repo / ".codex" / "skills" / "skill-two").exists()
+
+
+def test_generic_complete_with_ui_prompts_for_source_skills(
+    tmp_path: Path,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command="install",
+        force=False,
+        skill_name=None,
+        dst_skill=None,
+        src_skills=None,
+        all_src_skills=False,
+        renames=None,
+        description=None,
+        pypi_package=None,
+        pypi_version=None,
+        wheel_file=None,
+        github_url=None,
+        github_ref=None,
+        github_path=None,
+        skill_path=source,
+        editable=False,
+        agent="codex",
+        scope="repo",
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(["skill-two"])
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.src_skills == ["skill-two"]
+    assert args.all_src_skills is False
+    assert prompter.calls == [("checkbox", "Select source skills")]
+    assert prompter.checkbox_defaults == [None]
+    assert [choice["value"] for choice in prompter.choices[0]] == [
+        "__agent_skill_installer_all_source_skills__",
+        "skill-one",
+        "skill-two",
+    ]
+
+
+def test_generic_multi_skill_install_rolls_back_on_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+    calls: list[str] = []
+    original_install_target = __import__(
+        "agent_skill_installer.__main__",
+        fromlist=["install_target"],
+    ).install_target
+
+    def fail_second(project, *args, **kwargs):
+        calls.append(project.skill_name)
+        if project.skill_name == "skill-two":
+            raise InstallerError("boom")
+        return original_install_target(project, *args, **kwargs)
+
+    monkeypatch.setattr("agent_skill_installer.__main__.install_target", fail_second)
+    args = Namespace(
+        command="install",
+        force=False,
+        skill_name=None,
+        dst_skill=None,
+        src_skills=None,
+        all_src_skills=True,
+        renames=None,
+        description=None,
+        pypi_package=None,
+        pypi_version=None,
+        wheel_file=None,
+        github_url=None,
+        github_ref=None,
+        github_path=None,
+        skill_path=source,
+        editable=False,
+        agent="codex",
+        scope="repo",
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        verbose=False,
+    )
+
+    with pytest.raises(InstallerError, match="rolled back changes"):
+        run_generic_install(args)
+
+    assert calls == ["skill-one", "skill-two"]
+    assert not (repo / ".codex" / "skills" / "skill-one").exists()
+    assert not (repo / ".codex" / "skills" / "skill-two").exists()
+    assert not (repo / "AGENTS.md").exists()
 
 
 def test_generic_console_rejects_copy_without_local_skill_path(capsys) -> None:

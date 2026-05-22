@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from email.parser import Parser
 import json
+import shutil
 import shlex
 import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from . import __version__
 from .cli import (
@@ -46,12 +48,14 @@ from .installer import (
     download_pypi_wheel,
     find_repo_root,
     github_archive_relative_path,
-    github_archive_skill_prefix,
     install_target,
     local_skill_source_for_candidate,
+    manifest_path,
     normalize_agents,
+    path_exists,
     parse_github_url,
     published_pypi_versions,
+    read_manifest,
     running_on_tty,
     target_spec,
     validate_install_source_selection,
@@ -69,16 +73,19 @@ VALIDATED_PYPI_FIELDS = [
     "_validated_pypi_version",
     "_validated_pypi_wheel_path",
     "_validated_pypi_project",
+    "_validated_pypi_projects",
     "_validated_pypi_temp_dir",
 ]
 VALIDATED_WHEEL_FIELDS = [
     "_validated_wheel_file",
     "_validated_wheel_project",
+    "_validated_wheel_projects",
 ]
 VALIDATED_GITHUB_FIELDS = [
     "_validated_github_source",
     "_validated_github_archive_path",
     "_validated_github_project",
+    "_validated_github_projects",
     "_validated_github_temp_dir",
 ]
 INSTALL_SOURCE_FIELDS = [
@@ -91,6 +98,10 @@ INSTALL_SOURCE_FIELDS = [
     "github_path",
     "skill_path",
     "editable",
+    "src_skills",
+    "all_src_skills",
+    "renames",
+    "dst_skill",
     *VALIDATED_PYPI_FIELDS,
     *VALIDATED_WHEEL_FIELDS,
     *VALIDATED_GITHUB_FIELDS,
@@ -117,6 +128,7 @@ COMMAND_FIELDS = [
     *UNINSTALL_FIELDS,
     "description",
 ]
+SOURCE_SKILL_ALL = "__agent_skill_installer_all_source_skills__"
 PromptStep = Callable[[Sequence[str], Callable[[], object]], object]
 
 
@@ -167,7 +179,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install.add_argument(
         "--skill-name",
+        dest="skill_name",
         help="Override the installed skill directory name.",
+    )
+    install.add_argument(
+        "--dst-skill",
+        dest="dst_skill",
+        help="Install the single selected source skill under this name.",
+    )
+    install.add_argument(
+        "--src-skill",
+        dest="src_skills",
+        action="append",
+        metavar="NAME",
+        help="Include this source skill. Repeat to include more than one.",
+    )
+    install.add_argument(
+        "--all-src-skills",
+        action="store_true",
+        help="Install every discovered source skill, including future additions.",
+    )
+    install.add_argument(
+        "--rename",
+        dest="renames",
+        action="append",
+        metavar="SRC:DST",
+        help="Include source skill SRC and install it as DST. Repeatable.",
     )
     install.add_argument(
         "--description",
@@ -362,11 +399,22 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
             parts.extend(["--wheel-file", args.wheel_file])
         else:
             return None
+        for src_skill in getattr(args, "src_skills", None) or []:
+            parts.extend(["--src-skill", src_skill])
+        if getattr(args, "all_src_skills", False):
+            parts.append("--all-src-skills")
+        for rename in getattr(args, "renames", None) or []:
+            parts.extend(["--rename", rename])
+        dst_skill = getattr(args, "dst_skill", None)
+        if dst_skill:
+            parts.extend(["--dst-skill", dst_skill])
 
     skill_name = getattr(args, "skill_name", None)
     if command == "uninstall" and not skill_name:
         return None
-    if skill_name:
+    if skill_name and command == "install":
+        parts.extend(["--skill-name", skill_name])
+    elif skill_name:
         parts.extend(["--skill-name", skill_name])
     description = getattr(args, "description", None)
     if command == "install" and description:
@@ -398,6 +446,10 @@ def ensure_arg_defaults(args: argparse.Namespace) -> None:
         "github_path": None,
         "skill_path": None,
         "editable": None,
+        "src_skills": None,
+        "all_src_skills": False,
+        "renames": None,
+        "dst_skill": None,
         "agent": None,
         "scope": None,
         "repo": None,
@@ -992,7 +1044,7 @@ def validate_pypi_skill_package(args: argparse.Namespace) -> None:
             version,
             Path(temp_dir.name),
         )
-        project = read_pypi_project(args, wheel_path, version)
+        projects = read_pypi_projects(args, wheel_path, version)
     except Exception:
         temp_dir.cleanup()
         raise
@@ -1000,7 +1052,8 @@ def validate_pypi_skill_package(args: argparse.Namespace) -> None:
     args._validated_pypi_package = args.pypi_package
     args._validated_pypi_version = version
     args._validated_pypi_wheel_path = wheel_path
-    args._validated_pypi_project = project
+    args._validated_pypi_project = projects[0]
+    args._validated_pypi_projects = projects
     args._validated_pypi_temp_dir = temp_dir
 
 
@@ -1033,40 +1086,47 @@ def cleanup_validated_pypi_download(args: argparse.Namespace) -> None:
 def validated_pypi_download(
     args: argparse.Namespace,
     version: str,
-) -> tuple[Path, SkillProject] | None:
+) -> tuple[Path, list[SkillProject]] | None:
     if getattr(args, "_validated_pypi_package", None) != args.pypi_package:
         return None
     if getattr(args, "_validated_pypi_version", None) != version:
         return None
     wheel_path = getattr(args, "_validated_pypi_wheel_path", None)
-    project = getattr(args, "_validated_pypi_project", None)
+    projects = getattr(args, "_validated_pypi_projects", None)
     if not isinstance(wheel_path, Path) or not wheel_path.is_file():
         return None
-    if not isinstance(project, SkillProject):
+    if not isinstance(projects, list) or not all(
+        isinstance(project, SkillProject) for project in projects
+    ):
         return None
-    return wheel_path, project
+    return wheel_path, projects
 
 
 def validate_wheel_file(args: argparse.Namespace) -> None:
     wheel_path = args.wheel_file.expanduser().resolve()
     if not wheel_path.is_file():
         raise InstallerError(f"wheel file does not exist: {wheel_path}")
-    project = read_pypi_project(args, wheel_path, None)
+    projects = read_pypi_projects(args, wheel_path, None)
     args._validated_wheel_file = wheel_path
-    args._validated_wheel_project = project
+    args._validated_wheel_project = projects[0]
+    args._validated_wheel_projects = projects
 
 
-def validated_wheel_file(args: argparse.Namespace) -> tuple[Path, SkillProject] | None:
+def validated_wheel_file(
+    args: argparse.Namespace,
+) -> tuple[Path, list[SkillProject]] | None:
     wheel_path = getattr(args, "_validated_wheel_file", None)
-    project = getattr(args, "_validated_wheel_project", None)
+    projects = getattr(args, "_validated_wheel_projects", None)
     if not isinstance(wheel_path, Path) or not wheel_path.is_file():
         return None
-    if not isinstance(project, SkillProject):
+    if not isinstance(projects, list) or not all(
+        isinstance(project, SkillProject) for project in projects
+    ):
         return None
     current = args.wheel_file.expanduser().resolve()
     if current != wheel_path:
         return None
-    return wheel_path, project
+    return wheel_path, projects
 
 
 def cleanup_validated_wheel_file(args: argparse.Namespace) -> None:
@@ -1087,13 +1147,14 @@ def validate_github_skill_source(args: argparse.Namespace) -> None:
     )
     try:
         archive_path = download_github_archive(source, Path(temp_dir.name))
-        project = read_github_project(args, archive_path, source)
+        projects = read_github_projects(args, archive_path, source)
     except Exception:
         temp_dir.cleanup()
         raise
     args._validated_github_source = source
     args._validated_github_archive_path = archive_path
-    args._validated_github_project = project
+    args._validated_github_project = projects[0]
+    args._validated_github_projects = projects
     args._validated_github_temp_dir = temp_dir
 
 
@@ -1125,16 +1186,18 @@ def cleanup_validated_github_download(args: argparse.Namespace) -> None:
 def validated_github_download(
     args: argparse.Namespace,
     source: GithubSource,
-) -> tuple[Path, SkillProject] | None:
+) -> tuple[Path, list[SkillProject]] | None:
     if getattr(args, "_validated_github_source", None) != source:
         return None
     archive_path = getattr(args, "_validated_github_archive_path", None)
-    project = getattr(args, "_validated_github_project", None)
+    projects = getattr(args, "_validated_github_projects", None)
     if not isinstance(archive_path, Path) or not archive_path.is_file():
         return None
-    if not isinstance(project, SkillProject):
+    if not isinstance(projects, list) or not all(
+        isinstance(project, SkillProject) for project in projects
+    ):
         return None
-    return archive_path, project
+    return archive_path, projects
 
 
 def repo_root_for_ui(args: argparse.Namespace) -> Path | None:
@@ -1204,6 +1267,60 @@ def installed_skill_choices(
         }
         for index, status in enumerate(statuses)
     ]
+
+
+def source_skill_choices(projects: Sequence[SkillProject]) -> list[dict[str, object]]:
+    choices: list[dict[str, object]] = [
+        {
+            "name": "All source skills",
+            "description": "Install every discovered source skill.",
+            "value": SOURCE_SKILL_ALL,
+            "kind": "all",
+        }
+    ]
+    choices.extend(
+        {
+            "name": source_skill_name(project),
+            "description": project.description,
+            "value": source_skill_name(project),
+            "kind": "skill",
+        }
+        for project in projects
+    )
+    return choices
+
+
+def install_source_projects_for_ui(args: argparse.Namespace) -> list[SkillProject]:
+    source = selected_install_source(args)
+    if source == "local" and args.skill_path is not None:
+        return read_local_projects(args)
+    if source == "wheel":
+        validated = validated_wheel_file(args)
+        return [] if validated is None else validated[1]
+    if source == "github" and args.github_url is not None:
+        parsed = parse_github_url(
+            args.github_url,
+            ref=args.github_ref,
+            path=args.github_path,
+        )
+        validated = validated_github_download(args, parsed)
+        return [] if validated is None else validated[1]
+    if source == "pypi" and args.pypi_package is not None:
+        try:
+            version = resolve_pypi_version(args)
+        except InstallerError:
+            return []
+        validated = validated_pypi_download(args, version)
+        return [] if validated is None else validated[1]
+    return []
+
+
+def source_selection_is_explicit(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "all_src_skills", False)
+        or getattr(args, "src_skills", None)
+        or getattr(args, "renames", None)
+    )
 
 
 def uninstall_skill_key(status: InstallationStatus) -> tuple[str, str]:
@@ -1665,6 +1782,59 @@ def complete_install_with_ui(
             args.editable = editable_from_mode(install_mode)
     else:
         raise UsageError(f"unknown install source: {source}")
+
+    projects = install_source_projects_for_ui(args)
+    if len(projects) > 1 and not source_selection_is_explicit(args):
+        def source_skill_preview(selected_values: object) -> str | None:
+            selected = (
+                list(selected_values)
+                if isinstance(selected_values, (list, tuple, set))
+                else [str(selected_values)]
+            )
+            if not selected:
+                return None
+            if SOURCE_SKILL_ALL in {str(value) for value in selected}:
+                return preview_command(args, command="install", all_src_skills=True)
+            return preview_command(
+                args,
+                command="install",
+                src_skills=[str(value) for value in selected],
+            )
+
+        def source_skill_summary(selected_values: object) -> str:
+            selected = (
+                list(selected_values)
+                if isinstance(selected_values, (list, tuple, set))
+                else [str(selected_values)]
+            )
+            if SOURCE_SKILL_ALL in {str(value) for value in selected}:
+                return "Installing all source skills"
+            count = len(selected)
+            plural = "" if count == 1 else "s"
+            return f"Installing {count} selected source skill{plural}"
+
+        selected_skills = run_prompt(
+            ["src_skills", "all_src_skills"],
+            lambda: prompter.checkbox(
+                "Select source skills",
+                source_skill_choices(projects),
+                command_preview_builder=source_skill_preview,
+                summary_builder=source_skill_summary,
+            ),
+        )
+        if selected_skills == PROMPT_BACK:
+            return PROMPT_BACK
+        selected = [str(value) for value in selected_skills]
+        if not selected:
+            raise UsageError("choose at least one source skill")
+        if SOURCE_SKILL_ALL in set(selected):
+            args.all_src_skills = True
+            args.src_skills = None
+        else:
+            args.src_skills = selected
+            args.all_src_skills = False
+    elif projects:
+        select_source_projects(args, projects)
     return None
 
 
@@ -2025,6 +2195,7 @@ def needs_ui(args: argparse.Namespace) -> bool:
     if args.command == "install":
         return (
             install_source_count(args) != 1
+            or install_source_skill_selection_needs_ui(args)
             or (
                 getattr(args, "skill_path", None) is not None
                 and getattr(args, "editable", None) is None
@@ -2039,6 +2210,19 @@ def needs_ui(args: argparse.Namespace) -> bool:
             or args.scope is None
         )
     return False
+
+
+def install_source_skill_selection_needs_ui(args: argparse.Namespace) -> bool:
+    if source_selection_is_explicit(args):
+        return False
+    if selected_install_source(args) in {"pypi", "wheel", "github"}:
+        return True
+    if getattr(args, "skill_path", None) is None:
+        return False
+    try:
+        return len(read_local_projects(args)) > 1
+    except (InstallerError, UsageError):
+        return False
 
 
 def require_noninteractive_args(args: argparse.Namespace) -> None:
@@ -2164,11 +2348,11 @@ def project_from_skill_text(
     skill_name: str | None = None,
     description: str | None = None,
     pypi_project_name: str | None = None,
+    source_skill_path: str | None = None,
 ) -> SkillProject:
     metadata = skill_metadata(skill_text)
-    resolved_name = normalize_skill_name(
-        skill_name or metadata.get("name") or fallback_name
-    )
+    source_skill_name = normalize_skill_name(metadata.get("name") or fallback_name)
+    resolved_name = normalize_skill_name(skill_name or source_skill_name)
     return SkillProject(
         package_name=resolved_name,
         import_name=GENERIC_IMPORT_NAME,
@@ -2179,34 +2363,108 @@ def project_from_skill_text(
         installer_config=installer_config or InstallerConfig(),
         bundled_skill_source=source_dir,
         pypi_project_name=pypi_project_name,
+        source_skill_name=source_skill_name,
+        source_skill_path=source_skill_path,
     )
 
 
-def read_local_project(args: argparse.Namespace) -> SkillProject:
-    selected_source = args.skill_path.expanduser().resolve()
-    local_source = local_skill_source_for_candidate(selected_source)
-    if local_source is None:
-        raise InstallerError(
-            "local source must contain SKILL.md or skill/SKILL.md: "
-            f"{selected_source}"
-        )
-    local_root, source = local_source
+def source_skill_name(project: SkillProject) -> str:
+    return project.source_skill_name or project.skill_name
+
+
+def legacy_target_skill_name(args: argparse.Namespace) -> str | None:
+    dst_skill = getattr(args, "dst_skill", None)
+    skill_name = getattr(args, "skill_name", None)
+    if dst_skill is not None and skill_name is not None and dst_skill != skill_name:
+        raise UsageError("--dst-skill and --skill-name cannot specify different names")
+    return dst_skill or skill_name
+
+
+def project_with_target_skill(project: SkillProject, skill_name: str) -> SkillProject:
+    normalized = normalize_skill_name(skill_name)
+    return replace(
+        project,
+        package_name=normalized,
+        skill_name=normalized,
+    )
+
+
+def read_skill_project_from_dir(
+    *,
+    source: Path,
+    fallback_name: str,
+    version: str,
+    skill_name: str | None = None,
+    description: str | None = None,
+    source_skill_path: str | None = None,
+) -> SkillProject:
     skill_file = source / "SKILL.md"
     config = (
         load_installer_config(source / CONFIG_FILE_NAME)
         if (source / CONFIG_FILE_NAME).is_file()
         else None
     )
-    fallback_name = local_root.name if source.name == "skill" else source.name
     return project_from_skill_text(
         skill_text=skill_file.read_text(),
         fallback_name=fallback_name,
-        version="local",
+        version=version,
         source_dir=source,
         installer_config=config,
-        skill_name=args.skill_name,
-        description=args.description,
+        skill_name=skill_name,
+        description=description,
+        source_skill_path=source_skill_path,
     )
+
+
+def immediate_child_skill_dirs(source: Path) -> list[Path]:
+    if not source.is_dir():
+        return []
+    return [
+        child
+        for child in sorted(source.iterdir(), key=lambda item: item.name)
+        if child.is_dir() and (child / "SKILL.md").is_file()
+    ]
+
+
+def read_local_project(args: argparse.Namespace) -> SkillProject:
+    return read_local_projects(args)[0]
+
+
+def read_local_projects(args: argparse.Namespace) -> list[SkillProject]:
+    selected_source = args.skill_path.expanduser().resolve()
+    local_source = local_skill_source_for_candidate(selected_source)
+    if local_source is not None:
+        local_root, source = local_source
+        fallback_name = local_root.name if source.name == "skill" else source.name
+        return [
+            read_skill_project_from_dir(
+                source=source,
+                fallback_name=fallback_name,
+                version="local",
+                skill_name=legacy_target_skill_name(args),
+                description=args.description,
+                source_skill_path=(
+                    source.name if source.parent == selected_source else None
+                ),
+            )
+        ]
+
+    child_skills = immediate_child_skill_dirs(selected_source)
+    if not child_skills:
+        raise InstallerError(
+            "local source must contain SKILL.md or skill/SKILL.md: "
+            f"{selected_source}"
+        )
+    return [
+        read_skill_project_from_dir(
+            source=source,
+            fallback_name=source.name,
+            version="local",
+            description=args.description,
+            source_skill_path=source.name,
+        )
+        for source in child_skills
+    ]
 
 
 def prefixed_path(prefix: PurePosixPath, name: str) -> PurePosixPath:
@@ -2232,43 +2490,146 @@ def github_fallback_name(source: GithubSource) -> str:
     return source.repo
 
 
+def github_prefix_uses_source_fallback(
+    source: GithubSource,
+    skill_prefix: PurePosixPath,
+    files: set[PurePosixPath],
+) -> bool:
+    if source.path is None:
+        return skill_prefix in (PurePosixPath("skill"), PurePosixPath("."))
+    return (
+        skill_prefix == source.path
+        and prefixed_path(source.path, "SKILL.md") in files
+    )
+
+
+def github_archive_files(archive: zipfile.ZipFile) -> set[PurePosixPath]:
+    return {
+        relative
+        for info in archive.infolist()
+        if not info.is_dir()
+        for relative in [github_archive_relative_path(info.filename)]
+        if relative is not None
+    }
+
+
+def child_skill_prefixes(
+    files: set[PurePosixPath],
+    base: PurePosixPath,
+) -> list[PurePosixPath]:
+    prefixes: list[PurePosixPath] = []
+    base_parts = () if not base.parts else base.parts
+    for path in files:
+        if path.name != "SKILL.md":
+            continue
+        parent = path.parent
+        if parent == base:
+            continue
+        parent_parts = parent.parts
+        if parent_parts[: len(base_parts)] != base_parts:
+            continue
+        if len(parent_parts) != len(base_parts) + 1:
+            continue
+        prefixes.append(parent)
+    return sorted(set(prefixes), key=lambda item: item.as_posix())
+
+
+def github_archive_skill_prefixes(
+    archive: zipfile.ZipFile,
+    source_path: PurePosixPath | None,
+) -> list[PurePosixPath]:
+    files = github_archive_files(archive)
+    if source_path is not None:
+        if prefixed_path(source_path, "SKILL.md") in files:
+            return [source_path]
+        prefixes = child_skill_prefixes(files, source_path)
+        if prefixes:
+            return prefixes
+        raise InstallerError(
+            "GitHub archive did not contain "
+            f"{prefixed_path(source_path, 'SKILL.md').as_posix()} "
+            f"or child skill directories under {source_path.as_posix()}"
+        )
+    for candidate in (PurePosixPath("skill"), PurePosixPath(".")):
+        if prefixed_path(candidate, "SKILL.md") in files:
+            return [candidate]
+    prefixes = child_skill_prefixes(files, PurePosixPath("."))
+    if prefixes:
+        return prefixes
+    raise InstallerError("GitHub archive did not contain SKILL.md or skill/SKILL.md")
+
+
 def read_github_project(
     args: argparse.Namespace,
     archive_path: Path,
     source: GithubSource,
 ) -> SkillProject:
+    return read_github_projects(args, archive_path, source)[0]
+
+
+def read_github_projects(
+    args: argparse.Namespace,
+    archive_path: Path,
+    source: GithubSource,
+) -> list[SkillProject]:
     with zipfile.ZipFile(archive_path) as archive:
-        skill_prefix = github_archive_skill_prefix(archive, source.path)
-        skill_text = read_prefixed_text(
-            archive,
-            skill_prefix,
-            "SKILL.md",
-            github_archive_relative_path,
-        )
-        if skill_text is None:
-            raise InstallerError("GitHub archive did not contain SKILL.md")
-        config_text = read_prefixed_text(
-            archive,
-            skill_prefix,
-            CONFIG_FILE_NAME,
-            github_archive_relative_path,
-        )
-    config = (
-        load_installer_config_text(config_text, source=f"{source.url}/{CONFIG_FILE_NAME}")
-        if config_text is not None
-        else None
-    )
-    return project_from_skill_text(
-        skill_text=skill_text,
-        fallback_name=github_fallback_name(source),
-        version=source.version_label,
-        installer_config=config,
-        skill_name=args.skill_name,
-        description=args.description,
-    )
+        projects: list[SkillProject] = []
+        files = github_archive_files(archive)
+        prefixes = github_archive_skill_prefixes(archive, source.path)
+        for skill_prefix in prefixes:
+            skill_text = read_prefixed_text(
+                archive,
+                skill_prefix,
+                "SKILL.md",
+                github_archive_relative_path,
+            )
+            if skill_text is None:
+                raise InstallerError("GitHub archive did not contain SKILL.md")
+            config_text = read_prefixed_text(
+                archive,
+                skill_prefix,
+                CONFIG_FILE_NAME,
+                github_archive_relative_path,
+            )
+            config = (
+                load_installer_config_text(
+                    config_text,
+                    source=f"{source.url}/{skill_prefix.as_posix()}/{CONFIG_FILE_NAME}",
+                )
+                if config_text is not None
+                else None
+            )
+            fallback_name = (
+                github_fallback_name(source)
+                if len(prefixes) == 1
+                and github_prefix_uses_source_fallback(source, skill_prefix, files)
+                else skill_prefix.name
+            )
+            projects.append(
+                project_from_skill_text(
+                    skill_text=skill_text,
+                    fallback_name=fallback_name,
+                    version=source.version_label,
+                    installer_config=config,
+                    skill_name=(
+                        legacy_target_skill_name(args) if len(prefixes) == 1 else None
+                    ),
+                    description=args.description,
+                    source_skill_path=(
+                        None
+                        if not skill_prefix.parts
+                        else skill_prefix.as_posix()
+                    ),
+                )
+            )
+        return projects
 
 
 def wheel_skill_prefix(archive: zipfile.ZipFile) -> PurePosixPath:
+    return wheel_skill_prefixes(archive)[0]
+
+
+def wheel_skill_prefixes(archive: zipfile.ZipFile) -> list[PurePosixPath]:
     candidates: list[PurePosixPath] = []
     for info in archive.infolist():
         if info.is_dir():
@@ -2279,8 +2640,11 @@ def wheel_skill_prefix(archive: zipfile.ZipFile) -> PurePosixPath:
         candidates.append(path.parent)
     if not candidates:
         raise InstallerError("wheel did not contain a bundled SKILL.md")
-    candidates.sort(key=lambda item: (item.name != "_skill", len(item.parts)))
-    return candidates[0]
+    shorthand = [candidate for candidate in candidates if candidate.name == "_skill"]
+    if shorthand:
+        shorthand.sort(key=lambda item: len(item.parts))
+        return [shorthand[0]]
+    return sorted(set(candidates), key=lambda item: item.as_posix())
 
 
 def wheel_filename_metadata(wheel_path: Path) -> tuple[str, str]:
@@ -2310,25 +2674,40 @@ def wheel_archive_metadata(archive: zipfile.ZipFile) -> dict[str, str]:
     return {}
 
 
+def wheel_prefix_uses_package_fallback(prefix: PurePosixPath) -> bool:
+    return not prefix.parts or prefix.name == "_skill"
+
+
 def read_pypi_project(
     args: argparse.Namespace,
     wheel_path: Path,
     version: str | None,
 ) -> SkillProject:
+    return read_pypi_projects(args, wheel_path, version)[0]
+
+
+def read_pypi_projects(
+    args: argparse.Namespace,
+    wheel_path: Path,
+    version: str | None,
+) -> list[SkillProject]:
     fallback_package, fallback_version = wheel_filename_metadata(wheel_path)
     try:
         with zipfile.ZipFile(wheel_path) as archive:
-            prefix = wheel_skill_prefix(archive)
+            prefixes = wheel_skill_prefixes(archive)
             archive_metadata = wheel_archive_metadata(archive)
-            skill_text = read_prefixed_text(archive, prefix, "SKILL.md", PurePosixPath)
-            if skill_text is None:
-                raise InstallerError("wheel did not contain SKILL.md")
-            config_text = read_prefixed_text(
-                archive,
-                prefix,
-                CONFIG_FILE_NAME,
-                PurePosixPath,
-            )
+            project_inputs = []
+            for prefix in prefixes:
+                skill_text = read_prefixed_text(archive, prefix, "SKILL.md", PurePosixPath)
+                if skill_text is None:
+                    raise InstallerError("wheel did not contain SKILL.md")
+                config_text = read_prefixed_text(
+                    archive,
+                    prefix,
+                    CONFIG_FILE_NAME,
+                    PurePosixPath,
+                )
+                project_inputs.append((prefix, skill_text, config_text))
     except zipfile.BadZipFile as error:
         raise InstallerError(f"wheel file is not a valid zip file: {wheel_path}") from error
 
@@ -2339,37 +2718,51 @@ def read_pypi_project(
     )
     wheel_version = version or archive_metadata.get("version") or fallback_version
 
-    config = (
-        load_installer_config_text(
-            config_text,
-            source=f"{package_name} wheel/{prefix.as_posix()}/{CONFIG_FILE_NAME}",
+    projects: list[SkillProject] = []
+    for prefix, skill_text, config_text in project_inputs:
+        config = (
+            load_installer_config_text(
+                config_text,
+                source=f"{package_name} wheel/{prefix.as_posix()}/{CONFIG_FILE_NAME}",
+            )
+            if config_text is not None
+            else None
         )
-        if config_text is not None
-        else None
-    )
-    import_name = prefix.parts[0] if prefix.parts else GENERIC_IMPORT_NAME
-    bundled_skill_path = (
-        PurePosixPath(*prefix.parts[1:]).as_posix()
-        if len(prefix.parts) > 1
-        else "_skill"
-    )
-    metadata = skill_metadata(skill_text)
-    skill_name = normalize_skill_name(
-        args.skill_name
-        or metadata.get("name")
-        or package_name
-    )
-    return SkillProject(
-        package_name=skill_name,
-        import_name=import_name,
-        version=metadata.get("version") or wheel_version,
-        skill_name=skill_name,
-        cli_name="agent-skill-installer",
-        description=args.description or description_from_skill_text(skill_text, skill_name),
-        installer_config=config or InstallerConfig(),
-        bundled_skill_path=bundled_skill_path,
-        pypi_project_name=getattr(args, "pypi_package", None),
-    )
+        import_name = prefix.parts[0] if prefix.parts else GENERIC_IMPORT_NAME
+        bundled_skill_path = (
+            PurePosixPath(*prefix.parts[1:]).as_posix()
+            if len(prefix.parts) > 1
+            else "_skill"
+        )
+        metadata = skill_metadata(skill_text)
+        fallback_name = (
+            package_name
+            if wheel_prefix_uses_package_fallback(prefix)
+            else prefix.name
+        )
+        source_name = normalize_skill_name(metadata.get("name") or fallback_name)
+        target_name = (
+            legacy_target_skill_name(args)
+            if len(project_inputs) == 1
+            else None
+        ) or source_name
+        projects.append(
+            SkillProject(
+                package_name=target_name,
+                import_name=import_name,
+                version=metadata.get("version") or wheel_version,
+                skill_name=target_name,
+                cli_name="agent-skill-installer",
+                description=args.description
+                or description_from_skill_text(skill_text, target_name),
+                installer_config=config or InstallerConfig(),
+                bundled_skill_path=bundled_skill_path,
+                pypi_project_name=getattr(args, "pypi_package", None),
+                source_skill_name=source_name,
+                source_skill_path=prefix.as_posix() if prefix.parts else None,
+            )
+        )
+    return projects
 
 
 def resolve_pypi_version(args: argparse.Namespace) -> str:
@@ -2390,6 +2783,149 @@ def resolve_pypi_version(args: argparse.Namespace) -> str:
     if not versions:
         raise InstallerError(f"no wheel releases found on PyPI for {args.pypi_package}")
     return versions[0]
+
+
+def parse_rename_specs(values: Sequence[str] | None) -> dict[str, str]:
+    renames: dict[str, str] = {}
+    for value in values or []:
+        src, separator, dst = value.partition(":")
+        if not separator:
+            raise UsageError(f"--rename must use SRC:DST syntax: {value!r}")
+        src_name = normalize_skill_name(src)
+        dst_name = normalize_skill_name(dst)
+        existing = renames.get(src_name)
+        if existing is not None and existing != dst_name:
+            raise UsageError(f"--rename specified conflicting targets for {src_name}")
+        renames[src_name] = dst_name
+    return renames
+
+
+def duplicate_values(values: Iterable[str]) -> set[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for value in values:
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    return duplicates
+
+
+def source_skill_map(projects: Sequence[SkillProject]) -> dict[str, SkillProject]:
+    names = [source_skill_name(project) for project in projects]
+    duplicates = duplicate_values(names)
+    if duplicates:
+        joined = ", ".join(sorted(duplicates))
+        raise UsageError(f"duplicate source skill names: {joined}")
+    return dict(zip(names, projects, strict=True))
+
+
+def multiple_source_selection_error(projects: Sequence[SkillProject]) -> UsageError:
+    names = [source_skill_name(project) for project in projects]
+    lines = [
+        "multiple source skills are available; choose explicit source skills, "
+        "or opt in to all current and future source skills:",
+    ]
+    lines.extend(f"  {name}" for name in names)
+    if names:
+        lines.append(f"Use --src-skill {names[0]} to select one skill.")
+    lines.append("Use --all-src-skills to install every discovered source skill.")
+    return UsageError("\n".join(lines))
+
+
+def selected_source_names(
+    args: argparse.Namespace,
+    projects: Sequence[SkillProject],
+) -> list[str]:
+    by_source = source_skill_map(projects)
+    renames = parse_rename_specs(getattr(args, "renames", None))
+    requested_src = [
+        normalize_skill_name(value)
+        for value in (getattr(args, "src_skills", None) or [])
+    ]
+    missing = sorted(
+        {
+            name
+            for name in [*requested_src, *renames.keys()]
+            if name not in by_source
+        }
+    )
+    if missing:
+        available = ", ".join(sorted(by_source))
+        raise UsageError(
+            f"unknown source skill(s): {', '.join(missing)}. "
+            f"Available source skills: {available}"
+        )
+
+    if getattr(args, "all_src_skills", False):
+        selected = list(by_source)
+    else:
+        selected = []
+    for name in [*requested_src, *renames.keys()]:
+        if name not in selected:
+            selected.append(name)
+
+    if not selected:
+        if len(projects) == 1:
+            return [source_skill_name(projects[0])]
+        raise multiple_source_selection_error(projects)
+    return selected
+
+
+def select_source_projects(
+    args: argparse.Namespace,
+    projects: Sequence[SkillProject],
+) -> list[SkillProject]:
+    if not projects:
+        raise UsageError("no source skills were found")
+
+    renames = parse_rename_specs(getattr(args, "renames", None))
+    dst_skill = getattr(args, "dst_skill", None)
+    legacy_skill_name = getattr(args, "skill_name", None)
+    if (
+        dst_skill is not None
+        and legacy_skill_name is not None
+        and dst_skill != legacy_skill_name
+    ):
+        raise UsageError("--dst-skill and --skill-name cannot specify different names")
+    if dst_skill is not None and renames:
+        raise UsageError("--dst-skill cannot be combined with --rename")
+    if dst_skill is not None:
+        requested = getattr(args, "src_skills", None) or []
+        if getattr(args, "all_src_skills", False) or len(requested) != 1:
+            example = source_skill_name(projects[0])
+            raise UsageError(
+                "--dst-skill requires exactly one --src-skill so the rename "
+                "stays stable if the source later adds skills.\n"
+                f"Use --src-skill {example} --dst-skill {dst_skill}, or "
+                f"--rename {example}:{dst_skill}."
+            )
+
+    by_source = source_skill_map(projects)
+    selected_names = selected_source_names(args, projects)
+    target_override = dst_skill or legacy_skill_name
+    selected: list[SkillProject] = []
+    for name in selected_names:
+        project = by_source[name]
+        target_name = renames.get(name)
+        if target_name is None and target_override is not None:
+            target_name = target_override
+        if target_name is not None:
+            project = project_with_target_skill(project, target_name)
+        selected.append(project)
+
+    duplicate_targets = duplicate_values(project.skill_name for project in selected)
+    if duplicate_targets:
+        raise UsageError(
+            "multiple selected source skills map to the same target skill name: "
+            + ", ".join(sorted(duplicate_targets))
+        )
+    duplicate_markers = duplicate_values(project.marker_slug for project in selected)
+    if duplicate_markers:
+        raise UsageError(
+            "multiple selected source skills map to the same discoverability marker: "
+            + ", ".join(sorted(duplicate_markers))
+        )
+    return selected
 
 
 def install_for_targets(
@@ -2432,6 +2968,191 @@ def install_for_targets(
     ]
 
 
+def remove_snapshot_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def snapshot_install_paths(projects: Sequence[SkillProject], args: argparse.Namespace):
+    temp_dir = tempfile.TemporaryDirectory(
+        prefix="agent-skill-installer-rollback-"
+    )
+    records: list[tuple[Path, str, Path | str | None, bool]] = []
+    seen: set[Path] = set()
+    for project in projects:
+        for agent in normalize_agents([args.agent]):
+            spec = target_spec(
+                project,
+                agent,
+                args.scope,
+                repo=args.repo if args.scope == "repo" else None,
+                home=args.home,
+                codex_home=args.codex_home,
+                claude_home=args.claude_home,
+            )
+            for path in (
+                spec.skill_dir,
+                manifest_path(project, spec.skill_dir),
+                spec.skill_dir.parent / project.sidecar_manifest_name,
+                spec.hook_path,
+            ):
+                if path in seen:
+                    continue
+                seen.add(path)
+                if path.is_symlink():
+                    records.append((path, "symlink", str(path.readlink()), path.is_dir()))
+                elif path.is_dir():
+                    backup = Path(temp_dir.name) / str(len(records))
+                    shutil.copytree(path, backup, symlinks=True)
+                    records.append((path, "dir", backup, False))
+                elif path.is_file():
+                    backup = Path(temp_dir.name) / str(len(records))
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, backup)
+                    records.append((path, "file", backup, False))
+                else:
+                    records.append((path, "missing", None, False))
+    return temp_dir, records
+
+
+def restore_install_paths(
+    records: Sequence[tuple[Path, str, Path | str | None, bool]],
+) -> None:
+    for path, _kind, _backup, _target_is_directory in sorted(
+        records,
+        key=lambda item: len(item[0].parts),
+        reverse=True,
+    ):
+        if path_exists(path):
+            remove_snapshot_path(path)
+    for path, kind, backup, target_is_directory in records:
+        if kind == "missing":
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "symlink":
+            assert isinstance(backup, str)
+            path.symlink_to(backup, target_is_directory=target_is_directory)
+        elif kind == "dir":
+            assert isinstance(backup, Path)
+            shutil.copytree(backup, path, symlinks=True)
+        elif kind == "file":
+            assert isinstance(backup, Path)
+            shutil.copy2(backup, path)
+
+
+def validate_install_plan(
+    projects: Sequence[SkillProject],
+    args: argparse.Namespace,
+) -> None:
+    seen_targets: set[tuple[str, str, Path]] = set()
+    for project in projects:
+        for agent in normalize_agents([args.agent]):
+            spec = target_spec(
+                project,
+                agent,
+                args.scope,
+                repo=args.repo if args.scope == "repo" else None,
+                home=args.home,
+                codex_home=args.codex_home,
+                claude_home=args.claude_home,
+            )
+            key = (agent, args.scope, spec.skill_dir)
+            if key in seen_targets:
+                raise InstallerError(f"duplicate install target: {spec.skill_dir}")
+            seen_targets.add(key)
+            if path_exists(spec.skill_dir):
+                manifest = read_manifest(project, spec.skill_dir)
+                if manifest is None and not args.force:
+                    raise InstallerError(
+                        f"refusing to replace unowned skill directory: {spec.skill_dir}"
+                    )
+
+
+def install_project_for_targets(
+    project: SkillProject,
+    args: argparse.Namespace,
+    *,
+    local_editable: bool = False,
+    github_source: GithubSource | None = None,
+    github_archive_path: Path | None = None,
+    pypi_version: str | None = None,
+    pypi_wheel_path: Path | None = None,
+) -> list[InstallResult]:
+    editable_source_dir = (
+        project.bundled_skill_source
+        if local_editable
+        else None
+    )
+    project_github_source = github_source
+    if github_source is not None and project.source_skill_path is not None:
+        project_github_source = replace(
+            github_source,
+            path=PurePosixPath(project.source_skill_path),
+        )
+    return install_for_targets(
+        project,
+        args,
+        editable_source_dir=editable_source_dir,
+        github_source=project_github_source,
+        github_archive_path=github_archive_path,
+        pypi_version=pypi_version,
+        pypi_wheel_path=pypi_wheel_path,
+    )
+
+
+def install_projects_for_targets(
+    projects: Sequence[SkillProject],
+    args: argparse.Namespace,
+    *,
+    local_editable: bool = False,
+    github_source: GithubSource | None = None,
+    github_archive_path: Path | None = None,
+    pypi_version: str | None = None,
+    pypi_wheel_path: Path | None = None,
+) -> list[InstallResult]:
+    validate_install_plan(projects, args)
+    if len(projects) == 1:
+        return install_project_for_targets(
+            projects[0],
+            args,
+            local_editable=local_editable,
+            github_source=github_source,
+            github_archive_path=github_archive_path,
+            pypi_version=pypi_version,
+            pypi_wheel_path=pypi_wheel_path,
+        )
+
+    temp_dir, records = snapshot_install_paths(projects, args)
+    try:
+        results: list[InstallResult] = []
+        for project in projects:
+            results.extend(
+                install_project_for_targets(
+                    project,
+                    args,
+                    local_editable=local_editable,
+                    github_source=github_source,
+                    github_archive_path=github_archive_path,
+                    pypi_version=pypi_version,
+                    pypi_wheel_path=pypi_wheel_path,
+                )
+            )
+        return results
+    except Exception as error:
+        try:
+            restore_install_paths(records)
+        except Exception as rollback_error:
+            raise InstallerError(
+                "install failed and rollback was incomplete: "
+                f"{rollback_error}. Original error: {error}"
+            ) from error
+        raise InstallerError(f"install failed; rolled back changes: {error}") from error
+    finally:
+        temp_dir.cleanup()
+
+
 def run_install(args: argparse.Namespace) -> list[InstallResult]:
     if args.github_url is None and (
         args.github_ref is not None or args.github_path is not None
@@ -2441,31 +3162,27 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
         raise InstallerError("--pypi-version requires --pypi-package")
 
     if args.skill_path is not None:
-        project = read_local_project(args)
-        if project.bundled_skill_source is None:
+        projects = select_source_projects(args, read_local_projects(args))
+        if any(project.bundled_skill_source is None for project in projects):
             raise InstallerError("local install source was not resolved")
-        editable_source_dir = (
-            project.bundled_skill_source
-            if getattr(args, "editable", None) is not False
-            else None
-        )
-        return install_for_targets(
-            project,
+        return install_projects_for_targets(
+            projects,
             args,
-            editable_source_dir=editable_source_dir,
+            local_editable=getattr(args, "editable", None) is not False,
         )
 
     if args.wheel_file is not None:
         validated_wheel = validated_wheel_file(args)
         if validated_wheel is not None:
-            wheel_path, project = validated_wheel
+            wheel_path, projects = validated_wheel
         else:
             wheel_path = args.wheel_file.expanduser().resolve()
             if not wheel_path.is_file():
                 raise InstallerError(f"wheel file does not exist: {wheel_path}")
-            project = read_pypi_project(args, wheel_path, None)
-        return install_for_targets(
-            project,
+            projects = read_pypi_projects(args, wheel_path, None)
+        projects = select_source_projects(args, projects)
+        return install_projects_for_targets(
+            projects,
             args,
             pypi_wheel_path=wheel_path,
         )
@@ -2478,9 +3195,10 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
         )
         validated_download = validated_github_download(args, source)
         if validated_download is not None:
-            archive_path, project = validated_download
-            results = install_for_targets(
-                project,
+            archive_path, projects = validated_download
+            projects = select_source_projects(args, projects)
+            results = install_projects_for_targets(
+                projects,
                 args,
                 github_source=source,
                 github_archive_path=archive_path,
@@ -2490,9 +3208,10 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
                 prefix="agent-skill-installer-github-"
             ) as temp_dir:
                 archive_path = download_github_archive(source, Path(temp_dir))
-                project = read_github_project(args, archive_path, source)
-                results = install_for_targets(
-                    project,
+                projects = read_github_projects(args, archive_path, source)
+                projects = select_source_projects(args, projects)
+                results = install_projects_for_targets(
+                    projects,
                     args,
                     github_source=source,
                     github_archive_path=archive_path,
@@ -2504,9 +3223,10 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
     version = resolve_pypi_version(args)
     validated_download = validated_pypi_download(args, version)
     if validated_download is not None:
-        wheel_path, project = validated_download
-        results = install_for_targets(
-            project,
+        wheel_path, projects = validated_download
+        projects = select_source_projects(args, projects)
+        results = install_projects_for_targets(
+            projects,
             args,
             pypi_version=version,
             pypi_wheel_path=wheel_path,
@@ -2528,9 +3248,10 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
                 version,
                 Path(temp_dir),
             )
-            project = read_pypi_project(args, wheel_path, version)
-            results = install_for_targets(
-                project,
+            projects = read_pypi_projects(args, wheel_path, version)
+            projects = select_source_projects(args, projects)
+            results = install_projects_for_targets(
+                projects,
                 args,
                 pypi_version=version,
                 pypi_wheel_path=wheel_path,
