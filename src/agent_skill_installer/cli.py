@@ -94,6 +94,8 @@ class Prompter(Protocol):
         summary: str | None = None,
         summary_builder: CommandPreviewBuilder | None = None,
         default_values: Sequence[str] | None = None,
+        empty_message: str = "Choose at least one target.",
+        accept_highlighted_on_empty: bool = True,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> list[str]:
         ...
@@ -187,6 +189,8 @@ class TextualPrompter:
         summary: str | None = None,
         summary_builder: CommandPreviewBuilder | None = None,
         default_values: Sequence[str] | None = None,
+        empty_message: str = "Choose at least one target.",
+        accept_highlighted_on_empty: bool = True,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> list[str]:
         result = run_textual_checkbox(
@@ -197,6 +201,8 @@ class TextualPrompter:
             summary=summary,
             summary_builder=summary_builder,
             default_values=default_values,
+            empty_message=empty_message,
+            accept_highlighted_on_empty=accept_highlighted_on_empty,
             submit_label=submit_label,
         )
         if result == PROMPT_BACK:
@@ -749,6 +755,8 @@ def run_textual_checkbox(
     summary: str | None = None,
     summary_builder: CommandPreviewBuilder | None = None,
     default_values: Sequence[str] | None = None,
+    empty_message: str = "Choose at least one target.",
+    accept_highlighted_on_empty: bool = True,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> list[str] | None:
     return make_textual_checkbox_app(
@@ -759,6 +767,8 @@ def run_textual_checkbox(
         summary=summary,
         summary_builder=summary_builder,
         default_values=default_values,
+        empty_message=empty_message,
+        accept_highlighted_on_empty=accept_highlighted_on_empty,
         submit_label=submit_label,
     ).run()
 
@@ -772,6 +782,8 @@ def make_textual_checkbox_app(
     summary: str | None = None,
     summary_builder: CommandPreviewBuilder | None = None,
     default_values: Sequence[str] | None = None,
+    empty_message: str = "Choose at least one target.",
+    accept_highlighted_on_empty: bool = True,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ):
     from rich.segment import Segment
@@ -836,7 +848,7 @@ def make_textual_checkbox_app(
                 self.toggle(selection)
 
         def action_accept_highlighted(self) -> None:
-            if not self.selected:
+            if not self.selected and accept_highlighted_on_empty:
                 self.action_toggle_highlighted()
             self.app.action_accept_selected_targets()
 
@@ -909,7 +921,7 @@ def make_textual_checkbox_app(
                 Static=Static,
                 Vertical=Vertical,
                 force=command_preview_builder is not None,
-                empty_message="Choose at least one target.",
+                empty_message=empty_message,
                 preview_class=initial_preview_class,
             )
             with Vertical(id="dialog"):
@@ -1079,9 +1091,7 @@ def make_textual_checkbox_app(
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "copy-command":
                 if self.current_command_preview is None:
-                    self.query_one("#error", Static).update(
-                        "Choose at least one target."
-                    )
+                    self.query_one("#error", Static).update(empty_message)
                     return
                 copy_command_to_clipboard(self, self.current_command_preview)
                 return
@@ -1098,9 +1108,7 @@ def make_textual_checkbox_app(
         def action_accept_selected_targets(self) -> None:
             selected = list(self.query_one("#choices", PromptSelectionList).selected)
             if not selected:
-                self.query_one("#error", Static).update(
-                    "Choose at least one target."
-                )
+                self.query_one("#error", Static).update(empty_message)
                 return
             self.exit([str(value) for value in selected])
 

@@ -1392,6 +1392,53 @@ def test_textual_checkbox_all_mode_and_empty_selection() -> None:
     asyncio.run(run_scenario())
 
 
+def test_textual_checkbox_can_require_space_before_accepting_empty_selection() -> None:
+    if importlib.util.find_spec("textual") is None:
+        pytest.skip("Textual is not installed")
+
+    from textual.widgets import SelectionList, Static
+
+    app = make_textual_checkbox_app(
+        "Select source skills",
+        [
+            {
+                "name": "All source skills",
+                "value": "__agent_skill_installer_all_source_skills__",
+                "kind": "all",
+            },
+            {"name": "alpha", "value": "alpha", "kind": "skill"},
+        ],
+        command_preview_builder=lambda selected: (
+            "agent-skill-installer --no-ui install --all-src-skills"
+            if list(selected)
+            else None
+        ),
+        empty_message="Choose at least one source skill.",
+        accept_highlighted_on_empty=False,
+    )
+
+    async def run_scenario() -> None:
+        async with app.run_test() as pilot:
+            choices = app.query_one("#choices", SelectionList)
+            command = app.query_one("#command-preview-command", Static)
+            assert str(command.content) == "Choose at least one source skill."
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.return_value is None
+            assert list(choices.selected) == []
+            assert str(app.query_one("#error", Static).content) == (
+                "Choose at least one source skill."
+            )
+
+            await pilot.press("space")
+            await pilot.press("enter")
+
+    asyncio.run(run_scenario())
+
+    assert app.return_value == ["__agent_skill_installer_all_source_skills__"]
+
+
 def test_textual_pypi_version_input_suggests_versions_and_updates_preview() -> None:
     if importlib.util.find_spec("textual") is None:
         pytest.skip("Textual is not installed")
@@ -1508,6 +1555,8 @@ class ScriptedPrompter:
         self.previews: list[str | None] = []
         self.summaries: list[str | None] = []
         self.checkbox_defaults: list[list[str] | None] = []
+        self.checkbox_empty_messages: list[str] = []
+        self.checkbox_accept_highlighted_on_empty: list[bool] = []
         self.submit_labels: list[str] = []
 
     def select(
@@ -1549,6 +1598,8 @@ class ScriptedPrompter:
         summary=None,
         summary_builder=None,
         default_values=None,
+        empty_message="Choose at least one target.",
+        accept_highlighted_on_empty=True,
         submit_label="Continue",
     ):
         self.calls.append(("checkbox", message))
@@ -1557,6 +1608,8 @@ class ScriptedPrompter:
         self.checkbox_defaults.append(
             list(default_values) if default_values is not None else None
         )
+        self.checkbox_empty_messages.append(empty_message)
+        self.checkbox_accept_highlighted_on_empty.append(accept_highlighted_on_empty)
         answer = next(self.answers)
         if isinstance(answer, BaseException):
             raise answer
@@ -3803,6 +3856,8 @@ def test_generic_complete_with_ui_prompts_for_source_skills(
     assert args.all_src_skills is False
     assert prompter.calls == [("checkbox", "Select source skills")]
     assert prompter.checkbox_defaults == [None]
+    assert prompter.checkbox_empty_messages == ["Choose at least one source skill."]
+    assert prompter.checkbox_accept_highlighted_on_empty == [False]
     assert [choice["value"] for choice in prompter.choices[0]] == [
         "__agent_skill_installer_all_source_skills__",
         "skill-one",

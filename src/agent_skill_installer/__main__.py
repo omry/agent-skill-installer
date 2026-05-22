@@ -1820,6 +1820,8 @@ def complete_install_with_ui(
                 source_skill_choices(projects),
                 command_preview_builder=source_skill_preview,
                 summary_builder=source_skill_summary,
+                empty_message="Choose at least one source skill.",
+                accept_highlighted_on_empty=False,
             ),
         )
         if selected_skills == PROMPT_BACK:
