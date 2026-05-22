@@ -18,3 +18,13 @@ python -m pip install "setuptools>=77" pytest build twine
 python -m pip install -e . --no-build-isolation
 python -m pytest
 ```
+
+## Release Fragments
+
+Product-user-visible changes should include a concise news fragment under
+`news/`. Fragment filenames follow `<issue_number>.<category>`, where supported
+categories are `feature`, `bugfix`, `api_change`, `docs`, and `misc`.
+
+Release notes are assembled with Towncrier from `NEWS.md` and the
+`[tool.towncrier]` configuration in `pyproject.toml`. The user handles release
+cuts; do not build or consume fragments unless explicitly asked.

@@ -42,3 +42,39 @@ agent-skill-installer = "agent_skill_installer.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.towncrier]
+package = "agent_skill_installer"
+package_dir = "src"
+filename = "NEWS.md"
+directory = "news/"
+title_format = "## Agent Skill Installer {version} ({project_date})"
+template = "news/_template.rst"
+issue_format = "[#{issue}](https://github.com/omry/agent-skill-installer/issues/{issue})"
+start_string = "<!-- TOWNCRIER -->\n"
+underlines = [""]
+
+[[tool.towncrier.type]]
+directory = "feature"
+name = "Features"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "bugfix"
+name = "Bug Fixes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "api_change"
+name = "API changes and deprecations"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "docs"
+name = "Improved Documentation"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "misc"
+name = "Miscellaneous changes"
+showcontent = true
