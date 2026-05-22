@@ -2,8 +2,9 @@
 
 |  | Description |
 | --- | --- |
-| Project | [![PyPI version](https://badge.fury.io/py/agent-skill-installer.svg)](https://badge.fury.io/py/agent-skill-installer) [![Downloads](https://img.shields.io/pypi/dm/agent-skill-installer.svg)](https://pypi.org/project/agent-skill-installer/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://pypi.org/project/agent-skill-installer/) [![License](https://img.shields.io/pypi/l/agent-skill-installer.svg)](https://github.com/omry/agent-skill-installer/blob/main/LICENSE) |
+| Project | [![PyPI version](https://badge.fury.io/py/agent-skill-installer.svg)](https://badge.fury.io/py/agent-skill-installer)[![Downloads](https://pepy.tech/badge/agent-skill-installer/month)](https://pepy.tech/project/agent-skill-installer) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://pypi.org/project/agent-skill-installer/) [![License](https://img.shields.io/pypi/l/agent-skill-installer.svg)](https://github.com/omry/agent-skill-installer/blob/main/LICENSE) |
 | Status | [![CI](https://github.com/omry/agent-skill-installer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/omry/agent-skill-installer/actions/workflows/ci.yml) [![Publish](https://github.com/omry/agent-skill-installer/actions/workflows/publish.yml/badge.svg)](https://github.com/omry/agent-skill-installer/actions/workflows/publish.yml) |
+| Docs and support | [![Zulip chat](https://img.shields.io/badge/chat-Zulip-2e77d0?logo=zulip)](https://hydra-framework.zulipchat.com/#narrow/channel/agent-skill-installer) |
 
 `agent-skill-installer` installs agent skills for Codex and Claude Code from
 local skill directories, GitHub repositories, or PyPI wheels. It supports repo
