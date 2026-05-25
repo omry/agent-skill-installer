@@ -52,7 +52,6 @@ from .installer import (
     local_skill_source_for_candidate,
     manifest_path,
     normalize_agents,
-    path_exists,
     parse_github_url,
     published_pypi_versions,
     read_manifest,
@@ -3027,7 +3026,7 @@ def restore_install_paths(
         key=lambda item: len(item[0].parts),
         reverse=True,
     ):
-        if path_exists(path):
+        if path.exists() or path.is_symlink():
             remove_snapshot_path(path)
     for path, kind, backup, target_is_directory in records:
         if kind == "missing":
@@ -3064,7 +3063,7 @@ def validate_install_plan(
             if key in seen_targets:
                 raise InstallerError(f"duplicate install target: {spec.skill_dir}")
             seen_targets.add(key)
-            if path_exists(spec.skill_dir):
+            if spec.skill_dir.exists() or spec.skill_dir.is_symlink():
                 manifest = read_manifest(project, spec.skill_dir)
                 if manifest is None and not args.force:
                     raise InstallerError(

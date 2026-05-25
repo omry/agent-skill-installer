@@ -15,6 +15,10 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping
 
+from omegaconf import OmegaConf
+from omegaconf.errors import OmegaConfBaseException
+from yaml import YAMLError
+
 from .config import CONFIG_FILE_NAME, AgentInstructions, InstallerConfig, load_installer_config_text
 
 
@@ -408,6 +412,129 @@ def bundled_skill_root(project: SkillProject):
     )
 
 
+def skill_frontmatter(skill_text: str, source: Path | PurePosixPath | str) -> str | None:
+    lines = skill_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[1:index]) + "\n"
+    raise InstallerError(
+        f"invalid SKILL.md YAML frontmatter in {source}: missing closing ---"
+    )
+
+
+def validate_skill_frontmatter_text(
+    skill_text: str,
+    source: Path | PurePosixPath | str,
+) -> None:
+    frontmatter = skill_frontmatter(skill_text, source)
+    if frontmatter is None:
+        return
+    try:
+        loaded = OmegaConf.create(frontmatter)
+        parsed = OmegaConf.to_container(loaded, resolve=False)
+    except (OmegaConfBaseException, YAMLError) as error:
+        raise InstallerError(
+            f"invalid SKILL.md YAML frontmatter in {source}: {error}"
+        ) from error
+    if not isinstance(parsed, dict):
+        raise InstallerError(
+            f"invalid SKILL.md YAML frontmatter in {source}: expected a mapping"
+        )
+
+
+def validate_skill_frontmatter_file(skill_file) -> None:
+    try:
+        skill_text = skill_file.read_text()
+    except OSError as error:
+        raise InstallerError(f"failed to read SKILL.md: {skill_file}") from error
+    validate_skill_frontmatter_text(skill_text, skill_file)
+
+
+def validate_skill_root(root) -> None:
+    validate_skill_frontmatter_file(root.joinpath("SKILL.md"))
+
+
+def zip_relative_path(filename: str) -> PurePosixPath | None:
+    path = PurePosixPath(filename)
+    if path.is_absolute() or ".." in path.parts:
+        raise InstallerError(f"unsafe path in zip archive: {filename}")
+    if not path.parts:
+        return None
+    return path
+
+
+def validate_zip_skill_frontmatter(
+    archive: zipfile.ZipFile,
+    skill_path: PurePosixPath,
+    *,
+    relative_path_for: Callable[[str], PurePosixPath | None] = zip_relative_path,
+    source: Path | PurePosixPath | str,
+) -> None:
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        relative_path = relative_path_for(info.filename)
+        if relative_path != skill_path:
+            continue
+        try:
+            skill_text = archive.read(info).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InstallerError(f"SKILL.md is not valid UTF-8 in {source}") from error
+        validate_skill_frontmatter_text(skill_text, source)
+        return
+    raise InstallerError(f"archive did not contain {skill_path.as_posix()}")
+
+
+def validate_install_skill_source(
+    project: SkillProject,
+    *,
+    source_dir: Path | None = None,
+    pypi_wheel_path: Path | None = None,
+    github_archive_path: Path | None = None,
+    github_source: GithubSource | None = None,
+) -> None:
+    if pypi_wheel_path is not None:
+        try:
+            with zipfile.ZipFile(pypi_wheel_path) as wheel:
+                skill_path = project.wheel_skill_prefix / "SKILL.md"
+                validate_zip_skill_frontmatter(
+                    wheel,
+                    skill_path,
+                    source=f"{pypi_wheel_path}:{skill_path.as_posix()}",
+                )
+        except zipfile.BadZipFile as error:
+            raise InstallerError(
+                f"PyPI wheel is not a valid zip file: {pypi_wheel_path}"
+            ) from error
+        return
+
+    if github_source is not None:
+        if github_archive_path is None:
+            raise InstallerError("missing GitHub archive for requested install source")
+        try:
+            with zipfile.ZipFile(github_archive_path) as archive:
+                skill_prefix = github_archive_skill_prefix(
+                    archive,
+                    github_source.path,
+                )
+                skill_path = prefixed_skill_file(skill_prefix)
+                validate_zip_skill_frontmatter(
+                    archive,
+                    skill_path,
+                    relative_path_for=github_archive_relative_path,
+                    source=f"{github_source.url}:{skill_path.as_posix()}",
+                )
+        except zipfile.BadZipFile as error:
+            raise InstallerError(
+                f"GitHub archive is not a valid zip file: {github_archive_path}"
+            ) from error
+        return
+
+    validate_skill_root(source_dir or bundled_skill_root(project))
+
+
 def iter_bundled_skill_files(project: SkillProject):
     root = bundled_skill_root(project)
 
@@ -705,32 +832,33 @@ def target_spec(
     home_path = resolve_home(home)
     repo_root = resolve_repo_root(repo) if scope == "repo" else None
 
-    if agent == "codex":
-        if scope == "global":
-            codex_dir = resolve_agent_home(
-                codex_home,
-                default_user_home=home_path,
-                default_name=".codex",
-            )
-            skill_dir = codex_dir / "skills" / project.skill_name
-            hook_path = codex_dir / "AGENTS.md"
-        else:
-            assert repo_root is not None
-            skill_dir = repo_root / ".codex" / "skills" / project.skill_name
-            hook_path = repo_root / "AGENTS.md"
+    layouts: dict[str, dict[str, str]] = {
+        "codex": {
+            "default_home": ".codex",
+            "repo_dir": ".codex",
+            "hook_file": "AGENTS.md",
+        },
+        "claude": {
+            "default_home": ".claude",
+            "repo_dir": ".claude",
+            "hook_file": "CLAUDE.md",
+        },
+    }
+    layout = layouts[agent]
+    override_home = codex_home if agent == "codex" else claude_home
+
+    if scope == "global":
+        agent_dir = resolve_agent_home(
+            override_home,
+            default_user_home=home_path,
+            default_name=layout["default_home"],
+        )
+        skill_dir = agent_dir / "skills" / project.skill_name
+        hook_path = agent_dir / layout["hook_file"]
     else:
-        if scope == "global":
-            claude_dir = resolve_agent_home(
-                claude_home,
-                default_user_home=home_path,
-                default_name=".claude",
-            )
-            skill_dir = claude_dir / "skills" / project.skill_name
-            hook_path = claude_dir / "CLAUDE.md"
-        else:
-            assert repo_root is not None
-            skill_dir = repo_root / ".claude" / "skills" / project.skill_name
-            hook_path = repo_root / "CLAUDE.md"
+        assert repo_root is not None
+        skill_dir = repo_root / layout["repo_dir"] / "skills" / project.skill_name
+        hook_path = repo_root / layout["hook_file"]
 
     return TargetSpec(
         agent=agent,
@@ -818,10 +946,6 @@ def status_from_manifest(
     )
 
 
-def skills_dir_for_target(spec: TargetSpec) -> Path:
-    return spec.skill_dir.parent
-
-
 def iter_managed_manifest_paths(skills_dir: Path):
     if not skills_dir.is_dir():
         return
@@ -837,7 +961,7 @@ def iter_managed_manifest_paths(skills_dir: Path):
 
 def discover_managed_installations_for_target(spec: TargetSpec) -> list[InstallationStatus]:
     statuses: list[InstallationStatus] = []
-    for path in iter_managed_manifest_paths(skills_dir_for_target(spec)) or ():
+    for path in iter_managed_manifest_paths(spec.skill_dir.parent) or ():
         try:
             manifest = read_manifest_file(path)
             status = status_from_manifest(manifest, path)
@@ -910,7 +1034,7 @@ def inspect_installation(
             error=str(error),
         )
 
-    if not path_exists(spec.skill_dir):
+    if not (spec.skill_dir.exists() or spec.skill_dir.is_symlink()):
         return InstallationStatus(
             agent=agent,
             scope=scope,
@@ -997,17 +1121,6 @@ def remove_existing_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def remove_manifest_at(path: Path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-
-
-def path_exists(path: Path) -> bool:
-    return path.exists() or path.is_symlink()
-
-
 def copy_bundled_skill(project: SkillProject, skill_dir: Path) -> list[str]:
     copied: list[str] = []
     for relative_path, source in iter_bundled_skill_files(project):
@@ -1016,15 +1129,6 @@ def copy_bundled_skill(project: SkillProject, skill_dir: Path) -> list[str]:
         target.write_bytes(source.read_bytes())
         copied.append(relative_path.as_posix())
     return copied
-
-
-def pypi_release_url(project: SkillProject, version: str) -> str:
-    quoted_version = urllib.parse.quote(version.strip(), safe="")
-    return f"{project.pypi_base_url}/{project.pypi_name}/{quoted_version}/json"
-
-
-def pypi_project_url(project: SkillProject) -> str:
-    return f"{project.pypi_base_url}/{project.pypi_name}/json"
 
 
 def fetch_json_url(
@@ -1071,22 +1175,16 @@ def find_wheel_download_url(
     return sorted(wheels)[0]
 
 
-def release_has_wheel(files: object) -> bool:
-    if not isinstance(files, list):
-        return False
-    return any(
-        isinstance(item, dict) and item.get("packagetype") == "bdist_wheel"
-        for item in files
-    )
-
-
 def published_pypi_versions(
     project: SkillProject,
     *,
     limit: int = 20,
     timeout: float = PYPI_METADATA_TIMEOUT_SECONDS,
 ) -> list[str]:
-    metadata = fetch_json_url(pypi_project_url(project), timeout=timeout)
+    metadata = fetch_json_url(
+        f"{project.pypi_base_url}/{project.pypi_name}/json",
+        timeout=timeout,
+    )
     releases = metadata.get("releases")
     if not isinstance(releases, dict):
         raise InstallerError("PyPI metadata did not contain releases")
@@ -1094,7 +1192,12 @@ def published_pypi_versions(
     versions = [
         version
         for version, files in releases.items()
-        if isinstance(version, str) and release_has_wheel(files)
+        if isinstance(version, str)
+        and isinstance(files, list)
+        and any(
+            isinstance(item, dict) and item.get("packagetype") == "bdist_wheel"
+            for item in files
+        )
     ]
     return sorted(versions, key=version_key, reverse=True)[:limit]
 
@@ -1128,7 +1231,10 @@ def download_pypi_wheel(
         raise InstallerError("PyPI version must not be empty")
     filename, url = find_wheel_download_url(
         project,
-        fetch_json_url(pypi_release_url(project, version)),
+        fetch_json_url(
+            f"{project.pypi_base_url}/{project.pypi_name}/"
+            f"{urllib.parse.quote(version, safe='')}/json"
+        ),
     )
     return download_url(url, download_dir / filename)
 
@@ -1555,7 +1661,7 @@ def install_target(
         github_source=github_source,
     )
 
-    skill_exists = path_exists(spec.skill_dir)
+    skill_exists = spec.skill_dir.exists() or spec.skill_dir.is_symlink()
     previous_manifest = read_manifest(project, spec.skill_dir) if skill_exists else None
     previous_manifest_file = (
         manifest_path(project, spec.skill_dir)
@@ -1586,6 +1692,17 @@ def install_target(
         if editable
         else None
     )
+    if pypi_version is not None and pypi_wheel_path is None:
+        raise InstallerError("missing PyPI wheel for requested install source")
+    if github_source is not None and github_archive_path is None:
+        raise InstallerError("missing GitHub archive for requested install source")
+    validate_install_skill_source(
+        project,
+        source_dir=source_dir,
+        pypi_wheel_path=pypi_wheel_path,
+        github_archive_path=github_archive_path,
+        github_source=github_source,
+    )
     if skill_exists and previous_manifest is None and not force:
         raise InstallerError(
             f"refusing to replace unowned skill directory: {spec.skill_dir}"
@@ -1613,7 +1730,7 @@ def install_target(
     if skill_exists:
         remove_existing_path(spec.skill_dir)
     if previous_manifest_file is not None:
-        remove_manifest_at(previous_manifest_file)
+        previous_manifest_file.unlink(missing_ok=True)
 
     remember_created_dirs(created_dirs, spec.skill_dir)
     if pypi_version is not None or pypi_wheel_path is not None:
@@ -1695,7 +1812,7 @@ def remove_created_dirs(paths: Iterable[object]) -> None:
 
 
 def uninstall_target(project: SkillProject, spec: TargetSpec) -> InstallResult:
-    skill_exists = path_exists(spec.skill_dir)
+    skill_exists = spec.skill_dir.exists() or spec.skill_dir.is_symlink()
     manifest = read_manifest(project, spec.skill_dir) if skill_exists else None
     manifest_file = manifest_path(project, spec.skill_dir) if manifest is not None else None
     package_version = manifest_package_version(manifest)
@@ -1715,7 +1832,7 @@ def uninstall_target(project: SkillProject, spec: TargetSpec) -> InstallResult:
     )
 
     if manifest_file is not None:
-        remove_manifest_at(manifest_file)
+        manifest_file.unlink(missing_ok=True)
     if skill_exists:
         remove_existing_path(spec.skill_dir)
     if manifest is not None:

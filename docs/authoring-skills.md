@@ -35,8 +35,14 @@ All supporting files in the skill directory are installed with the skill.
 
 ## Skill Metadata
 
-`SKILL.md` may include simple YAML front matter. The installer reads only
-`name`, `description`, and `version`:
+`SKILL.md` may include YAML frontmatter at the top of the Markdown file. This
+frontmatter is real YAML metadata delimited by `---`; it is not a Markdown
+comment. If present, it must parse as a YAML mapping. The installer validates
+the frontmatter before installing or replacing a skill, so syntax errors such
+as an unquoted `: ` inside a plain scalar fail early instead of producing a
+skill that Codex or Claude Code cannot load.
+
+The installer reads only `name`, `description`, and `version`:
 
 ```markdown
 ---
@@ -52,9 +58,11 @@ Instructions for the agent go here.
 
 `name` becomes the default installed skill directory name. `description` becomes
 the fallback discoverability text. `version` is recorded in the internal install
-manifest. All three fields are optional; if they are omitted, the installer uses
-the source name, package name, selected version, or a generated description as
-appropriate.
+manifest. All three fields are optional for the installer; if they are omitted,
+the installer uses the source name, package name, selected version, or a
+generated description as appropriate. Some agents may require frontmatter fields
+for their own skill discovery, so published Codex skills should include valid
+`name` and `description` fields.
 
 ## Optional Installer Config
 

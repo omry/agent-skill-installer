@@ -1,0 +1,2 @@
+Reject invalid `SKILL.md` YAML frontmatter before installing a skill, including
+local/editable, PyPI wheel, and GitHub archive sources.

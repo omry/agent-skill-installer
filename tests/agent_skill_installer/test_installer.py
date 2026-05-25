@@ -72,6 +72,16 @@ def make_skill(path: Path, text: str = "example skill\n") -> Path:
     return path
 
 
+def invalid_skill_frontmatter() -> str:
+    return (
+        "---\n"
+        "name: broken-skill\n"
+        "description: Follow `(fix -> tests) *3 until pass: tests`.\n"
+        "---\n\n"
+        "# Broken Skill\n"
+    )
+
+
 def make_project(tmp_path: Path) -> SkillProject:
     return SkillProject(
         package_name="example-agent-skill",
@@ -293,6 +303,23 @@ def test_global_scope_supports_per_agent_home_directories(tmp_path: Path) -> Non
     assert not claude_home.exists()
 
 
+def test_install_rejects_invalid_skill_frontmatter_before_replacing_existing(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    installer = Installer(project)
+    repo = make_repo(tmp_path / "repo")
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+
+    installer.install(["codex"], "repo", repo=repo)
+    (project.bundled_skill_source / "SKILL.md").write_text(invalid_skill_frontmatter())
+
+    with pytest.raises(InstallerError, match="invalid SKILL.md YAML frontmatter"):
+        installer.install(["codex"], "repo", repo=repo)
+
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+
 def test_editable_install_links_local_checkout_skill_files(
     tmp_path: Path,
     monkeypatch,
@@ -357,6 +384,34 @@ def test_pypi_wheel_install_extracts_only_project_skill(
     assert not (skill_dir / project.import_name / "__init__.py").exists()
 
 
+def test_pypi_wheel_install_rejects_invalid_skill_frontmatter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    wheel = make_skill_wheel(
+        tmp_path / "example.whl",
+        project,
+        skill_text=invalid_skill_frontmatter(),
+    )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: wheel,
+    )
+
+    with pytest.raises(InstallerError, match="invalid SKILL.md YAML frontmatter"):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            pypi_version="2.0.0",
+        )
+
+    assert not (repo / ".codex" / "skills" / project.skill_name).exists()
+
+
 def test_github_install_extracts_skill_from_repository_archive(
     tmp_path: Path,
     monkeypatch,
@@ -389,6 +444,33 @@ def test_github_install_extracts_skill_from_repository_archive(
     assert manifest["install_mode"] == "github"
     assert manifest["source_url"] == "https://github.com/example/example-agent-skill"
     assert manifest["source_ref"] == "main"
+
+
+def test_github_install_rejects_invalid_skill_frontmatter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    archive = make_github_archive(
+        tmp_path / "github.zip",
+        skill_text=invalid_skill_frontmatter(),
+    )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+
+    with pytest.raises(InstallerError, match="invalid SKILL.md YAML frontmatter"):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            github_url="https://github.com/example/example-agent-skill",
+        )
+
+    assert not (repo / ".codex" / "skills" / project.skill_name).exists()
 
 
 def test_github_install_accepts_tree_url_for_nested_skill(
