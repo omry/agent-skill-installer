@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform as platform_module
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,53 @@ SCOPES = ("repo", "global")
 
 class InstallerError(Exception):
     pass
+
+
+def normalize_platform_os(system_platform: str | None = None) -> str:
+    value = (system_platform or sys.platform).strip().lower()
+    if value.startswith("linux"):
+        return "linux"
+    if value == "darwin":
+        return "darwin"
+    if value.startswith(("win32", "cygwin", "msys")):
+        return "windows"
+    raise InstallerError(f"unsupported platform OS: {system_platform or sys.platform}")
+
+
+def normalize_platform_arch(machine: str | None = None) -> str:
+    value = (machine or platform_module.machine()).strip().lower()
+    normalized = value.replace("-", "_")
+    if normalized in {"x86_64", "amd64"}:
+        return "amd64"
+    if normalized in {"aarch64", "arm64"}:
+        return "arm64"
+    raise InstallerError(f"unsupported platform arch: {machine or platform_module.machine()}")
+
+
+def local_platform_values(
+    *,
+    system_platform: str | None = None,
+    machine: str | None = None,
+) -> dict[str, str]:
+    os_name = normalize_platform_os(system_platform)
+    arch = normalize_platform_arch(machine)
+    return {
+        "os": os_name,
+        "arch": arch,
+        "platform": f"{os_name}-{arch}",
+    }
+
+
+def render_platform_template(template: str) -> str:
+    try:
+        return template.format(**local_platform_values())
+    except KeyError as error:
+        name = str(error).strip("'")
+        raise InstallerError(
+            f"unknown platform_specific template field: {name}"
+        ) from error
+    except ValueError as error:
+        raise InstallerError(f"invalid platform_specific template: {error}") from error
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from agent_skill_installer.config import load_installer_config
+from agent_skill_installer.installer import InstallerError, local_platform_values
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +32,17 @@ def run_example(command: list[str], *, pythonpath: str) -> subprocess.CompletedP
         env=env,
         cwd=REPO_ROOT,
     )
+
+
+def platform_example_target(example: Path) -> tuple[str, Path]:
+    try:
+        platform = local_platform_values()["platform"]
+    except InstallerError as error:
+        pytest.skip(f"platform-specific example does not support this platform: {error}")
+    target = example / "targets" / f"platform-specific-skill-{platform}"
+    if not target.is_dir():
+        pytest.skip(f"platform-specific example does not include target {platform}")
+    return platform, target
 
 
 def test_demo_installer_example_installs_and_uninstalls(tmp_path: Path) -> None:
@@ -181,6 +195,126 @@ def test_wheel_skill_example_builds_and_installs(tmp_path: Path) -> None:
     assert uninstall.returncode == 0, uninstall.stderr
     assert "Removed wheel-agent-skill 0.1.0 from Codex repo:" in uninstall.stdout
     assert not skill_dir.exists()
+
+
+def test_platform_specific_skill_example_builds_and_installs(
+    tmp_path: Path,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    example = tmp_path / "platform-specific-skill"
+    dist = tmp_path / "dist"
+    shutil.copytree(REPO_ROOT / "examples" / "platform-specific-skill", example)
+    platform, target = platform_example_target(example)
+    pythonpath = str(REPO_ROOT / "src")
+
+    selector_build = run_example(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            "--outdir",
+            str(dist),
+            str(example / "selector"),
+        ],
+        pythonpath=pythonpath,
+    )
+    assert selector_build.returncode == 0, selector_build.stderr
+
+    target_build = run_example(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            "--outdir",
+            str(dist),
+            str(target),
+        ],
+        pythonpath=pythonpath,
+    )
+    assert target_build.returncode == 0, target_build.stderr
+
+    selector_wheel = dist / "platform_specific_skill-0.1.0-py3-none-any.whl"
+    target_wheel = (
+        dist / f"platform_specific_skill_{platform.replace('-', '_')}-0.1.0-py3-none-any.whl"
+    )
+    assert selector_wheel.is_file()
+    assert target_wheel.is_file()
+
+    install = run_example(
+        [
+            sys.executable,
+            "-m",
+            "agent_skill_installer",
+            "--no-ui",
+            "install",
+            "--wheel-file",
+            str(selector_wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+
+    assert install.returncode == 0, install.stderr
+    skill_name = f"platform-specific-skill-{platform}"
+    assert f"Installed {skill_name} 0.1.0 (wheel) to Codex repo:" in install.stdout
+    skill_dir = repo / ".codex" / "skills" / skill_name
+    assert skill_name in skill_dir.joinpath("SKILL.md").read_text()
+    assert (
+        skill_dir / "bin" / "demo-tool.txt"
+    ).read_text().strip() == f"{platform} demo binary placeholder"
+    config = load_installer_config(skill_dir / "agent-skill-installer.yaml")
+    assert config.installer.agents.codex is not None
+    hook = repo.joinpath("AGENTS.md").read_text()
+    assert f"<!-- {skill_name.upper()}-DISCOVERABILITY-START -->" in hook
+
+
+def test_platform_specific_skill_example_installs_from_local_selector(
+    tmp_path: Path,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    example = tmp_path / "platform-specific-skill"
+    shutil.copytree(REPO_ROOT / "examples" / "platform-specific-skill", example)
+    platform, _target = platform_example_target(example)
+    selector_skill = example / "selector" / "src" / "platform_specific_selector" / "_skill"
+    pythonpath = str(REPO_ROOT / "src")
+
+    install = run_example(
+        [
+            sys.executable,
+            "-m",
+            "agent_skill_installer",
+            "--no-ui",
+            "install",
+            "--skill-path",
+            str(selector_skill),
+            "--copy",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+
+    assert install.returncode == 0, install.stderr
+    skill_name = f"platform-specific-skill-{platform}"
+    assert f"Installed {skill_name} 0.1.0 to Codex repo:" in install.stdout
+    skill_dir = repo / ".codex" / "skills" / skill_name
+    assert not skill_dir.is_symlink()
+    assert (
+        skill_dir / "bin" / "demo-tool.txt"
+    ).read_text().strip() == f"{platform} demo binary placeholder"
 
 
 def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from agent_skill_installer import __version__
+from agent_skill_installer.config import SELECTOR_FILE_NAME
 from agent_skill_installer.__main__ import (
     complete_with_ui as complete_generic_with_ui,
     load_recent_github_urls,
@@ -55,7 +56,10 @@ from agent_skill_installer.installer import (
     copy_pypi_wheel_skill,
     fetch_json_url,
     install_source_metadata,
+    local_platform_values,
     manifest_path,
+    normalize_platform_arch,
+    normalize_platform_os,
     parse_github_url,
     published_pypi_versions,
     read_manifest as read_raw_manifest,
@@ -134,18 +138,45 @@ def make_skill_wheel(
     project: SkillProject,
     *,
     skill_text: str = "wheel skill\n",
+    config_text: str | None = None,
+    selector_text: str | None = None,
 ) -> Path:
     with zipfile.ZipFile(path, "w") as wheel:
         prefix = project.wheel_skill_prefix.as_posix()
         wheel.writestr(f"{prefix}/SKILL.md", skill_text)
         wheel.writestr(f"{prefix}/agents/openai.yaml", "agent: wheel\n")
         wheel.writestr(f"{prefix}/scripts/tool.py", "print('wheel')\n")
+        if config_text is not None:
+            wheel.writestr(f"{prefix}/agent-skill-installer.yaml", config_text)
+        if selector_text is not None:
+            wheel.writestr(f"{prefix}/{SELECTOR_FILE_NAME}", selector_text)
         wheel.writestr(f"{project.import_name}/__init__.py", "__version__ = '9.9.9'\n")
         wheel.writestr(
             f"{project.import_name}-{project.version}.dist-info/METADATA",
             "Metadata-Version: 2.1\n"
             f"Name: {project.package_name}\n"
             f"Version: {project.version}\n",
+        )
+    return path
+
+
+def make_selector_wheel(
+    path: Path,
+    *,
+    package_name: str,
+    import_name: str,
+    version: str,
+    selector_text: str,
+) -> Path:
+    with zipfile.ZipFile(path, "w") as wheel:
+        prefix = f"{import_name}/_skill"
+        wheel.writestr(f"{prefix}/{SELECTOR_FILE_NAME}", selector_text)
+        wheel.writestr(f"{import_name}/__init__.py", "__version__ = '9.9.9'\n")
+        wheel.writestr(
+            f"{import_name}-{version}.dist-info/METADATA",
+            "Metadata-Version: 2.1\n"
+            f"Name: {package_name}\n"
+            f"Version: {version}\n",
         )
     return path
 
@@ -671,6 +702,40 @@ def test_published_pypi_versions_filters_wheel_releases(
     )
 
     assert published_pypi_versions(project, limit=3) == ["1.10.0", "1.0.0"]
+
+
+@pytest.mark.parametrize(
+    ("system_platform", "expected"),
+    [
+        ("linux", "linux"),
+        ("linux2", "linux"),
+        ("darwin", "darwin"),
+        ("win32", "windows"),
+    ],
+)
+def test_normalize_platform_os(system_platform: str, expected: str) -> None:
+    assert normalize_platform_os(system_platform) == expected
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [
+        ("x86_64", "amd64"),
+        ("AMD64", "amd64"),
+        ("aarch64", "arm64"),
+        ("arm64", "arm64"),
+    ],
+)
+def test_normalize_platform_arch(machine: str, expected: str) -> None:
+    assert normalize_platform_arch(machine) == expected
+
+
+def test_local_platform_values_combines_os_arch_and_platform() -> None:
+    assert local_platform_values(system_platform="linux", machine="aarch64") == {
+        "os": "linux",
+        "arch": "arm64",
+        "platform": "linux-arm64",
+    }
 
 
 def test_fetch_json_url_uses_metadata_timeout(monkeypatch) -> None:
@@ -2841,6 +2906,60 @@ def test_generic_complete_with_ui_selects_wheel_file(
     ).read_text() == "wheel skill\n"
 
 
+def test_generic_complete_with_ui_resolves_platform_specific_wheel_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.platform_module.machine",
+        lambda: "aarch64",
+    )
+    selector_text = """
+platform_specific:
+  wheel: arbiter-skill-{os}-{arch}
+  local_path: dist/arbiter-skill-{os}-{arch}
+"""
+    selector_wheel = make_selector_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        package_name="arbiter-skill",
+        import_name="arbiter_skill",
+        version="2.0.0",
+        selector_text=selector_text,
+    )
+    target_project = SkillProject(
+        package_name="arbiter-skill-linux-arm64",
+        import_name="arbiter_skill_linux_arm64",
+        version="2.0.0",
+        skill_name="arbiter-skill-linux-arm64",
+        description="Arbiter skill.",
+    )
+    target_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill_linux_arm64-2.0.0-py3-none-any.whl",
+        target_project,
+    )
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter("install", "wheel", selector_wheel, ["codex"], "repo")
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.wheel_file == target_wheel.resolve()
+    assert getattr(args, "_validated_wheel_project").skill_name == (
+        "arbiter-skill-linux-arm64"
+    )
+
+
 def test_generic_complete_with_ui_requires_pypi_package_without_recent_default(
     tmp_path: Path,
     monkeypatch,
@@ -4054,6 +4173,105 @@ def test_generic_console_installs_local_repo_with_skill_subdir(
     assert (skill_dir / "SKILL.md").read_text() == "editable skill\n"
 
 
+def test_generic_console_installs_platform_specific_local_path(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.platform_module.machine",
+        lambda: "aarch64",
+    )
+    selector_text = """
+platform_specific:
+  wheel: arbiter-skill-{os}-{arch}
+  local_path: dist/arbiter-skill-{os}-{arch}
+"""
+    config_text = """
+installer:
+  version: 1
+"""
+    selector = tmp_path / "arbiter-skill"
+    selector.mkdir()
+    (selector / SELECTOR_FILE_NAME).write_text(selector_text)
+    target = make_skill(selector / "dist" / "arbiter-skill-linux-arm64")
+    (target / "agent-skill-installer.yaml").write_text(config_text)
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(selector),
+            "--copy",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed arbiter-skill-linux-arm64 local to Codex repo:"
+        in output.out
+    )
+    skill_dir = repo / ".codex" / "skills" / "arbiter-skill-linux-arm64"
+    assert not skill_dir.is_symlink()
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+    assert (skill_dir / "agent-skill-installer.yaml").read_text() == config_text
+
+
+def test_generic_console_rejects_unresolved_platform_specific_local_target(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    selector = tmp_path / "selector"
+    selector.mkdir()
+    (selector / SELECTOR_FILE_NAME).write_text(
+        """
+platform_specific:
+  wheel: platform-target-one
+  local_path: target-one
+"""
+    )
+    target_one = selector / "target-one"
+    target_one.mkdir()
+    (target_one / SELECTOR_FILE_NAME).write_text(
+        """
+platform_specific:
+  wheel: platform-target-two
+  local_path: target-two
+"""
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(selector),
+            "--copy",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "platform_specific local target was not resolved after one dispatch" in (
+        output.err
+    )
+
+
 def test_generic_console_installs_github_skill(
     tmp_path: Path,
     monkeypatch,
@@ -4190,6 +4408,240 @@ def test_generic_console_installs_pypi_skill(
     assert load_recent_pypi_packages(home) == ["example-agent-skill"]
 
 
+def test_generic_console_installs_platform_specific_pypi_wheel(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.platform_module.machine",
+        lambda: "aarch64",
+    )
+    selector_text = """
+platform_specific:
+  wheel: arbiter-skill-{os}-{arch}
+  local_path: dist/arbiter-skill-{os}-{arch}
+"""
+    selector_wheel = make_selector_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        package_name="arbiter-skill",
+        import_name="arbiter_skill",
+        version="2.0.0",
+        selector_text=selector_text,
+    )
+    target_project = SkillProject(
+        package_name="arbiter-skill-linux-arm64",
+        import_name="arbiter_skill_linux_arm64",
+        version="2.0.0",
+        skill_name="arbiter-skill-linux-arm64",
+        description="Arbiter skill.",
+    )
+    target_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill_linux_arm64-2.0.0-py3-none-any.whl",
+        target_project,
+    )
+    downloads: list[str] = []
+
+    def fake_download(
+        project: SkillProject,
+        version: str,
+        _download_dir: Path,
+    ) -> Path:
+        downloads.append(project.pypi_project_name or project.package_name)
+        assert version == "2.0.0"
+        if project.pypi_name == "arbiter-skill":
+            return selector_wheel
+        if project.pypi_name == "arbiter-skill-linux-arm64":
+            return target_wheel
+        raise AssertionError(project.pypi_name)
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        fake_download,
+    )
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "arbiter-skill",
+            "--pypi-version",
+            "2.0.0",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert downloads == ["arbiter-skill", "arbiter-skill-linux-arm64"]
+    assert (
+        "Installed arbiter-skill-linux-arm64 2.0.0 (PyPI wheel) "
+        "to Codex repo:"
+        in output.out
+    )
+    assert (
+        repo / ".codex" / "skills" / "arbiter-skill-linux-arm64" / "SKILL.md"
+    ).read_text() == "wheel skill\n"
+    assert load_recent_pypi_packages(home) == ["arbiter-skill"]
+
+
+def test_generic_console_rejects_missing_platform_specific_pypi_target(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.platform_module.machine",
+        lambda: "aarch64",
+    )
+    selector_text = """
+platform_specific:
+  wheel: arbiter-skill-{os}-{arch}
+"""
+    selector_wheel = make_selector_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        package_name="arbiter-skill",
+        import_name="arbiter_skill",
+        version="2.0.0",
+        selector_text=selector_text,
+    )
+    downloads: list[str] = []
+
+    def fake_download(
+        project: SkillProject,
+        version: str,
+        _download_dir: Path,
+    ) -> Path:
+        downloads.append(project.pypi_name)
+        assert version == "2.0.0"
+        if project.pypi_name == "arbiter-skill":
+            return selector_wheel
+        raise InstallerError(f"no wheel distribution found on PyPI for {project.pypi_name}")
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        fake_download,
+    )
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "arbiter-skill",
+            "--pypi-version",
+            "2.0.0",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert downloads == ["arbiter-skill", "arbiter-skill-linux-arm64"]
+    assert "no wheel distribution found on PyPI for arbiter-skill-linux-arm64" in (
+        output.err
+    )
+    assert load_recent_pypi_packages(home) == []
+
+
+def test_generic_console_rejects_unresolved_platform_specific_pypi_target(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    selector_config = """
+platform_specific:
+  wheel: platform-target-one
+"""
+    target_config = """
+platform_specific:
+  wheel: platform-target-two
+"""
+    selector_wheel = make_selector_wheel(
+        tmp_path / "platform_selector-2.0.0-py3-none-any.whl",
+        package_name="platform-selector",
+        import_name="platform_selector",
+        version="2.0.0",
+        selector_text=selector_config,
+    )
+    target_project = SkillProject(
+        package_name="platform-target-one",
+        import_name="platform_target_one",
+        version="2.0.0",
+        skill_name="platform-target-one",
+        description="Platform target one.",
+    )
+    target_wheel = make_skill_wheel(
+        tmp_path / "platform_target_one-2.0.0-py3-none-any.whl",
+        target_project,
+        selector_text=target_config,
+    )
+    downloads: list[str] = []
+
+    def fake_download(
+        project: SkillProject,
+        version: str,
+        _download_dir: Path,
+    ) -> Path:
+        downloads.append(project.pypi_name)
+        assert version == "2.0.0"
+        if project.pypi_name == "platform-selector":
+            return selector_wheel
+        if project.pypi_name == "platform-target-one":
+            return target_wheel
+        raise AssertionError(project.pypi_name)
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_pypi_wheel",
+        fake_download,
+    )
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "platform-selector",
+            "--pypi-version",
+            "2.0.0",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert downloads == ["platform-selector", "platform-target-one"]
+    assert "platform_specific target was not resolved after one dispatch" in output.err
+    assert load_recent_pypi_packages(home) == []
+
+
 def test_generic_console_installs_local_wheel_file(
     tmp_path: Path,
     capsys,
@@ -4231,6 +4683,112 @@ def test_generic_console_installs_local_wheel_file(
     assert manifest["install_mode"] == "wheel"
     assert manifest["source_path"] == str(wheel.resolve())
     assert load_recent_pypi_packages(home) == []
+
+
+def test_generic_console_installs_platform_specific_local_wheel_file(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.platform_module.machine",
+        lambda: "aarch64",
+    )
+    selector_text = """
+platform_specific:
+  wheel: arbiter-skill-{os}-{arch}
+  local_path: dist/arbiter-skill-{os}-{arch}
+"""
+    selector_wheel = make_selector_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        package_name="arbiter-skill",
+        import_name="arbiter_skill",
+        version="2.0.0",
+        selector_text=selector_text,
+    )
+    target_project = SkillProject(
+        package_name="arbiter-skill-linux-arm64",
+        import_name="arbiter_skill_linux_arm64",
+        version="2.0.0",
+        skill_name="arbiter-skill-linux-arm64",
+        description="Arbiter skill.",
+    )
+    target_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill_linux_arm64-2.0.0-py3-none-any.whl",
+        target_project,
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--wheel-file",
+            str(selector_wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed arbiter-skill-linux-arm64 2.0.0 (wheel) to Codex repo:"
+        in output.out
+    )
+    skill_dir = repo / ".codex" / "skills" / "arbiter-skill-linux-arm64"
+    assert (skill_dir / "SKILL.md").read_text() == "wheel skill\n"
+    manifest = read_raw_manifest(target_project, skill_dir)
+    assert manifest["source_path"] == str(target_wheel.resolve())
+
+
+def test_generic_console_rejects_missing_platform_specific_local_wheel_file(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.platform_module.machine",
+        lambda: "aarch64",
+    )
+    selector_text = """
+platform_specific:
+  wheel: arbiter-skill-{os}-{arch}
+"""
+    selector_wheel = make_selector_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        package_name="arbiter-skill",
+        import_name="arbiter_skill",
+        version="2.0.0",
+        selector_text=selector_text,
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--wheel-file",
+            str(selector_wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "platform-specific wheel was not found next to selector wheel: "
+        "arbiter-skill-linux-arm64 2.0.0"
+    ) in output.err
 
 
 def test_generic_console_does_not_remember_failed_pypi_install(

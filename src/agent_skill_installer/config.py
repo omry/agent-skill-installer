@@ -11,6 +11,7 @@ from omegaconf.errors import OmegaConfBaseException
 
 
 CONFIG_FILE_NAME = "agent-skill-installer.yaml"
+SELECTOR_FILE_NAME = "agent-skill-selector.yaml"
 
 
 class InstallerConfigError(Exception):
@@ -118,8 +119,19 @@ class InstallerRoot:
 
 
 @dataclass
+class PlatformSpecific:
+    wheel: str | None = None
+    local_path: str | None = None
+
+
+@dataclass
 class InstallerConfig:
     installer: InstallerRoot = field(default_factory=InstallerRoot)
+
+
+@dataclass
+class PlatformSelectorConfig:
+    platform_specific: PlatformSpecific = MISSING
 
 
 def _display_path(path: Path | str) -> str:
@@ -195,15 +207,19 @@ def _validate_supported_versions(config: InstallerConfig, path: Path | str) -> N
         )
 
 
-def _build_installer_config(loaded: Any, source: Path | str) -> InstallerConfig:
+def _build_config(
+    loaded: Any,
+    source: Path | str,
+    schema_type: type[InstallerConfig] | type[PlatformSelectorConfig],
+) -> InstallerConfig | PlatformSelectorConfig:
     try:
         OmegaConf.resolve(loaded)
         resolved = OmegaConf.to_container(loaded, resolve=True)
         try:
-            _validate_unknown_fields(resolved, InstallerConfig, "config")
+            _validate_unknown_fields(resolved, schema_type, "config")
         except InstallerConfigError as error:
             raise InstallerConfigError(_format_config_error(source, error)) from error
-        schema = OmegaConf.structured(InstallerConfig)
+        schema = OmegaConf.structured(schema_type)
         merged = OmegaConf.merge(schema, loaded)
         OmegaConf.resolve(merged)
         config = OmegaConf.to_object(merged)
@@ -212,8 +228,24 @@ def _build_installer_config(loaded: Any, source: Path | str) -> InstallerConfig:
     except OSError as error:
         raise InstallerConfigError(f"failed to read {_display_path(source)}: {error}") from error
 
+    assert isinstance(config, schema_type)
+    if isinstance(config, InstallerConfig):
+        _validate_supported_versions(config, source)
+    return config
+
+
+def _build_installer_config(loaded: Any, source: Path | str) -> InstallerConfig:
+    config = _build_config(loaded, source, InstallerConfig)
     assert isinstance(config, InstallerConfig)
-    _validate_supported_versions(config, source)
+    return config
+
+
+def _build_platform_selector_config(
+    loaded: Any,
+    source: Path | str,
+) -> PlatformSelectorConfig:
+    config = _build_config(loaded, source, PlatformSelectorConfig)
+    assert isinstance(config, PlatformSelectorConfig)
     return config
 
 
@@ -238,3 +270,26 @@ def load_installer_config_text(
     except OmegaConfBaseException as error:
         raise InstallerConfigError(_format_config_error(source, error)) from error
     return _build_installer_config(loaded, source)
+
+
+def load_platform_selector_config(path: Path | str) -> PlatformSelectorConfig:
+    source = Path(path)
+    try:
+        loaded = OmegaConf.load(source)
+    except OmegaConfBaseException as error:
+        raise InstallerConfigError(_format_config_error(source, error)) from error
+    except OSError as error:
+        raise InstallerConfigError(f"failed to read {_display_path(source)}: {error}") from error
+    return _build_platform_selector_config(loaded, source)
+
+
+def load_platform_selector_config_text(
+    text: str,
+    *,
+    source: Path | str = SELECTOR_FILE_NAME,
+) -> PlatformSelectorConfig:
+    try:
+        loaded = OmegaConf.create(text)
+    except OmegaConfBaseException as error:
+        raise InstallerConfigError(_format_config_error(source, error)) from error
+    return _build_platform_selector_config(loaded, source)

@@ -1,0 +1,12 @@
+installer:
+  version: 1
+  shared:
+    instructions:
+      discoverability:
+        title: Platform-Specific Skill Linux arm64
+        body: |
+          Use this example to verify platform-specific selector installs.
+  agents:
+    codex:
+      version: 1
+      instructions: ${installer.shared.instructions.discoverability}

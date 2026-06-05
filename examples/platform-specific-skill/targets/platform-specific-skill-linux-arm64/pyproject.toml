@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "platform-specific-skill-linux-arm64"
+version = "0.1.0"
+description = "Example platform-specific skill payload for Linux arm64"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+include-package-data = true
+

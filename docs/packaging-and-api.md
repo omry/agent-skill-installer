@@ -114,6 +114,19 @@ the installer also validates it against the local dataclass schema. Use the
 local wheel check above before publishing so metadata and config typos fail
 against the same artifact you plan to release.
 
+## Platform-Specific Skills
+
+Packages that need platform-dependent behavior can publish one selector package
+that installs different skill versions on different platforms. The selector
+contains `agent-skill-selector.yaml`; each resolved target contains the
+platform-specific skill payload and optional `agent-skill-installer.yaml`.
+
+Use this pattern when the same public package should install a different skill
+payload for different operating systems or CPU architectures. See
+[Platform-Specific Skills](platform-specific-skills.md) for the selector file
+format, package layouts, local development flow, and PyPI or wheel-file install
+behavior.
+
 ## Optional Wrapper CLI
 
 A package may expose its own installer command for branded UX, custom defaults,

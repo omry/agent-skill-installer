@@ -7,7 +7,9 @@ For user-facing installation commands, see
 [`docs/installing-skills.md`](../docs/installing-skills.md). For standalone
 skill structure, see [`docs/authoring-skills.md`](../docs/authoring-skills.md).
 For Python package and API integration, see
-[`docs/packaging-and-api.md`](../docs/packaging-and-api.md).
+[`docs/packaging-and-api.md`](../docs/packaging-and-api.md). For
+platform-specific selector packages, see
+[`docs/platform-specific-skills.md`](../docs/platform-specific-skills.md).
 
 ## Demo Installer Package
 
@@ -61,6 +63,15 @@ The important files are:
   payload.
 - `wheel-skill/src/wheel_agent_skill/_skill/agent-skill-installer.yaml`:
   configured discoverability text and schema-validated hook metadata.
+
+## Platform-Specific Skill Package
+
+`platform-specific-skill/` shows how one selector package can resolve to a
+different skill payload for each supported platform. See
+[`docs/platform-specific-skills.md`](../docs/platform-specific-skills.md) for
+the selector and target package model, and
+[`platform-specific-skill/README.md`](platform-specific-skill/README.md) for
+the runnable example commands.
 
 ## API Install Script
 

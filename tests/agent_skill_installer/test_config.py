@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_skill_installer.config import InstallerConfigError, load_installer_config
+from agent_skill_installer.config import (
+    InstallerConfigError,
+    load_installer_config,
+    load_platform_selector_config,
+)
 
 
 def write_config(path: Path, text: str) -> Path:
@@ -137,3 +141,19 @@ installer:
     assert codex.hooks_direct["FutureEvent"][0]["hooks"][0]["futureField"] == (
         "accepted here"
     )
+
+
+def test_loads_platform_specific_selector_metadata(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path / "agent-skill-selector.yaml",
+        """
+platform_specific:
+  wheel: arbiter-skill-{os}-{arch}
+  local_path: dist/arbiter-skill-{os}-{arch}
+""",
+    )
+
+    config = load_platform_selector_config(config_path)
+
+    assert config.platform_specific.wheel == "arbiter-skill-{os}-{arch}"
+    assert config.platform_specific.local_path == "dist/arbiter-skill-{os}-{arch}"
