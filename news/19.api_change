@@ -1,0 +1,1 @@
+The interactive installer now presents repository-scoped installs as directory choices, shows when the selected directory resolves to a Git or Sapling repository, and uses `--target-dir` as the canonical CLI flag while keeping `--repo` as a compatibility alias.

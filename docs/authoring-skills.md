@@ -208,7 +208,7 @@ agent-skill-installer --no-ui install \
   --editable \
   --agent codex \
   --scope repo \
-  --repo /path/to/test-repo
+  --target-dir /path/to/test-repo
 ```
 
 Then inspect `/path/to/test-repo/.codex/skills/<skill_name>` and
@@ -224,7 +224,7 @@ agent-skill-installer --no-ui uninstall \
   --skill-name my-skill \
   --agent codex \
   --scope repo \
-  --repo /path/to/test-repo
+  --target-dir /path/to/test-repo
 ```
 
 ## GitHub Installs

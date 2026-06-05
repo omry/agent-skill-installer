@@ -45,7 +45,7 @@ AGENT_LABELS = {
     "claude": "Claude Code",
 }
 SCOPE_LABELS = {
-    "repo": "Current repository",
+    "repo": "Current directory",
     "global": "User global",
 }
 AGENT_TARGET_VALUES = set(AGENTS)
@@ -1825,6 +1825,7 @@ Screen {
 }
 
 #installation-summary {
+    height: 8;
     margin-bottom: 1;
     background: #cfefff;
     color: #0b2a3a;
@@ -1838,6 +1839,7 @@ Screen {
 
 #installation-summary-content {
     width: 100%;
+    height: 3;
     color: #12384a;
 }
 
@@ -1973,12 +1975,23 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
         subparser.add_argument(
             "--scope",
             choices=SCOPES,
-            help="Install for the current repository or for the current user.",
+            help="Install for a repository-scoped directory or for the current user.",
+        )
+        subparser.add_argument(
+            "--target-dir",
+            dest="repo",
+            metavar="PATH",
+            type=Path,
+            help=(
+                "Directory to use with --scope repo. Must be inside a Git or "
+                "Sapling repository. Defaults to cwd."
+            ),
         )
         subparser.add_argument(
             "--repo",
+            dest="repo",
             type=Path,
-            help="Repository path to use with --scope repo. Defaults to cwd.",
+            help=argparse.SUPPRESS,
         )
         subparser.add_argument(
             "--codex-home",
@@ -2342,7 +2355,7 @@ def build_no_ui_command(
     )
 
     if scope == "repo" and repo is not None:
-        parts.extend(["--repo", repo])
+        parts.extend(["--target-dir", repo])
     elif scope == "global":
         selected_agents = selected_agents_for_command(agent)
         if "codex" in selected_agents and codex_home is not None:
@@ -2413,7 +2426,7 @@ def installation_choice_label(
     repo: Path | None,
     status: InstallationStatus | None = None,
 ) -> str:
-    label = "global" if scope == "global" else f"repo ({repo_label(repo)})"
+    label = "global" if scope == "global" else f"directory ({repo_label(repo)})"
     if status is not None:
         label = f"{label} ({installed_status_phrase(status)})"
     return label
@@ -2444,8 +2457,21 @@ def installation_scope_choice_label(
     claude_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
-        return "Specific directory"
-    return "Global" if scope == "global" else "Repository install"
+        return "Choose directory"
+    if scope == "global":
+        return "Global"
+    return (
+        "Current directory (repository)"
+        if repo is not None
+        else "Current directory"
+    )
+
+
+def directory_repository_summary(directory: Path) -> str:
+    repo = find_repo_root(directory)
+    if repo is not None:
+        return f"Directory: {directory} (repository: {repo})"
+    return f"Directory: {directory} (repository: not detected)"
 
 
 def installation_scope_choice_description(
@@ -2458,7 +2484,7 @@ def installation_scope_choice_description(
     claude_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
-        return "Prompt for a repository directory"
+        return "Prompt for a directory"
     if scope == "global":
         paths = [
             str(
@@ -2472,7 +2498,7 @@ def installation_scope_choice_description(
             for agent in agents
         ]
         return "\n".join(["Install in agent home directory", *paths])
-    return "\n".join(["Install in this repository", str(repo or "repo")])
+    return directory_repository_summary(repo or default_repo_path())
 
 
 def installed_statuses_by_target(
@@ -3131,9 +3157,10 @@ def complete_with_ui(
                 repo = prompt_step(
                     ["targets", "repo"],
                     lambda: prompter.path(
-                        "Repository path",
+                        "Directory path",
                         default_repo_path(),
                         command_preview_builder=specific_repo_preview,
+                        summary_builder=directory_repository_summary,
                         submit_label=final_submit_label(),
                     ),
                 )
@@ -3178,9 +3205,10 @@ def complete_with_ui(
             repo = prompt_step(
                 ["repo"],
                 lambda: prompter.path(
-                    "Repository path",
+                    "Directory path",
                     default_repo_path(),
                     command_preview_builder=repo_preview,
+                    summary_builder=directory_repository_summary,
                     submit_label=final_submit_label(),
                 ),
             )

@@ -55,5 +55,5 @@ agent-skill-installer --no-ui install \
   --wheel-file /tmp/platform-specific-dist/platform_specific_skill-0.1.0-py3-none-any.whl \
   --agent codex \
   --scope repo \
-  --repo /path/to/repo
+  --target-dir /path/to/repo
 ```

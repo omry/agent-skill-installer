@@ -31,6 +31,7 @@ from agent_skill_installer.cli import (
     BackRequested,
     DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE,
     PROMPT_BACK,
+    build_parser,
     build_no_ui_command,
     command_preview_classes,
     complete_with_ui,
@@ -1009,7 +1010,7 @@ def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1027,7 +1028,7 @@ def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1036,6 +1037,46 @@ def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
 
     assert uninstall_code == 0
     assert "Removed example-agent-skill 1.2.3 from Codex repo:" in output.out
+
+
+def test_cli_install_help_uses_target_dir_path_metavar(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    parser = build_parser(project)
+
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(["install", "--help"])
+    output = capsys.readouterr()
+
+    assert error.value.code == 0
+    assert "--target-dir PATH" in output.out
+    assert "--target-dir REPO" not in output.out
+    assert "--repo" not in output.out
+
+
+def test_cli_no_ui_repo_alias_still_targets_directory(tmp_path: Path, capsys) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed example-agent-skill 1.2.3 to Codex repo:" in output.out
 
 
 def test_cli_no_ui_verbose_lists_paths(tmp_path: Path, capsys) -> None:
@@ -1051,7 +1092,7 @@ def test_cli_no_ui_verbose_lists_paths(tmp_path: Path, capsys) -> None:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1156,7 +1197,7 @@ def test_cli_no_ui_editable_install(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1194,7 +1235,7 @@ def test_cli_no_ui_pypi_version_install(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1235,7 +1276,7 @@ def test_cli_no_ui_github_url_install(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1279,7 +1320,7 @@ def test_cli_no_ui_pypi_version_download_error_names_attempted_package(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1350,7 +1391,7 @@ def test_cli_no_ui_command_preview_includes_github_source(tmp_path: Path) -> Non
     ) == (
         "example-agent-skill --no-ui install "
         "--github-url https://github.com/example/demo --github-ref v1 "
-        "--github-path skill --agent codex --scope repo --repo "
+        "--github-path skill --agent codex --scope repo --target-dir "
         f"{shlex.quote(str(tmp_path / 'repo'))}"
     )
 
@@ -1444,6 +1485,42 @@ def test_textual_command_radio_arrow_navigation() -> None:
     asyncio.run(run_scenario())
 
     assert app.return_value == "uninstall"
+
+
+def test_textual_summary_panel_height_is_reserved_for_multiline_content() -> None:
+    if importlib.util.find_spec("textual") is None:
+        pytest.skip("Textual is not installed")
+
+    from textual.widgets import Static
+
+    def summary(value: object) -> str:
+        if value == "repo":
+            return "Line 1\nLine 2\nLine 3"
+        return "Line 1"
+
+    app = make_textual_select_app(
+        "Install location",
+        [
+            {"name": "Global", "value": "global"},
+            {"name": "Current directory", "value": "repo"},
+        ],
+        summary_builder=summary,
+    )
+
+    async def run_scenario() -> None:
+        async with app.run_test() as pilot:
+            summary_panel = app.query_one("#installation-summary")
+            summary_content = app.query_one("#installation-summary-content", Static)
+            initial_height = summary_panel.region.height
+
+            assert str(summary_content.content) == "Line 1"
+            app.update_active_choice(1)
+            await pilot.pause()
+
+            assert str(summary_content.content) == "Line 1\nLine 2\nLine 3"
+            assert summary_panel.region.height == initial_height
+
+    asyncio.run(run_scenario())
 
 
 def test_textual_prompt_panels_fill_available_screen_width() -> None:
@@ -1920,7 +1997,7 @@ class ScriptedPrompter:
 
 def test_installation_option_choices_offer_install_locations(tmp_path: Path) -> None:
     project = make_project(tmp_path)
-    repo = tmp_path / "my-repo"
+    repo = make_repo(tmp_path / "my-repo")
     home = tmp_path / "home"
 
     choices = installation_option_choices(
@@ -1945,14 +2022,14 @@ def test_installation_option_choices_offer_install_locations(tmp_path: Path) -> 
             "kind": "scope",
         },
         {
-            "name": "Repository install",
-            "description": "\n".join(["Install in this repository", str(repo)]),
+            "name": "Current directory (repository)",
+            "description": f"Directory: {repo} (repository: {repo})",
             "value": "repo",
             "kind": "scope",
         },
         {
-            "name": "Specific directory",
-            "description": "Prompt for a repository directory",
+            "name": "Choose directory",
+            "description": "Prompt for a directory",
             "value": "specific",
             "kind": "scope",
         },
@@ -2134,7 +2211,7 @@ def test_build_no_ui_command_for_mixed_scope_targets(tmp_path: Path) -> None:
     assert command == (
         "example-agent-skill --no-ui install --agent codex --scope global "
         f"--codex-home {shlex.quote(str(codex_home))}\n"
-        "example-agent-skill --no-ui install --agent codex --scope repo --repo "
+        "example-agent-skill --no-ui install --agent codex --scope repo --target-dir "
         f"{shlex.quote(str(repo))}"
     )
 
@@ -2193,15 +2270,16 @@ def test_complete_with_ui_selects_specific_directory(tmp_path: Path) -> None:
         ("select", "What would you like to do with example-agent-skill?"),
         ("checkbox", "Select agents for example-agent-skill"),
         ("select", "Install location for example-agent-skill"),
-        ("path", "Repository path"),
+        ("path", "Directory path"),
     ]
     assert prompter.previews == [
         "example-agent-skill --no-ui install --agent all --scope global",
         "example-agent-skill --no-ui install --agent codex --scope global",
         None,
-        "example-agent-skill --no-ui install --agent codex --scope repo --repo "
+        "example-agent-skill --no-ui install --agent codex --scope repo --target-dir "
         f"{shlex.quote(str(repo))}",
     ]
+    assert prompter.summaries[3] == f"Directory: {repo} (repository: {repo})"
     assert prompter.submit_labels == ["Continue", "Continue", "Install", "Install"]
 
 
@@ -2261,7 +2339,7 @@ def test_complete_with_ui_selects_pypi_source(
         "example-agent-skill --no-ui install --pypi-version 2.0.0 "
         "--agent codex --scope global",
         "example-agent-skill --no-ui install --pypi-version 2.0.0 "
-        f"--agent codex --scope repo --repo {shlex.quote(str(repo))}",
+        f"--agent codex --scope repo --target-dir {shlex.quote(str(repo))}",
     ]
 
 
@@ -2320,7 +2398,7 @@ def test_complete_with_ui_selects_github_source(
         "example-agent-skill --no-ui install "
         "--github-url https://github.com/example/demo --agent codex --scope global",
         "example-agent-skill --no-ui install "
-        "--github-url https://github.com/example/demo --agent codex --scope repo --repo "
+        "--github-url https://github.com/example/demo --agent codex --scope repo --target-dir "
         f"{shlex.quote(str(repo))}",
     ]
 
@@ -2401,6 +2479,19 @@ def test_python_module_entry_point_shows_generic_help() -> None:
 
     assert completed.returncode == 0
     assert "Install or uninstall agent skills from generic sources." in completed.stdout
+
+    install_help = subprocess.run(
+        [sys.executable, "-m", "agent_skill_installer", "install", "--help"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert install_help.returncode == 0
+    assert "--target-dir PATH" in install_help.stdout
+    assert "--target-dir REPO" not in install_help.stdout
+    assert "--repo" not in install_help.stdout
 
 
 def test_generic_console_bare_command_uses_interactive_ui(
@@ -2653,14 +2744,15 @@ def test_generic_complete_with_ui_selects_specific_directory(
         ("select", "Local install mode"),
         ("checkbox", "Select agents"),
         ("select", "Install location"),
-        ("path", "Repository path"),
+        ("path", "Directory path"),
     ]
     assert prompter.previews[5] is None
     assert prompter.previews[6] == (
         "agent-skill-installer --no-ui install "
         f"--skill-path {shlex.quote(str(source))} --editable --agent codex "
-        f"--scope repo --repo {shlex.quote(str(repo))}"
+        f"--scope repo --target-dir {shlex.quote(str(repo))}"
     )
+    assert prompter.summaries[6] == f"Directory: {repo} (repository: {repo})"
     assert prompter.submit_labels[-2:] == ["Install", "Install"]
 
 
@@ -3460,7 +3552,7 @@ def test_generic_console_installs_and_uninstalls_local_skill(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3485,7 +3577,7 @@ def test_generic_console_installs_and_uninstalls_local_skill(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3494,6 +3586,37 @@ def test_generic_console_installs_and_uninstalls_local_skill(
     assert uninstall_code == 0
     assert "Removed example-agent-skill local from Codex repo:" in output.out
     assert not (repo / ".codex" / "skills" / "example-agent-skill").exists()
+
+
+def test_generic_console_repo_alias_still_targets_directory(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+
+    install_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--skill-name",
+            "example-agent-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--repo",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert install_code == 0
+    assert (
+        "Installed example-agent-skill local (editable) to Codex repo:"
+        in output.out
+    )
 
 
 def test_generic_console_can_copy_local_skill(
@@ -3515,7 +3638,7 @@ def test_generic_console_can_copy_local_skill(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3549,7 +3672,7 @@ def test_generic_console_requires_explicit_selection_for_multi_skill_source(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3580,7 +3703,7 @@ def test_generic_console_installs_all_selected_local_source_skills(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3610,7 +3733,7 @@ def test_generic_console_installs_all_selected_local_source_skills_editable(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3647,7 +3770,7 @@ def test_generic_multi_skill_uninstall_cleans_up_after_creator_removed_first(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3666,7 +3789,7 @@ def test_generic_multi_skill_uninstall_cleans_up_after_creator_removed_first(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3687,7 +3810,7 @@ def test_generic_multi_skill_uninstall_cleans_up_after_creator_removed_first(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3717,7 +3840,7 @@ def test_generic_multi_skill_upgrade_propagates_sibling_hook_ownership(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3751,7 +3874,7 @@ def test_generic_multi_skill_upgrade_propagates_sibling_hook_ownership(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3771,7 +3894,7 @@ def test_generic_multi_skill_upgrade_propagates_sibling_hook_ownership(
                 "codex",
                 "--scope",
                 "repo",
-                "--repo",
+                "--target-dir",
                 str(repo),
             ]
         )
@@ -3802,7 +3925,7 @@ def test_generic_multi_skill_uninstall_preserves_preexisting_empty_containers(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3820,7 +3943,7 @@ def test_generic_multi_skill_uninstall_preserves_preexisting_empty_containers(
                 "codex",
                 "--scope",
                 "repo",
-                "--repo",
+                "--target-dir",
                 str(repo),
             ]
         )
@@ -3861,7 +3984,7 @@ def test_generic_console_installs_all_selected_github_source_skills(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3910,7 +4033,7 @@ def test_generic_console_src_skill_matches_single_github_child_directory(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3951,7 +4074,7 @@ def test_generic_console_src_skill_matches_single_wheel_child_directory(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -3989,7 +4112,7 @@ def test_generic_console_renames_single_selected_source_skill(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4028,7 +4151,7 @@ def test_generic_console_rejects_dst_skill_without_explicit_source(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4058,7 +4181,7 @@ def test_generic_console_rename_implies_source_selection(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4207,7 +4330,7 @@ def test_generic_console_installs_local_repo_with_skill_subdir(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4268,7 +4391,7 @@ installer:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4323,7 +4446,7 @@ platform_specific:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4361,7 +4484,7 @@ def test_generic_console_installs_github_skill(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),
@@ -4413,7 +4536,7 @@ def test_generic_console_does_not_remember_failed_github_install(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),
@@ -4451,7 +4574,7 @@ def test_generic_console_installs_pypi_skill(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),
@@ -4537,7 +4660,7 @@ platform_specific:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),
@@ -4610,7 +4733,7 @@ platform_specific:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),
@@ -4691,7 +4814,7 @@ platform_specific:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),
@@ -4726,7 +4849,7 @@ def test_generic_console_installs_local_wheel_file(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),
@@ -4800,7 +4923,7 @@ platform_specific:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4851,7 +4974,7 @@ platform_specific:
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4890,7 +5013,7 @@ def test_generic_console_does_not_remember_failed_pypi_install(
             "codex",
             "--scope",
             "repo",
-            "--repo",
+            "--target-dir",
             str(repo),
             "--home",
             str(home),

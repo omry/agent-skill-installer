@@ -33,7 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", choices=["install", "uninstall"])
     parser.add_argument("--agent", required=True, type=split_agents)
     parser.add_argument("--scope", required=True, choices=["repo", "global"])
-    parser.add_argument("--repo", type=Path)
+    parser.add_argument("--target-dir", dest="repo", metavar="PATH", type=Path)
+    parser.add_argument("--repo", dest="repo", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--codex-home", type=Path)
     parser.add_argument("--claude-home", type=Path)
     return parser

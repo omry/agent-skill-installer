@@ -133,8 +133,8 @@ does not provide its own installer config.
 ## Targets
 
 Use `--agent codex`, `--agent claude`, `--agent codex,claude`, or
-`--agent all`. Use `--scope repo` for the current repository or `--scope global`
-for the current user.
+`--agent all`. Use `--scope repo` for a repository-scoped directory or
+`--scope global` for the current user.
 
 | Agent | Scope | Skill directory | Hook file |
 | --- | --- | --- | --- |
@@ -143,13 +143,13 @@ for the current user.
 | Claude Code | `repo` | `<repo>/.claude/skills/<skill_name>` | `<repo>/CLAUDE.md` |
 | Claude Code | `global` | `~/.claude/skills/<skill_name>` | `~/.claude/CLAUDE.md` |
 
-For repo scope, pass `--repo PATH` to install into a repository other than the
+For repo scope, pass `--target-dir PATH` to install into a repository other than the
 current working directory. For global scope, pass `--codex-home PATH` or
 `--claude-home PATH` to override the default agent home directories.
 
 In the text UI, the install location screen offers user global, current
-repository when one is detected, and specific directory. The specific directory
-choice prompts for a repository path and installs with repo scope.
+directory when a repository is detected, and choose directory. Directory choices
+show when they resolve to a Git or Sapling repository and install with repo scope.
 When the install source is a local repository or skill directory, the UI also
 asks whether to install an editable symlink or a copied snapshot. If the source
 contains multiple skills, the UI prompts for source skill selection and defaults

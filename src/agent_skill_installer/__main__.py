@@ -296,12 +296,23 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--scope",
         choices=("repo", "global"),
-        help="Install for the current repository or for the current user.",
+        help="Install for a repository-scoped directory or for the current user.",
+    )
+    parser.add_argument(
+        "--target-dir",
+        dest="repo",
+        metavar="PATH",
+        type=Path,
+        help=(
+            "Directory to use with --scope repo. Must be inside a Git or "
+            "Sapling repository. Defaults to cwd."
+        ),
     )
     parser.add_argument(
         "--repo",
+        dest="repo",
         type=Path,
-        help="Repository path to use with --scope repo. Defaults to cwd.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--codex-home",
@@ -367,8 +378,8 @@ def local_install_mode_choices() -> list[dict[str, str]]:
 def scope_choices() -> list[dict[str, str]]:
     return [
         {"name": "User global", "value": "global"},
-        {"name": "Current repository", "value": "repo"},
-        {"name": "Specific directory", "value": "specific"},
+        {"name": "Current directory", "value": "repo"},
+        {"name": "Choose directory", "value": "specific"},
     ]
 
 
@@ -430,7 +441,7 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
     scope = getattr(args, "scope", None) or "global"
     parts.extend(["--agent", agent, "--scope", scope])
     if scope == "repo" and getattr(args, "repo", None) is not None:
-        parts.extend(["--repo", args.repo])
+        parts.extend(["--target-dir", args.repo])
     if scope == "global":
         if getattr(args, "codex_home", None) is not None:
             parts.extend(["--codex-home", args.codex_home])
@@ -1230,6 +1241,13 @@ def repo_root_for_ui(args: argparse.Namespace) -> Path | None:
     )
 
 
+def directory_repository_summary(directory: Path) -> str:
+    repo = find_repo_root(directory)
+    if repo is not None:
+        return f"Directory: {directory} (repository: {repo})"
+    return f"Directory: {directory} (repository: not detected)"
+
+
 def repo_from_status(status: InstallationStatus) -> Path | None:
     if status.scope != "repo":
         return None
@@ -1937,12 +1955,18 @@ def complete_install_targets_with_ui(
             if selected_scope == "specific":
                 return install_decision_summary(args, command="install")
             repo = repo_root_for_ui(args) if selected_scope == "repo" else None
-            return install_decision_summary(
+            summary = install_decision_summary(
                 args,
                 command="install",
                 scope=selected_scope,
                 repo=repo,
             )
+            if selected_scope == "repo" and repo is not None:
+                repo_summary = directory_repository_summary(repo)
+                return "\n".join(
+                    part for part in (summary, repo_summary) if part
+                )
+            return summary
 
         scope_result = run_prompt(
             ["scope", "repo"],
@@ -1961,18 +1985,15 @@ def complete_install_targets_with_ui(
             repo_result = run_prompt(
                 ["scope", "repo"],
                 lambda: prompter.path(
-                    "Repository path",
+                    "Directory path",
                     default_repo_path(),
                     command_preview_builder=lambda value: preview_command(
                         args,
                         scope="repo",
                         repo=Path(str(value)),
                     ),
-                    summary_builder=lambda value: install_decision_summary(
-                        args,
-                        command="install",
-                        scope="repo",
-                        repo=Path(str(value)),
+                    summary_builder=lambda value: directory_repository_summary(
+                        Path(str(value))
                     ),
                     submit_label="Install",
                 ),
@@ -1992,18 +2013,15 @@ def complete_install_targets_with_ui(
             repo_result = run_prompt(
                 ["repo"],
                 lambda: prompter.path(
-                    "Repository path",
+                    "Directory path",
                     default_repo_path(),
                     command_preview_builder=lambda value: preview_command(
                         args,
                         scope="repo",
                         repo=Path(str(value)),
                     ),
-                    summary_builder=lambda value: install_decision_summary(
-                        args,
-                        command="install",
-                        scope="repo",
-                        repo=Path(str(value)),
+                    summary_builder=lambda value: directory_repository_summary(
+                        Path(str(value))
                     ),
                     submit_label="Install",
                 ),

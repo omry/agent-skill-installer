@@ -24,8 +24,8 @@ Run it from this repository checkout without publishing anything:
 ```bash
 python -m pip install -e .
 python -m pip install -e examples/demo-installer
-demo-agent-skill --no-ui install --agent codex --scope repo --repo /path/to/repo
-demo-agent-skill --no-ui uninstall --agent codex --scope repo --repo /path/to/repo
+demo-agent-skill --no-ui install --agent codex --scope repo --target-dir /path/to/repo
+demo-agent-skill --no-ui uninstall --agent codex --scope repo --target-dir /path/to/repo
 ```
 
 The important files are:
@@ -52,7 +52,7 @@ agent-skill-installer --no-ui install \
   --wheel-file /tmp/wheel-agent-skill-dist/wheel_agent_skill-0.1.0-py3-none-any.whl \
   --agent codex \
   --scope repo \
-  --repo /path/to/repo
+  --target-dir /path/to/repo
 ```
 
 The important files are:
@@ -86,12 +86,12 @@ Run it from this repository checkout:
 PYTHONPATH=src python examples/api-install/install_demo_skill.py install \
   --agent codex \
   --scope repo \
-  --repo /path/to/repo
+  --target-dir /path/to/repo
 
 PYTHONPATH=src python examples/api-install/install_demo_skill.py uninstall \
   --agent codex \
   --scope repo \
-  --repo /path/to/repo
+  --target-dir /path/to/repo
 ```
 
 The script points `SkillProject.bundled_skill_source` at the adjacent

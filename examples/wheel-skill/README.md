@@ -13,7 +13,7 @@ agent-skill-installer --no-ui install \
   --wheel-file /tmp/wheel-agent-skill-dist/wheel_agent_skill-0.1.0-py3-none-any.whl \
   --agent codex \
   --scope repo \
-  --repo /path/to/repo
+  --target-dir /path/to/repo
 ```
 
 The Python package files are only there to produce the wheel. The bundled skill
