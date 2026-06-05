@@ -1,1 +1,1 @@
-Add platform-specific skill selector support through `agent-skill-selector.yaml`, including a runnable example.
+Add platform-specific skill selector support through `agent-skill-selector.yaml`, including a runnable example. Installer metadata files are consumed during install without being copied into installed skill payloads, and executable payload files keep their runnable permissions.

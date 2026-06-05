@@ -24,7 +24,7 @@ your-skill-package/
       __init__.py
       _skill/
         SKILL.md
-        agent-skill-installer.yaml  # Optional
+        agent-skill-installer.yaml  # Optional install-time metadata
         agents/
           openai.yaml
         scripts/
@@ -110,16 +110,18 @@ that exists only to publish or locally install a wheel-packaged skill.
 
 During install, the installer validates `SKILL.md` YAML frontmatter before
 copying or linking the skill. If the wheel includes `agent-skill-installer.yaml`,
-the installer also validates it against the local dataclass schema. Use the
-local wheel check above before publishing so metadata and config typos fail
-against the same artifact you plan to release.
+the installer also validates it against the local dataclass schema and uses it
+for generated install-time configuration. The metadata file is not copied into
+the installed skill directory. Use the local wheel check above before publishing
+so metadata and config typos fail against the same artifact you plan to release.
 
 ## Platform-Specific Skills
 
 Packages that need platform-dependent behavior can publish one selector package
 that installs different skill versions on different platforms. The selector
 contains `agent-skill-selector.yaml`; each resolved target contains the
-platform-specific skill payload and optional `agent-skill-installer.yaml`.
+platform-specific skill payload and optional `agent-skill-installer.yaml`
+install-time metadata.
 
 Use this pattern when the same public package should install a different skill
 payload for different operating systems or CPU architectures. See

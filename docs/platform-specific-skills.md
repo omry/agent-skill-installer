@@ -11,8 +11,8 @@ The package set has two roles:
 - A target package contains the real skill payload for one platform.
 
 The selector package carries `agent-skill-selector.yaml`. Target packages carry
-the normal skill files, such as `SKILL.md`, optional
-`agent-skill-installer.yaml`, `scripts/`, and `bin/`.
+the normal skill files, such as `SKILL.md`, `scripts/`, and `bin/`, plus
+optional `agent-skill-installer.yaml` install-time metadata.
 
 ## Selector Metadata
 
@@ -62,14 +62,15 @@ target-package-linux-amd64/
       __init__.py
       _skill/
         SKILL.md
-        agent-skill-installer.yaml
+        agent-skill-installer.yaml  # Install-time metadata
         bin/
           tool
 ```
 
-The target's `agent-skill-installer.yaml` is ordinary installer metadata. Do not
-put selector metadata there unless that target is intentionally another
-selector.
+The target's `agent-skill-installer.yaml` is consumed during install for
+configuration and generated hook text, but it is not copied into the installed
+skill directory. Do not put selector metadata there unless that target is
+intentionally another selector.
 
 ## Install Behavior
 

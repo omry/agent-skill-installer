@@ -16,6 +16,8 @@ agent-skill-installer --no-ui install \
   --repo /path/to/repo
 ```
 
-The Python package files are only there to produce the wheel. The skill payload
-is `src/wheel_agent_skill/_skill/`, including `agent-skill-installer.yaml` for
-configured discoverability text and schema-validated hook metadata.
+The Python package files are only there to produce the wheel. The bundled skill
+files live in `src/wheel_agent_skill/_skill/`. The
+`agent-skill-installer.yaml` file is install-time metadata for configured
+discoverability text and schema-validated hook metadata; it is consumed from the
+wheel but not copied into the installed skill directory.

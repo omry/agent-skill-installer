@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from agent_skill_installer import __version__
-from agent_skill_installer.config import SELECTOR_FILE_NAME
+from agent_skill_installer.config import CONFIG_FILE_NAME, SELECTOR_FILE_NAME
 from agent_skill_installer.__main__ import (
     complete_with_ui as complete_generic_with_ui,
     load_recent_github_urls,
@@ -158,6 +158,21 @@ def make_skill_wheel(
             f"Version: {project.version}\n",
         )
     return path
+
+
+def write_zip_file(
+    archive: zipfile.ZipFile,
+    filename: str,
+    data: str,
+    *,
+    mode: int | None = None,
+) -> None:
+    if mode is None:
+        archive.writestr(filename, data)
+        return
+    info = zipfile.ZipInfo(filename)
+    info.external_attr = mode << 16
+    archive.writestr(info, data)
 
 
 def make_selector_wheel(
@@ -549,6 +564,16 @@ def test_copy_github_archive_skill_extracts_root_skill(tmp_path: Path) -> None:
         skill_path="",
         skill_text="root github\n",
     )
+    with zipfile.ZipFile(archive, "a") as zip_archive:
+        root = "example-agent-skill-main"
+        zip_archive.writestr(f"{root}/{CONFIG_FILE_NAME}", "installer:\n")
+        zip_archive.writestr(f"{root}/{SELECTOR_FILE_NAME}", "platform_specific:\n")
+        write_zip_file(
+            zip_archive,
+            f"{root}/bin/arbiter",
+            "#!/bin/sh\n",
+            mode=0o755,
+        )
     skill_dir = tmp_path / "skill"
 
     copied = copy_github_archive_skill(project, archive, skill_dir)
@@ -556,9 +581,13 @@ def test_copy_github_archive_skill_extracts_root_skill(tmp_path: Path) -> None:
     assert copied == [
         "SKILL.md",
         "agents/openai.yaml",
+        "bin/arbiter",
         "scripts/tool.py",
     ]
     assert (skill_dir / "SKILL.md").read_text() == "root github\n"
+    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
+    assert not (skill_dir / CONFIG_FILE_NAME).exists()
+    assert not (skill_dir / SELECTOR_FILE_NAME).exists()
 
 
 def test_parse_github_url_supports_overrides_and_blob_path() -> None:
@@ -577,18 +606,40 @@ def test_parse_github_url_supports_overrides_and_blob_path() -> None:
 
 def test_copy_pypi_wheel_skill_extracts_only_bundled_skill(tmp_path: Path) -> None:
     project = make_project(tmp_path)
-    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    wheel = make_skill_wheel(
+        tmp_path / "example.whl",
+        project,
+        config_text="installer:\n  version: 1\n",
+        selector_text="platform_specific:\n  wheel: ignored\n",
+    )
+    prefix = project.wheel_skill_prefix.as_posix()
+    with zipfile.ZipFile(wheel, "a") as archive:
+        write_zip_file(
+            archive,
+            f"{prefix}/bin/arbiter",
+            "#!/bin/sh\n",
+            mode=0o755,
+        )
     skill_dir = tmp_path / "skill"
 
-    copied = copy_pypi_wheel_skill(project, wheel, skill_dir)
+    old_umask = os.umask(0o022)
+    try:
+        copied = copy_pypi_wheel_skill(project, wheel, skill_dir)
+    finally:
+        os.umask(old_umask)
 
     assert copied == [
         "SKILL.md",
         "agents/openai.yaml",
+        "bin/arbiter",
         "scripts/tool.py",
     ]
     assert (skill_dir / "SKILL.md").read_text() == "wheel skill\n"
+    assert (skill_dir / "SKILL.md").stat().st_mode & 0o777 == 0o644
     assert (skill_dir / "agents" / "openai.yaml").read_text() == "agent: wheel\n"
+    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
+    assert not (skill_dir / CONFIG_FILE_NAME).exists()
+    assert not (skill_dir / SELECTOR_FILE_NAME).exists()
     assert not (skill_dir / project.import_name / "__init__.py").exists()
     assert not (skill_dir / f"{project.import_name}-1.2.3.dist-info").exists()
 
@@ -4190,13 +4241,21 @@ platform_specific:
 """
     config_text = """
 installer:
-  version: 1
+  agents:
+    codex:
+      instructions:
+        title: Arbiter Native Client
+        body: Use the native Arbiter client.
 """
     selector = tmp_path / "arbiter-skill"
     selector.mkdir()
     (selector / SELECTOR_FILE_NAME).write_text(selector_text)
     target = make_skill(selector / "dist" / "arbiter-skill-linux-arm64")
-    (target / "agent-skill-installer.yaml").write_text(config_text)
+    (target / CONFIG_FILE_NAME).write_text(config_text)
+    tool = target / "bin" / "arbiter"
+    tool.parent.mkdir()
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
     repo = make_repo(tmp_path / "repo")
 
     exit_code = generic_main(
@@ -4223,7 +4282,11 @@ installer:
     skill_dir = repo / ".codex" / "skills" / "arbiter-skill-linux-arm64"
     assert not skill_dir.is_symlink()
     assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
-    assert (skill_dir / "agent-skill-installer.yaml").read_text() == config_text
+    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
+    assert not (skill_dir / CONFIG_FILE_NAME).exists()
+    hook = repo.joinpath("AGENTS.md").read_text()
+    assert "Arbiter Native Client" in hook
+    assert "Use the native Arbiter client." in hook
 
 
 def test_generic_console_rejects_unresolved_platform_specific_local_target(
@@ -4717,7 +4780,15 @@ platform_specific:
     target_wheel = make_skill_wheel(
         tmp_path / "arbiter_skill_linux_arm64-2.0.0-py3-none-any.whl",
         target_project,
+        config_text="installer:\n  version: 1\n",
     )
+    with zipfile.ZipFile(target_wheel, "a") as archive:
+        write_zip_file(
+            archive,
+            f"{target_project.wheel_skill_prefix.as_posix()}/bin/arbiter",
+            "#!/bin/sh\n",
+            mode=0o755,
+        )
     repo = make_repo(tmp_path / "repo")
 
     exit_code = generic_main(
@@ -4742,6 +4813,8 @@ platform_specific:
     )
     skill_dir = repo / ".codex" / "skills" / "arbiter-skill-linux-arm64"
     assert (skill_dir / "SKILL.md").read_text() == "wheel skill\n"
+    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
+    assert not (skill_dir / CONFIG_FILE_NAME).exists()
     manifest = read_raw_manifest(target_project, skill_dir)
     assert manifest["source_path"] == str(target_wheel.resolve())
 

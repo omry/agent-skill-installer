@@ -37,9 +37,12 @@ The resolved target package has the normal skill layout:
 
 ```text
 SKILL.md
-agent-skill-installer.yaml
+agent-skill-installer.yaml  # Install-time metadata
 bin/demo-tool.txt
 ```
+
+The installer reads the metadata file for configuration, then installs only the
+runtime skill files such as `SKILL.md` and `bin/demo-tool.txt`.
 
 Build the selector and one of the included Linux target packages, then install
 through the selector wheel. Substitute `platform-specific-skill-linux-arm64` on

@@ -62,7 +62,8 @@ The important files are:
 - `wheel-skill/src/wheel_agent_skill/_skill/SKILL.md`: the bundled skill
   payload.
 - `wheel-skill/src/wheel_agent_skill/_skill/agent-skill-installer.yaml`:
-  configured discoverability text and schema-validated hook metadata.
+  install-time metadata for configured discoverability text and
+  schema-validated hook metadata.
 
 ## Platform-Specific Skill Package
 

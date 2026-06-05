@@ -14,7 +14,7 @@ A minimal standalone skill:
 ```text
 my-skill/
   SKILL.md
-  agent-skill-installer.yaml  # Optional, see below
+  agent-skill-installer.yaml  # Optional install-time metadata, see below
   scripts/
     helper.py
 ```
@@ -25,13 +25,15 @@ A repository can also keep the skill under `skill/`:
 my-skill-repo/
   skill/
     SKILL.md
-    agent-skill-installer.yaml  # Optional, see below
+    agent-skill-installer.yaml  # Optional install-time metadata, see below
     scripts/
       helper.py
 ```
 
 Local and GitHub installs detect either root `SKILL.md` or `skill/SKILL.md`.
-All supporting files in the skill directory are installed with the skill.
+Runtime supporting files in the skill directory are installed with the skill;
+installer metadata files are consumed during install and omitted from copied
+installs.
 
 ## Skill Metadata
 
@@ -95,7 +97,9 @@ data.
 
 The installer loads this file with OmegaConf, resolves interpolations, rejects
 unknown fields in typed sections, and merges the result into the local dataclass
-schema. The schema shape is:
+schema. For copied installs from a local directory, GitHub archive, or wheel,
+the installer consumes this metadata file but does not copy it into the
+installed skill directory. The schema shape is:
 
 ```python
 @dataclass

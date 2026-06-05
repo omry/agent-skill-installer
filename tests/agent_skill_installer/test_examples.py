@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_skill_installer.config import load_installer_config
+from agent_skill_installer.config import CONFIG_FILE_NAME
 from agent_skill_installer.installer import InstallerError, local_platform_values
 
 
@@ -163,12 +163,7 @@ def test_wheel_skill_example_builds_and_installs(tmp_path: Path) -> None:
     )
     skill_dir = repo / ".codex" / "skills" / "wheel-agent-skill"
     assert "Wheel Agent Skill" in skill_dir.joinpath("SKILL.md").read_text()
-    config = load_installer_config(skill_dir / "agent-skill-installer.yaml")
-    assert config.installer.agents.codex is not None
-    codex_hooks = config.installer.agents.codex.hooks.UserPromptSubmit
-    assert codex_hooks[0].hooks[0].statusMessage == (
-        "Running wheel-agent-skill hello hook"
-    )
+    assert not (skill_dir / CONFIG_FILE_NAME).exists()
     hook = repo.joinpath("AGENTS.md").read_text()
     assert "<!-- WHEEL-AGENT-SKILL-DISCOVERABILITY-START -->" in hook
     assert "Use this wheel-packaged demo skill to verify local wheel installs." in hook
@@ -271,10 +266,10 @@ def test_platform_specific_skill_example_builds_and_installs(
     assert (
         skill_dir / "bin" / "demo-tool.txt"
     ).read_text().strip() == f"{platform} demo binary placeholder"
-    config = load_installer_config(skill_dir / "agent-skill-installer.yaml")
-    assert config.installer.agents.codex is not None
+    assert not (skill_dir / CONFIG_FILE_NAME).exists()
     hook = repo.joinpath("AGENTS.md").read_text()
     assert f"<!-- {skill_name.upper()}-DISCOVERABILITY-START -->" in hook
+    assert "Use this example to verify platform-specific selector installs." in hook
 
 
 def test_platform_specific_skill_example_installs_from_local_selector(

@@ -20,7 +20,13 @@ from omegaconf import OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from yaml import YAMLError
 
-from .config import CONFIG_FILE_NAME, AgentInstructions, InstallerConfig, load_installer_config_text
+from .config import (
+    CONFIG_FILE_NAME,
+    SELECTOR_FILE_NAME,
+    AgentInstructions,
+    InstallerConfig,
+    load_installer_config_text,
+)
 
 
 MANIFEST_VERSION = 1
@@ -31,6 +37,7 @@ GITHUB_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 DEFAULT_GITHUB_REF = "main"
 AGENTS = ("codex", "claude")
 SCOPES = ("repo", "global")
+INSTALLER_METADATA_FILE_NAMES = frozenset({CONFIG_FILE_NAME, SELECTOR_FILE_NAME})
 
 
 class InstallerError(Exception):
@@ -595,6 +602,8 @@ def iter_bundled_skill_files(project: SkillProject):
                 yield from walk(child, relative_path)
             elif child.is_file():
                 if child.suffix == ".pyc":
+                    continue
+                if is_installer_metadata_path(relative_path):
                     continue
                 yield relative_path, child
 
@@ -1174,7 +1183,7 @@ def copy_bundled_skill(project: SkillProject, skill_dir: Path) -> list[str]:
     for relative_path, source in iter_bundled_skill_files(project):
         target = skill_dir / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(source.read_bytes())
+        copy_skill_file(source, target)
         copied.append(relative_path.as_posix())
     return copied
 
@@ -1321,6 +1330,40 @@ def prefixed_skill_file(prefix: PurePosixPath) -> PurePosixPath:
     return prefix / "SKILL.md" if prefix.parts else PurePosixPath("SKILL.md")
 
 
+def is_installer_metadata_path(relative_path: Path | PurePosixPath) -> bool:
+    return (
+        len(relative_path.parts) == 1
+        and relative_path.name in INSTALLER_METADATA_FILE_NAMES
+    )
+
+
+def copy_skill_file(source, target: Path) -> None:
+    target.write_bytes(source.read_bytes())
+    try:
+        mode = source.stat().st_mode
+    except (AttributeError, OSError):
+        return
+    chmod_if_executable(target, mode & 0o777)
+
+
+def zip_info_mode(info: zipfile.ZipInfo) -> int | None:
+    mode = info.external_attr >> 16
+    if mode == 0:
+        return None
+    return mode & 0o777
+
+
+def chmod_if_executable(target: Path, mode: int) -> None:
+    if mode & 0o111:
+        target.chmod(mode)
+
+
+def chmod_from_zip_info(target: Path, info: zipfile.ZipInfo) -> None:
+    mode = zip_info_mode(info)
+    if mode is not None:
+        chmod_if_executable(target, mode)
+
+
 def github_archive_skill_prefix(
     archive: zipfile.ZipFile,
     source_path: PurePosixPath | None,
@@ -1363,6 +1406,8 @@ def github_archive_skill_relative_path(
         relative = PurePosixPath(*relative.parts[len(skill_prefix.parts) :])
     if not relative.parts:
         return None
+    if is_installer_metadata_path(relative):
+        return None
     if relative == PurePosixPath(project.manifest_relative_path.as_posix()):
         return None
     return Path(*relative.parts)
@@ -1383,6 +1428,7 @@ def copy_zip_skill_files(
         target = skill_dir / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(archive.read(info))
+        chmod_from_zip_info(target, info)
         copied.append(relative_path.as_posix())
     return copied
 
@@ -1431,6 +1477,8 @@ def wheel_skill_relative_path(
         return None
     if "__pycache__" in relative.parts or relative.suffix == ".pyc":
         return None
+    if is_installer_metadata_path(relative):
+        return None
     if relative == PurePosixPath(project.manifest_relative_path.as_posix()):
         return None
     return Path(*relative.parts)
@@ -1449,7 +1497,9 @@ def copy_pypi_wheel_skill(
                 lambda filename: wheel_skill_relative_path(project, filename),
             )
     except zipfile.BadZipFile as error:
-        raise InstallerError(f"PyPI wheel is not a valid zip file: {wheel_path}") from error
+        raise InstallerError(
+            f"PyPI wheel is not a valid zip file: {wheel_path}"
+        ) from error
 
     if "SKILL.md" not in copied:
         raise InstallerError(
@@ -1466,6 +1516,8 @@ def iter_local_skill_files(project: SkillProject, root: Path):
         if source.is_dir():
             continue
         if source.suffix == ".pyc":
+            continue
+        if is_installer_metadata_path(relative_path):
             continue
         if relative_path == project.manifest_relative_path:
             continue
