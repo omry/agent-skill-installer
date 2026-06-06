@@ -25,6 +25,9 @@ The repository publish workflow intentionally avoids the `release: published`
 trigger so that GitHub Releases do not become public before the package is
 available on PyPI.
 
+The repository must allow GitHub Actions to create pull requests. Prepare uses
+that permission to open or update the release preparation PR.
+
 ## Prepare A Release
 
 Run the **Prepare Release** workflow from GitHub Actions.
@@ -51,9 +54,10 @@ The workflow:
 - points the draft release tag at the prepared target branch commit
 - writes the latest Towncrier release section into the draft body
 
-If the workflow opens or updates a release preparation PR, review and merge that
-PR after required checks pass. Then rerun **Prepare Release** with the same
-version on the prepared target branch.
+If the workflow opens or updates a release preparation PR, edit the generated
+`NEWS.md` release section in that PR if needed. Review and merge the PR after
+required checks pass. Then rerun **Prepare Release** with the same version on
+the prepared target branch.
 
 If the workflow creates or updates a draft GitHub Release, review the draft.
 Keep the release as a draft.
