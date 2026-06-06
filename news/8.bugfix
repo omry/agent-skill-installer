@@ -1,1 +1,0 @@
-Reject invalid `SKILL.md` YAML frontmatter before installing from local/editable sources, PyPI wheels, or GitHub archives.
