@@ -47,6 +47,7 @@ agent-skill-installer --no-ui install \
 | Writing a skill directory or GitHub skill repo | [Authoring Skills](https://github.com/omry/agent-skill-installer/blob/main/docs/authoring-skills.md) |
 | Publishing a skill on PyPI or embedding the installer API | [Packaging And API](https://github.com/omry/agent-skill-installer/blob/main/docs/packaging-and-api.md) |
 | Publishing a skill that installs platform-specific variants | [Platform-Specific Skills](https://github.com/omry/agent-skill-installer/blob/main/docs/platform-specific-skills.md) |
+| Maintaining releases | [Maintainer Guide](https://github.com/omry/agent-skill-installer/blob/main/docs/maintainer-guide.md) |
 
 ## Examples
 

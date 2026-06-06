@@ -1,0 +1,288 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, without the leading v"
+        required: true
+        type: string
+      date:
+        description: "Release date in YYYY-MM-DD format. Defaults to today in UTC."
+        required: false
+        type: string
+      target_branch:
+        description: "Branch to update with the release commit"
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare release commit and draft
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ inputs.version }}
+      RELEASE_DATE: ${{ inputs.date }}
+      TARGET_BRANCH: ${{ inputs.target_branch }}
+    steps:
+      - name: Check out target branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install release tools
+        run: python -m pip install --upgrade pip "setuptools>=77" packaging towncrier
+
+      - name: Normalize release metadata
+        id: release
+        env:
+          VERSION: ${{ inputs.version }}
+          RELEASE_DATE: ${{ inputs.date }}
+        run: |
+          python - <<'PY'
+          from datetime import date, datetime, timezone
+          import os
+          from pathlib import Path
+          from packaging.version import InvalidVersion, Version
+          import re
+
+          raw_version = os.environ["VERSION"].strip()
+          version_input = raw_version.removeprefix("v")
+          try:
+              version = str(Version(version_input))
+          except InvalidVersion:
+              raise SystemExit(
+                  "::error::version must be a valid Python package version, "
+                  "without the leading v"
+              )
+          if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+([.a-zA-Z0-9-]+)?", version) is None:
+              raise SystemExit(
+                  "::error::version must look like 1.2.3, without epochs, "
+                  "local version labels, or a leading v"
+              )
+
+          raw_date = os.environ["RELEASE_DATE"].strip()
+          if raw_date:
+              try:
+                  release_date = date.fromisoformat(raw_date).isoformat()
+              except ValueError:
+                  raise SystemExit("::error::date must be a real YYYY-MM-DD date")
+          else:
+              release_date = datetime.now(timezone.utc).date().isoformat()
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              print(f"version={version}", file=output)
+              print(f"tag=v{version}", file=output)
+              print(f"date={release_date}", file=output)
+          PY
+
+      - name: Validate release target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.release.outputs.tag }}"
+          version="${{ steps.release.outputs.version }}"
+          draft="$(gh api --paginate "repos/{owner}/{repo}/releases" \
+            --jq ".[] | select(.tag_name == \"$tag\") | .draft")"
+
+          pypi_url="https://pypi.org/pypi/agent-skill-installer/$version/json"
+          pypi_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "$pypi_url" || true)"
+          if [[ "$pypi_status" == "200" ]]; then
+            echo "::error::agent-skill-installer $version is already published on PyPI."
+            exit 1
+          fi
+          if [[ "$pypi_status" != "404" ]]; then
+            echo "::error::Could not verify PyPI release status for $version (HTTP $pypi_status)."
+            exit 1
+          fi
+
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
+      - name: Update version files
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          version = os.environ["VERSION"]
+
+          pyproject = Path("pyproject.toml")
+          text = pyproject.read_text()
+          text, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("failed to update pyproject.toml version")
+          pyproject.write_text(text)
+
+          init = Path("src/agent_skill_installer/__init__.py")
+          text = init.read_text()
+          text, count = re.subn(
+              r'(?m)^__version__ = "[^"]+"$',
+              f'__version__ = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("failed to update __version__")
+          init.write_text(text)
+          PY
+
+      - name: Build release notes
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_DATE: ${{ steps.release.outputs.date }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+          import sys
+
+          version = os.environ["VERSION"]
+          release_date = os.environ["RELEASE_DATE"]
+          notes_path = Path("NEWS.md")
+          news_dir = Path("news")
+
+          fragments = sorted(
+              path for path in news_dir.iterdir()
+              if path.is_file() and path.name != "_template.rst"
+          )
+
+          marker = "<!-- TOWNCRIER -->\n"
+          notes = notes_path.read_text()
+          if marker not in notes:
+              raise SystemExit("NEWS.md does not contain the Towncrier marker")
+
+          before, rendered = notes.split(marker, 1)
+          section_pattern = re.compile(
+              r"(?ms)^## Agent Skill Installer "
+              + re.escape(version)
+              + r" [(][^)]+[)]\n.*?(?=^## |\Z)"
+          )
+          has_section = section_pattern.search(rendered) is not None
+
+          if has_section:
+              if fragments:
+                  fragment_names = ", ".join(path.name for path in fragments)
+                  raise SystemExit(
+                      "NEWS.md already has a release section for "
+                      f"{version}; edit that section directly instead of "
+                      "adding late news fragments. Remaining fragments: "
+                      f"{fragment_names}"
+                  )
+              print(
+                  "No news fragments found; reusing existing "
+                  f"NEWS.md section for {version}."
+              )
+              sys.exit(0)
+
+          subprocess.run(
+              [
+                  sys.executable,
+                  "-m",
+                  "towncrier",
+                  "build",
+                  "--version",
+                  version,
+                  "--date",
+                  release_date,
+                  "--yes",
+              ],
+              check=True,
+          )
+          PY
+
+      - name: Write draft release body
+        env:
+          RELEASE_NOTES_FILE: release-notes.md
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          notes = Path("NEWS.md").read_text()
+          marker = "<!-- TOWNCRIER -->\n"
+          if marker not in notes:
+              raise SystemExit("NEWS.md does not contain the Towncrier marker")
+
+          rendered = notes.split(marker, 1)[1].lstrip()
+          match = re.match(r"(## .+?)(?=\n## |\Z)", rendered, flags=re.S)
+          if match is None:
+              raise SystemExit("could not find the latest release section in NEWS.md")
+
+          section = match.group(1).strip()
+          lines = section.splitlines()
+          body = "\n".join(lines[1:]).lstrip()
+          if not body:
+              raise SystemExit("latest release section has no body")
+
+          Path(os.environ["RELEASE_NOTES_FILE"]).write_text(body + "\n")
+          PY
+
+      - name: Commit and push release preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add pyproject.toml src/agent_skill_installer/__init__.py NEWS.md news
+          if git diff --cached --quiet; then
+            echo "No release preparation changes to commit."
+          else
+            git commit -m "Prepare ${{ steps.release.outputs.version }} release"
+            git push origin "HEAD:${TARGET_BRANCH}"
+          fi
+
+      - name: Create or update draft GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.release.outputs.tag }}"
+          title="Agent Skill Installer ${{ steps.release.outputs.version }}"
+          target_sha="$(git rev-parse HEAD)"
+          draft="${{ steps.target.outputs.draft }}"
+
+          git tag --force "$tag" "$target_sha"
+          git push origin "refs/tags/$tag" --force
+
+          if [[ -n "$draft" ]]; then
+            gh release edit "$tag" \
+              --draft \
+              --target "$target_sha" \
+              --title "$title" \
+              --notes-file release-notes.md
+          else
+            gh release create "$tag" \
+              --draft \
+              --verify-tag \
+              --target "$target_sha" \
+              --title "$title" \
+              --notes-file release-notes.md
+          fi
+
+          echo "Prepared draft release $tag" >> "$GITHUB_STEP_SUMMARY"
