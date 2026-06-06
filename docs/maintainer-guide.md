@@ -6,10 +6,14 @@ guides under `docs/`.
 
 ## Release Model
 
-Releases use a two-phase workflow:
+Releases use a protected-branch-friendly workflow:
 
-1. Prepare a release commit and draft GitHub Release.
-2. Publish the prepared draft from GitHub Actions.
+1. Run **Prepare Release**. If release files need changes, it opens or updates
+   a release preparation PR.
+2. Merge the release preparation PR after required checks pass.
+3. Rerun **Prepare Release** with the same version to create or refresh the
+   draft GitHub Release from the prepared target branch.
+4. Publish the prepared draft from GitHub Actions.
 
 The draft GitHub Release is the handoff object. It is safe to edit before the
 package is public. The publish workflow builds and publishes the PyPI package
@@ -30,7 +34,7 @@ Inputs:
 - `version`: release version without a leading `v`, for example `0.1.4`.
 - `date`: optional `YYYY-MM-DD` release date. If omitted, the workflow uses the
   current UTC date.
-- `target_branch`: branch to update with the release commit. Defaults to `main`.
+- `target_branch`: branch to prepare from. Defaults to `main`.
 
 The workflow:
 
@@ -39,17 +43,25 @@ The workflow:
 - updates `pyproject.toml`
 - updates `src/agent_skill_installer/__init__.py`
 - runs Towncrier to consume `news/` fragments into `NEWS.md`
-- commits and pushes the release preparation changes
-- creates or updates a draft GitHub Release for `v<version>`
-- points the draft release tag at the release preparation commit
+- commits release preparation changes to `release/prepare-v<version>` and opens
+  or updates a PR, if release files changed
+- dispatches CI for the release preparation branch
+- creates or updates a draft GitHub Release for `v<version>`, if the target
+  branch is already prepared
+- points the draft release tag at the prepared target branch commit
 - writes the latest Towncrier release section into the draft body
 
-After the workflow finishes, review the draft GitHub Release. Keep the release
-as a draft.
+If the workflow opens or updates a release preparation PR, review and merge that
+PR after required checks pass. Then rerun **Prepare Release** with the same
+version on the prepared target branch.
+
+If the workflow creates or updates a draft GitHub Release, review the draft.
+Keep the release as a draft.
 
 You can rerun **Prepare Release** with the same version until that version is
-published on PyPI. The workflow updates the release preparation commit, moves
-the release tag to that commit, and refreshes the GitHub Release as a draft.
+published on PyPI. Before the release preparation PR is merged, reruns update
+the same PR. After the prepared changes are on the target branch, reruns move
+the release tag to that commit and refresh the GitHub Release as a draft.
 After the first prepare run, edit the generated section in `NEWS.md` directly
 for release-note changes. Do not add late fragments for the same version after
 the section exists. GitHub draft body edits are overwritten by the next prepare

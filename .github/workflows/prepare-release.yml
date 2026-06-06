@@ -12,13 +12,15 @@ on:
         required: false
         type: string
       target_branch:
-        description: "Branch to update with the release commit"
+        description: "Branch to prepare from"
         required: false
         default: main
         type: string
 
 permissions:
+  actions: write
   contents: write
+  pull-requests: write
 
 jobs:
   prepare:
@@ -241,10 +243,24 @@ jobs:
           Path(os.environ["RELEASE_NOTES_FILE"]).write_text(body + "\n")
           PY
 
-      - name: Commit and push release preparation
+      - name: Commit release preparation or open PR
+        id: prep
         shell: bash
         run: |
           set -euo pipefail
+
+          version="${{ steps.release.outputs.version }}"
+          tag="${{ steps.release.outputs.tag }}"
+          prepare_branch="release/prepare-${tag}"
+          title="Prepare ${version} release"
+          body_file="$(mktemp)"
+
+          cat > "$body_file" <<BODY
+          Prepare ${version} release.
+
+          After this PR merges, rerun **Prepare Release** with version \`${version}\`
+          on \`${TARGET_BRANCH}\` to create or refresh draft GitHub Release \`${tag}\`.
+          BODY
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -252,12 +268,40 @@ jobs:
           git add pyproject.toml src/agent_skill_installer/__init__.py NEWS.md news
           if git diff --cached --quiet; then
             echo "No release preparation changes to commit."
+            echo "needs_pr=false" >> "$GITHUB_OUTPUT"
+            echo "Release files are already prepared on ${TARGET_BRANCH}." >> "$GITHUB_STEP_SUMMARY"
           else
-            git commit -m "Prepare ${{ steps.release.outputs.version }} release"
-            git push origin "HEAD:${TARGET_BRANCH}"
+            git commit -m "$title"
+            git push origin "HEAD:refs/heads/${prepare_branch}" --force-with-lease
+
+            pr_url="$(gh pr list \
+              --base "$TARGET_BRANCH" \
+              --head "$prepare_branch" \
+              --state open \
+              --json url \
+              --jq '.[0].url // ""')"
+
+            if [[ -n "$pr_url" ]]; then
+              gh pr edit "$pr_url" --title "$title" --body-file "$body_file"
+              echo "Updated release preparation PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+            else
+              pr_url="$(gh pr create \
+                --base "$TARGET_BRANCH" \
+                --head "$prepare_branch" \
+                --title "$title" \
+                --body-file "$body_file")"
+              echo "Created release preparation PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            gh workflow run ci.yml --ref "$prepare_branch"
+            echo "Dispatched CI for ${prepare_branch}." >> "$GITHUB_STEP_SUMMARY"
+
+            echo "needs_pr=true" >> "$GITHUB_OUTPUT"
+            echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create or update draft GitHub Release
+        if: steps.prep.outputs.needs_pr == 'false'
         shell: bash
         run: |
           set -euo pipefail
