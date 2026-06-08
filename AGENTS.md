@@ -1,4 +1,6 @@
 ## Project Environment
+This repository uses Sapling (`sl`) for source control. Prefer `sl` for
+status, diffs, commits, and history.
 
 Use the project-local virtual environment at `.venv/` for Python commands when
 working in this repository.
