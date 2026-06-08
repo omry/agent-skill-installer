@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from agent_skill_installer import SkillProject
 from agent_skill_installer.cli import main as installer_main
 
@@ -12,6 +10,7 @@ PROJECT = SkillProject(
     version=__version__,
     skill_name="demo-agent-skill",
     description="Use this demo skill to verify a skill package installer wiring.",
+    bundled_skill_path="skill",
 )
 
 

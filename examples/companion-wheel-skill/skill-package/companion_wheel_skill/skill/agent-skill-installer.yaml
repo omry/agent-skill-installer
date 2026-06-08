@@ -1,0 +1,9 @@
+installer:
+  external_wheels:
+    - package: "example-native-client==0.1.0"
+      editable: ../../../native-client
+      copies:
+        - wheel_path: example_native_client/bin/demo-tool
+          skill_path: bin/demo-tool
+          executable: true
+          replace: true

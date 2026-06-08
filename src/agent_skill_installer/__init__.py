@@ -5,7 +5,6 @@ from __future__ import annotations
 from .config import (
     InstallerConfig,
     InstallerConfigError,
-    PlatformSpecific,
     load_installer_config,
     load_installer_config_text,
 )
@@ -19,7 +18,6 @@ __all__ = [
     "InstallerConfigError",
     "InstallerError",
     "GithubSource",
-    "PlatformSpecific",
     "SkillProject",
     "__version__",
     "load_installer_config",

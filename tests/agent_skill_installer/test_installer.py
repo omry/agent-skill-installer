@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import json
 import asyncio
+import hashlib
 import importlib.util
 import os
+import shutil
 import shlex
 import subprocess
 import sys
 import zipfile
 from argparse import Namespace
-from pathlib import Path
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from agent_skill_installer import __version__
-from agent_skill_installer.config import CONFIG_FILE_NAME, SELECTOR_FILE_NAME
+from agent_skill_installer.config import CONFIG_FILE_NAME, load_installer_config_text
 from agent_skill_installer.__main__ import (
+    build_parser as build_generic_parser,
     complete_with_ui as complete_generic_with_ui,
     load_recent_github_urls,
     install_source_choices as generic_install_source_choices,
@@ -43,7 +47,6 @@ from agent_skill_installer.cli import (
     make_textual_select_app,
     make_textual_version_app,
     main,
-    pypi_version_choices,
     target_choices,
     update_command_preview_display,
 )
@@ -57,13 +60,11 @@ from agent_skill_installer.installer import (
     copy_pypi_wheel_skill,
     fetch_json_url,
     install_source_metadata,
-    local_platform_values,
     manifest_path,
-    normalize_platform_arch,
-    normalize_platform_os,
     parse_github_url,
     published_pypi_versions,
     read_manifest as read_raw_manifest,
+    run_pip_wheel,
 )
 
 
@@ -94,6 +95,7 @@ def make_project(tmp_path: Path) -> SkillProject:
         version="1.2.3",
         skill_name="example-agent-skill",
         description="Example agent skill for installer tests.",
+        bundled_skill_path="skill",
         bundled_skill_source=make_skill(tmp_path / "bundled-skill"),
     )
 
@@ -140,23 +142,63 @@ def make_skill_wheel(
     *,
     skill_text: str = "wheel skill\n",
     config_text: str | None = None,
-    selector_text: str | None = None,
+    extra_skill_files: dict[str, str] | None = None,
 ) -> Path:
     with zipfile.ZipFile(path, "w") as wheel:
-        prefix = project.wheel_skill_prefix.as_posix()
+        bundled_skill_path = project.bundled_skill_path or "skill"
+        prefix = PurePosixPath(project.import_name, bundled_skill_path).as_posix()
         wheel.writestr(f"{prefix}/SKILL.md", skill_text)
         wheel.writestr(f"{prefix}/agents/openai.yaml", "agent: wheel\n")
         wheel.writestr(f"{prefix}/scripts/tool.py", "print('wheel')\n")
+        for relative_path, data in (extra_skill_files or {}).items():
+            wheel.writestr(f"{prefix}/{relative_path}", data)
         if config_text is not None:
             wheel.writestr(f"{prefix}/agent-skill-installer.yaml", config_text)
-        if selector_text is not None:
-            wheel.writestr(f"{prefix}/{SELECTOR_FILE_NAME}", selector_text)
         wheel.writestr(f"{project.import_name}/__init__.py", "__version__ = '9.9.9'\n")
         wheel.writestr(
             f"{project.import_name}-{project.version}.dist-info/METADATA",
             "Metadata-Version: 2.1\n"
             f"Name: {project.package_name}\n"
             f"Version: {project.version}\n",
+        )
+    return path
+
+
+def patch_generic_pypi_build(
+    monkeypatch,
+    wheel: Path,
+    version: str,
+    requests: list[str] | None = None,
+) -> None:
+    def fake_build_pypi_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+    ) -> tuple[Path, str]:
+        if requests is not None:
+            requests.append(package)
+        target = wheel_dir / wheel.name
+        shutil.copy2(wheel, target)
+        return target, version
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.build_pypi_wheel",
+        fake_build_pypi_wheel,
+    )
+
+
+def make_external_wheel(path: Path, *, data: str = "#!/bin/sh\n") -> Path:
+    with zipfile.ZipFile(path, "w") as wheel:
+        write_zip_file(
+            wheel,
+            "arbiter_client/bin/arbiter",
+            data,
+            mode=0o755,
+        )
+        wheel.writestr("arbiter_client/__init__.py", "")
+        wheel.writestr(
+            "arbiter_client-2.0.0.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: arbiter-client\nVersion: 2.0.0\n",
         )
     return path
 
@@ -174,27 +216,6 @@ def write_zip_file(
     info = zipfile.ZipInfo(filename)
     info.external_attr = mode << 16
     archive.writestr(info, data)
-
-
-def make_selector_wheel(
-    path: Path,
-    *,
-    package_name: str,
-    import_name: str,
-    version: str,
-    selector_text: str,
-) -> Path:
-    with zipfile.ZipFile(path, "w") as wheel:
-        prefix = f"{import_name}/_skill"
-        wheel.writestr(f"{prefix}/{SELECTOR_FILE_NAME}", selector_text)
-        wheel.writestr(f"{import_name}/__init__.py", "__version__ = '9.9.9'\n")
-        wheel.writestr(
-            f"{import_name}-{version}.dist-info/METADATA",
-            "Metadata-Version: 2.1\n"
-            f"Name: {package_name}\n"
-            f"Version: {version}\n",
-        )
-    return path
 
 
 def make_wheel_skill_collection(
@@ -267,6 +288,18 @@ def write_manifest(
     )
 
 
+def move_manifest_to_legacy_scripts_path(
+    project: SkillProject,
+    skill_dir: Path,
+) -> Path:
+    current = manifest_path(project, skill_dir)
+    legacy = skill_dir / "scripts" / project.sidecar_manifest_name
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(current.read_text())
+    current.unlink()
+    return legacy
+
+
 def test_installs_and_uninstalls_codex_repo_scope(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     installer = Installer(project)
@@ -287,6 +320,77 @@ def test_installs_and_uninstalls_codex_repo_scope(tmp_path: Path) -> None:
     removed = installer.uninstall(["codex"], "repo", repo=repo)[0]
 
     assert removed.status == "removed"
+    assert not skill_dir.exists()
+    assert not (repo / "AGENTS.md").exists()
+
+
+def test_packaged_install_requires_explicit_bundled_skill_path(tmp_path: Path) -> None:
+    project = SkillProject(
+        package_name="example-agent-skill",
+        import_name="example_agent_skill",
+        version="1.2.3",
+        skill_name="example-agent-skill",
+        description="Example agent skill for installer tests.",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(
+        InstallerError,
+        match="bundled_skill_path is required for packaged skill resources",
+    ):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+
+def test_inspect_accepts_legacy_scripts_manifest(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    installer = Installer(project)
+    repo = make_repo(tmp_path / "repo")
+
+    installer.install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    legacy = move_manifest_to_legacy_scripts_path(project, skill_dir)
+
+    status = installer.inspect_installations(repo=repo)
+
+    codex_repo = [
+        item for item in status if item.agent == "codex" and item.scope == "repo"
+    ][0]
+    assert legacy.exists()
+    assert codex_repo.status == "installed"
+    assert codex_repo.version == project.version
+
+
+def test_reinstall_accepts_legacy_scripts_manifest(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    installer = Installer(project)
+    repo = make_repo(tmp_path / "repo")
+
+    installer.install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    legacy = move_manifest_to_legacy_scripts_path(project, skill_dir)
+    (project.bundled_skill_source / "SKILL.md").write_text("updated skill\n")
+
+    result = installer.install(["codex"], "repo", repo=repo)[0]
+
+    assert result.status == "installed"
+    assert result.version_change == "same"
+    assert (skill_dir / "SKILL.md").read_text() == "updated skill\n"
+    assert not legacy.exists()
+    assert manifest_path(project, skill_dir).exists()
+
+
+def test_uninstall_accepts_legacy_scripts_manifest(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    installer = Installer(project)
+    repo = make_repo(tmp_path / "repo")
+
+    installer.install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    move_manifest_to_legacy_scripts_path(project, skill_dir)
+
+    result = installer.uninstall(["codex"], "repo", repo=repo)[0]
+
+    assert result.status == "removed"
     assert not skill_dir.exists()
     assert not (repo / "AGENTS.md").exists()
 
@@ -390,6 +494,63 @@ def test_editable_install_links_local_checkout_skill_files(
     assert manifest["source_dir"] == str(checkout / "skill")
 
 
+def test_editable_install_skips_external_wheels_and_uses_checked_in_launcher(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            """
+installer:
+  external_wheels:
+    - package: "arbiter-client>=2.4,<2.5"
+      editable: ../client
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+          executable: true
+          replace: true
+"""
+        ),
+    )
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    (checkout / "skill" / "bin").mkdir()
+    (checkout / "skill" / "bin" / "arbiter").write_text(
+        "#!/bin/sh\nexec ../client/bin/arbiter \"$@\"\n"
+    )
+    repo = make_repo(tmp_path / "repo")
+    pip_requests: list[tuple[str, str | None, Path | None]] = []
+    monkeypatch.chdir(checkout)
+
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        pip_requests.append((package, editable, cwd))
+        raise AssertionError("editable skill installs should not resolve external wheels")
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    Installer(project).install(["codex"], "repo", repo=repo, editable=True)
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert skill_dir.is_symlink()
+    assert pip_requests == []
+    assert (checkout / "skill" / "bin" / "arbiter").read_text() == (
+        "#!/bin/sh\nexec ../client/bin/arbiter \"$@\"\n"
+    )
+    manifest = read_install_manifest(project, skill_dir)
+    assert "external_wheels" not in manifest
+
+
 def test_editable_install_requires_local_checkout(
     tmp_path: Path,
     monkeypatch,
@@ -429,6 +590,577 @@ def test_pypi_wheel_install_extracts_only_project_skill(
     assert result.version == "2.0.0"
     assert (skill_dir / "SKILL.md").read_text() == "pypi\n"
     assert not (skill_dir / project.import_name / "__init__.py").exists()
+
+
+def test_pypi_wheel_install_copies_declared_external_wheel_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    config_text = """
+installer:
+  external_wheels:
+    - package: "arbiter-client>=2.4,<2.5"
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+          executable: true
+          replace: true
+"""
+    project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            config_text,
+            package_version="2.0.0",
+        ),
+    )
+    skill_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        project,
+        skill_text="arbiter skill\n",
+        extra_skill_files={
+            "bin/arbiter": "#!/bin/sh\necho development launcher\n",
+        },
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-manylinux_2_17_x86_64.whl",
+        data="#!/bin/sh\necho arbiter\n",
+    )
+    digest = hashlib.sha256(external_wheel.read_bytes()).hexdigest()
+    pip_requests: list[tuple[str, str | None, Path | None]] = []
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: skill_wheel,
+    )
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        pip_requests.append((package, editable, cwd))
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return target, digest, "arbiter-client", "2.4.7"
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    Installer(project).install(
+        ["codex"],
+        "repo",
+        repo=repo,
+        pypi_version="2.0.0",
+    )
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    tool = skill_dir / "bin" / "arbiter"
+    assert pip_requests == [("arbiter-client>=2.4,<2.5", None, None)]
+    assert tool.read_text() == "#!/bin/sh\necho arbiter\n"
+    assert tool.stat().st_mode & 0o777 == 0o755
+    assert not (skill_dir / "arbiter_client" / "__init__.py").exists()
+    manifest = read_raw_manifest(project, skill_dir)
+    assert manifest["files"] == [
+        ".example-agent-skill-install.json",
+        "SKILL.md",
+        "agents/openai.yaml",
+        "bin/arbiter",
+        "scripts/tool.py",
+    ]
+    assert manifest["external_wheels"] == [
+        {
+            "source_type": "pip_wheel",
+            "package": "arbiter-client>=2.4,<2.5",
+            "distribution": "arbiter-client",
+            "version": "2.4.7",
+            "resolution": "python -m pip wheel",
+            "wheel": {
+                "filename": external_wheel.name,
+                "sha256": digest,
+            },
+            "copies": [
+                {
+                    "wheel_path": "arbiter_client/bin/arbiter",
+                    "skill_path": "bin/arbiter",
+                    "executable": True,
+                    "replace": True,
+                }
+            ],
+        }
+    ]
+
+
+def test_pypi_external_wheel_install_rejects_missing_declared_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    config_text = """
+installer:
+  external_wheels:
+    - package: arbiter-client==2.4.7
+      copies:
+        - wheel_path: arbiter_client/bin/missing
+          skill_path: bin/arbiter
+"""
+    project = replace(
+        project,
+        installer_config=load_installer_config_text(config_text),
+    )
+    skill_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        project,
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl"
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: skill_wheel,
+    )
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return target, hashlib.sha256(target.read_bytes()).hexdigest(), "arbiter-client", "2.4.7"
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    with pytest.raises(InstallerError, match="external wheel did not contain declared file"):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            pypi_version="2.0.0",
+        )
+
+    assert not (repo / ".codex" / "skills" / project.skill_name).exists()
+
+
+def test_pypi_external_wheel_install_rejects_skill_payload_overwrite(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            """
+installer:
+  external_wheels:
+    - package: arbiter-client==2.4.7
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: SKILL.md
+"""
+        ),
+    )
+    skill_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        project,
+        skill_text="original skill\n",
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl",
+        data="replacement skill\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: skill_wheel,
+    )
+
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return (
+            target,
+            hashlib.sha256(target.read_bytes()).hexdigest(),
+            "arbiter-client",
+            "2.4.7",
+        )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    with pytest.raises(
+        InstallerError,
+        match="external wheel copy would overwrite installed skill file: SKILL.md",
+    ):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            pypi_version="2.0.0",
+        )
+
+
+def test_pypi_external_wheel_install_rejects_duplicate_copy_target(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            """
+installer:
+  external_wheels:
+    - package: arbiter-client==2.4.7
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+"""
+        ),
+    )
+    skill_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        project,
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl",
+        data="#!/bin/sh\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: skill_wheel,
+    )
+
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return (
+            target,
+            hashlib.sha256(target.read_bytes()).hexdigest(),
+            "arbiter-client",
+            "2.4.7",
+        )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    with pytest.raises(
+        InstallerError,
+        match="external wheel copy would overwrite installed skill file: bin/arbiter",
+    ):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            pypi_version="2.0.0",
+        )
+
+
+def test_pypi_external_wheel_failure_keeps_existing_install(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    old_wheel = make_skill_wheel(
+        tmp_path / "old_skill-1.0.0-py3-none-any.whl",
+        project,
+        skill_text="old skill\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: old_wheel,
+    )
+    Installer(project).install(["codex"], "repo", repo=repo, pypi_version="1.0.0")
+    hook_text = (repo / "AGENTS.md").read_text()
+
+    failing_project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            """
+installer:
+  external_wheels:
+    - package: arbiter-client==2.4.7
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: SKILL.md
+"""
+        ),
+    )
+    new_wheel = make_skill_wheel(
+        tmp_path / "new_skill-2.0.0-py3-none-any.whl",
+        failing_project,
+        skill_text="new skill\n",
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl",
+        data="replacement skill\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: new_wheel,
+    )
+
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return (
+            target,
+            hashlib.sha256(target.read_bytes()).hexdigest(),
+            "arbiter-client",
+            "2.4.7",
+        )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    with pytest.raises(
+        InstallerError,
+        match="external wheel copy would overwrite installed skill file: SKILL.md",
+    ):
+        Installer(failing_project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            pypi_version="2.0.0",
+        )
+
+    assert (skill_dir / "SKILL.md").read_text() == "old skill\n"
+    assert read_raw_manifest(project, skill_dir)["package_version"] == "1.0.0"
+    assert (repo / "AGENTS.md").read_text() == hook_text
+
+
+def test_pypi_external_wheel_reinstall_swaps_prepared_skill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    old_wheel = make_skill_wheel(
+        tmp_path / "old_skill-1.0.0-py3-none-any.whl",
+        project,
+        skill_text="old skill\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: old_wheel,
+    )
+    Installer(project).install(["codex"], "repo", repo=repo, pypi_version="1.0.0")
+
+    new_project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            """
+installer:
+  external_wheels:
+    - package: arbiter-client==2.4.7
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+"""
+        ),
+    )
+    new_wheel = make_skill_wheel(
+        tmp_path / "new_skill-2.0.0-py3-none-any.whl",
+        new_project,
+        skill_text="new skill\n",
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl",
+        data="#!/bin/sh\necho arbiter\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: new_wheel,
+    )
+
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return (
+            target,
+            hashlib.sha256(target.read_bytes()).hexdigest(),
+            "arbiter-client",
+            "2.4.7",
+        )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    Installer(new_project).install(["codex"], "repo", repo=repo, pypi_version="2.0.0")
+
+    assert (skill_dir / "SKILL.md").read_text() == "new skill\n"
+    assert (skill_dir / "bin" / "arbiter").read_text() == "#!/bin/sh\necho arbiter\n"
+    manifest = read_raw_manifest(project, skill_dir)
+    assert manifest["package_version"] == "2.0.0"
+    assert manifest["external_wheels"][0]["package"] == "arbiter-client==2.4.7"
+
+
+def test_pypi_reinstall_reports_live_skill_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    old_wheel = make_skill_wheel(
+        tmp_path / "old_skill-1.0.0-py3-none-any.whl",
+        project,
+        skill_text="old skill\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: old_wheel,
+    )
+    Installer(project).install(["codex"], "repo", repo=repo, pypi_version="1.0.0")
+
+    new_wheel = make_skill_wheel(
+        tmp_path / "new_skill-2.0.0-py3-none-any.whl",
+        project,
+        skill_text="new skill\n",
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: new_wheel,
+    )
+    from agent_skill_installer import installer as installer_module
+
+    original_remove_existing_path = installer_module.remove_existing_path
+
+    def fail_backup_cleanup(path: Path) -> None:
+        if f".{project.skill_name}.previous-" in path.name:
+            raise OSError("backup directory is busy")
+        original_remove_existing_path(path)
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.remove_existing_path",
+        fail_backup_cleanup,
+    )
+
+    with pytest.raises(InstallerError) as exc_info:
+        Installer(project).install(["codex"], "repo", repo=repo, pypi_version="2.0.0")
+
+    message = str(exc_info.value)
+    assert "skill is live, but post-install cleanup failed" in message
+    assert project.skill_name in message
+    assert "remove previous skill backup" in message
+    assert "backup directory is busy" in message
+    assert (skill_dir / "SKILL.md").read_text() == "new skill\n"
+    assert read_raw_manifest(project, skill_dir)["package_version"] == "2.0.0"
+
+
+def test_install_reports_live_skill_when_staging_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    from agent_skill_installer import installer as installer_module
+
+    original_remove_existing_path = installer_module.remove_existing_path
+
+    def fail_staging_cleanup(path: Path) -> None:
+        if f".{project.skill_name}.install-" in path.name:
+            raise OSError("staging directory is busy")
+        original_remove_existing_path(path)
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.remove_existing_path",
+        fail_staging_cleanup,
+    )
+
+    with pytest.raises(InstallerError) as exc_info:
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    message = str(exc_info.value)
+    assert "skill is live, but post-install cleanup failed" in message
+    assert project.skill_name in message
+    assert "remove staging directory" in message
+    assert "staging directory is busy" in message
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+
+
+def test_run_pip_wheel_uses_current_python_module(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], Path | None]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path | None,
+        text: bool,
+        capture_output: bool,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, cwd))
+        wheel_dir = Path(command[command.index("--wheel-dir") + 1])
+        make_external_wheel(wheel_dir / "arbiter_client-2.4.7-py3-none-any.whl")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("agent_skill_installer.installer.subprocess.run", fake_run)
+
+    wheel = run_pip_wheel(
+        package="arbiter-client>=2.4,<2.5",
+        wheel_dir=tmp_path / "wheels",
+        editable="../client",
+        cwd=tmp_path / "skill",
+    )
+
+    assert wheel.name == "arbiter_client-2.4.7-py3-none-any.whl"
+    command, cwd = calls[0]
+    assert command[:4] == [sys.executable, "-m", "pip", "wheel"]
+    assert "--no-deps" in command
+    assert command[-2:] == ["--editable", "../client"]
+    assert cwd == tmp_path / "skill"
 
 
 def test_pypi_wheel_install_rejects_invalid_skill_frontmatter(
@@ -568,7 +1300,6 @@ def test_copy_github_archive_skill_extracts_root_skill(tmp_path: Path) -> None:
     with zipfile.ZipFile(archive, "a") as zip_archive:
         root = "example-agent-skill-main"
         zip_archive.writestr(f"{root}/{CONFIG_FILE_NAME}", "installer:\n")
-        zip_archive.writestr(f"{root}/{SELECTOR_FILE_NAME}", "platform_specific:\n")
         write_zip_file(
             zip_archive,
             f"{root}/bin/arbiter",
@@ -588,7 +1319,6 @@ def test_copy_github_archive_skill_extracts_root_skill(tmp_path: Path) -> None:
     assert (skill_dir / "SKILL.md").read_text() == "root github\n"
     assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
     assert not (skill_dir / CONFIG_FILE_NAME).exists()
-    assert not (skill_dir / SELECTOR_FILE_NAME).exists()
 
 
 def test_parse_github_url_supports_overrides_and_blob_path() -> None:
@@ -611,7 +1341,6 @@ def test_copy_pypi_wheel_skill_extracts_only_bundled_skill(tmp_path: Path) -> No
         tmp_path / "example.whl",
         project,
         config_text="installer:\n  version: 1\n",
-        selector_text="platform_specific:\n  wheel: ignored\n",
     )
     prefix = project.wheel_skill_prefix.as_posix()
     with zipfile.ZipFile(wheel, "a") as archive:
@@ -640,7 +1369,6 @@ def test_copy_pypi_wheel_skill_extracts_only_bundled_skill(tmp_path: Path) -> No
     assert (skill_dir / "agents" / "openai.yaml").read_text() == "agent: wheel\n"
     assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
     assert not (skill_dir / CONFIG_FILE_NAME).exists()
-    assert not (skill_dir / SELECTOR_FILE_NAME).exists()
     assert not (skill_dir / project.import_name / "__init__.py").exists()
     assert not (skill_dir / f"{project.import_name}-1.2.3.dist-info").exists()
 
@@ -653,6 +1381,39 @@ def test_copy_pypi_wheel_skill_rejects_missing_skill(tmp_path: Path) -> None:
 
     with pytest.raises(InstallerError, match="did not contain"):
         copy_pypi_wheel_skill(project, wheel, tmp_path / "skill")
+
+
+def test_generic_console_installs_wheel_with_root_skill(tmp_path: Path, capsys) -> None:
+    repo = make_repo(tmp_path / "repo")
+    wheel = tmp_path / "root_skill-1.2.3-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("SKILL.md", "root wheel skill\n")
+        archive.writestr("scripts/tool.py", "print('root')\n")
+        archive.writestr(
+            "root_skill-1.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: root-skill\nVersion: 1.2.3\n",
+        )
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--wheel-file",
+            str(wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed root-skill 1.2.3 (wheel) to Codex repo:" in output.out
+    skill_dir = repo / ".codex" / "skills" / "root-skill"
+    assert (skill_dir / "SKILL.md").read_text() == "root wheel skill\n"
+    assert (skill_dir / "scripts" / "tool.py").read_text() == "print('root')\n"
 
 
 def test_install_rejects_editable_and_pypi_version_together(tmp_path: Path) -> None:
@@ -754,40 +1515,6 @@ def test_published_pypi_versions_filters_wheel_releases(
     )
 
     assert published_pypi_versions(project, limit=3) == ["1.10.0", "1.0.0"]
-
-
-@pytest.mark.parametrize(
-    ("system_platform", "expected"),
-    [
-        ("linux", "linux"),
-        ("linux2", "linux"),
-        ("darwin", "darwin"),
-        ("win32", "windows"),
-    ],
-)
-def test_normalize_platform_os(system_platform: str, expected: str) -> None:
-    assert normalize_platform_os(system_platform) == expected
-
-
-@pytest.mark.parametrize(
-    ("machine", "expected"),
-    [
-        ("x86_64", "amd64"),
-        ("AMD64", "amd64"),
-        ("aarch64", "arm64"),
-        ("arm64", "arm64"),
-    ],
-)
-def test_normalize_platform_arch(machine: str, expected: str) -> None:
-    assert normalize_platform_arch(machine) == expected
-
-
-def test_local_platform_values_combines_os_arch_and_platform() -> None:
-    assert local_platform_values(system_platform="linux", machine="aarch64") == {
-        "os": "linux",
-        "arch": "arm64",
-        "platform": "linux-arm64",
-    }
 
 
 def test_fetch_json_url_uses_metadata_timeout(monkeypatch) -> None:
@@ -1249,6 +1976,50 @@ def test_cli_no_ui_pypi_version_install(
         "to Codex repo:"
         in output.out
     )
+
+
+def test_cli_no_ui_pypi_install_uses_pip_resolution(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    ) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    calls: list[tuple[str, Path]] = []
+
+    def fake_build_pypi_wheel(*, package: str, wheel_dir: Path) -> tuple[Path, str]:
+        calls.append((package, wheel_dir))
+        return wheel, "2.1.0"
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_pypi_wheel",
+        fake_build_pypi_wheel,
+    )
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--pypi",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert calls and calls[0][0] == "example-agent-skill"
+    assert "Installing from PyPI: example-agent-skill" in output.err
+    assert (
+        "Installed example-agent-skill 2.1.0 (PyPI wheel) "
+        "to Codex repo:"
+    ) in output.out
 
 
 def test_cli_no_ui_github_url_install(
@@ -2161,29 +2932,6 @@ def test_install_source_choices_offer_bundled_pypi_and_editable(
     assert install_source_choices(project)[-1]["value"] == "github"
 
 
-def test_pypi_version_choices_include_latest_ten_published_versions(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    project = make_project(tmp_path)
-    versions = [f"1.{index}.0" for index in range(12)]
-    monkeypatch.setattr(
-        "agent_skill_installer.cli.published_pypi_versions",
-        lambda _project, *, limit=10: versions[:limit],
-    )
-
-    assert pypi_version_choices(project, bundled_version="1.0.0") == [
-        {
-            "name": "1.0.0 (latest, same as bundled)",
-            "value": "1.0.0",
-        },
-        *[
-            {"name": f"1.{index}.0", "value": f"1.{index}.0"}
-            for index in range(1, 10)
-        ],
-    ]
-
-
 def test_build_no_ui_command_for_mixed_scope_targets(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     args = Namespace(
@@ -2296,19 +3044,9 @@ def test_complete_with_ui_selects_pypi_source(
                 "value": "copy",
             },
             {
-                "name": (
-                    "PyPI wheel version "
-                    "(requires network; choose published or manual version)"
-                ),
+                "name": "PyPI wheel (requires network; pip resolves compatible package)",
                 "value": "pypi",
             },
-        ],
-    )
-    monkeypatch.setattr(
-        "agent_skill_installer.cli.pypi_version_choices",
-        lambda _project: [
-            {"name": "2.0.0", "value": "2.0.0"},
-            {"name": "1.0.0", "value": "1.0.0"},
         ],
     )
     args = Namespace(
@@ -2321,24 +3059,21 @@ def test_complete_with_ui_selects_pypi_source(
     )
     repo = tmp_path / "repo"
     monkeypatch.setattr("agent_skill_installer.cli.find_ui_repo_root", lambda args: repo)
-    prompter = ScriptedPrompter("install", "pypi", "2.0.0", ["codex"], "repo")
+    prompter = ScriptedPrompter("install", "pypi", ["codex"], "repo")
 
     complete_with_ui(project, args, prompter)
 
     assert args.command == "install"
     assert args.editable is False
-    assert args.pypi_version == "2.0.0"
+    assert args.pypi is True
+    assert args.pypi_version is None
     assert args.targets == [("codex", "repo")]
     assert args.repo == repo
     assert prompter.previews == [
         "example-agent-skill --no-ui install --agent all --scope global",
-        "example-agent-skill --no-ui install --pypi-version 1.2.3 "
-        "--agent all --scope global",
-        "example-agent-skill --no-ui install --pypi-version 2.0.0 "
-        "--agent all --scope global",
-        "example-agent-skill --no-ui install --pypi-version 2.0.0 "
-        "--agent codex --scope global",
-        "example-agent-skill --no-ui install --pypi-version 2.0.0 "
+        "example-agent-skill --no-ui install --pypi --agent all --scope global",
+        "example-agent-skill --no-ui install --pypi --agent codex --scope global",
+        "example-agent-skill --no-ui install --pypi "
         f"--agent codex --scope repo --target-dir {shlex.quote(str(repo))}",
     ]
 
@@ -2903,30 +3638,13 @@ def test_recent_installs_keep_last_ten_and_ignore_load_errors(
     assert load_recent_github_urls(home) == []
 
 
-def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
+def test_generic_complete_with_ui_accepts_pypi_requirement(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    versions = [f"1.{index}.0" for index in range(12)]
     wheel = make_skill_wheel(tmp_path / "example.whl", make_project(tmp_path))
-    downloads: list[str | None] = []
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.published_pypi_versions",
-        lambda _project, *, limit=10: versions[:limit],
-    )
-
-    def fake_download(
-        project: SkillProject,
-        version: str | None,
-        _download_dir: Path,
-    ) -> Path:
-        downloads.append(version)
-        return wheel
-
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        fake_download,
-    )
+    requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, wheel, "9.9.9", requests)
     repo = make_repo(tmp_path / "repo")
     home = tmp_path / "home"
     remember_recent_pypi_package("recent-agent-skill", home=home)
@@ -2944,8 +3662,7 @@ def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
     prompter = ScriptedPrompter(
         "install",
         "pypi",
-        "example-agent-skill",
-        "9.9.9",
+        "example-agent-skill==9.9.9",
         ["codex"],
         "global",
     )
@@ -2953,14 +3670,14 @@ def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
     complete_generic_with_ui(args, prompter)
 
     assert args.command == "install"
-    assert args.pypi_package == "example-agent-skill"
-    assert args.pypi_version == "9.9.9"
-    assert downloads == ["9.9.9"]
+    assert args.pypi_package == "example-agent-skill==9.9.9"
+    assert args.pypi_version is None
+    assert requests == ["example-agent-skill==9.9.9"]
     assert getattr(args, "_validated_pypi_wheel_path").is_file()
     assert load_recent_pypi_packages(home) == ["recent-agent-skill"]
     results = run_generic_install(args)
     assert [result.status for result in results] == ["installed"]
-    assert downloads == ["9.9.9"]
+    assert requests == ["example-agent-skill==9.9.9"]
     assert load_recent_pypi_packages(home) == [
         "example-agent-skill",
         "recent-agent-skill",
@@ -2972,29 +3689,20 @@ def test_generic_complete_with_ui_selects_pypi_version_from_dropdown(
         ("select", "What would you like to do?"),
         ("select", "Install source"),
         ("version", "PyPI package name"),
-        ("version", "PyPI package version"),
         ("checkbox", "Select agents"),
         ("select", "Install location"),
     ]
     assert prompter.choices[2] == [
         {"name": "recent-agent-skill", "value": "recent-agent-skill"},
     ]
-    assert prompter.choices[3] == [
-        {"name": "1.0.0", "value": "1.0.0"},
-        *[
-            {"name": f"1.{index}.0", "value": f"1.{index}.0"}
-            for index in range(1, 10)
-        ],
-    ]
     assert prompter.previews[0] is None
     assert prompter.previews[1] is None
     assert prompter.summaries == [
         "Installing a skill",
         "Installing from PyPI",
-        "Installing PyPI package example-agent-skill",
-        "Installing PyPI package example-agent-skill 9.9.9",
-        "Installing PyPI package example-agent-skill 9.9.9\nInto Codex Global",
-        "Installing PyPI package example-agent-skill 9.9.9\nInto Codex Global",
+        "Installing PyPI package example-agent-skill==9.9.9",
+        "Installing PyPI package example-agent-skill==9.9.9\nInto Codex Global",
+        "Installing PyPI package example-agent-skill==9.9.9\nInto Codex Global",
     ]
 
 
@@ -3049,69 +3757,9 @@ def test_generic_complete_with_ui_selects_wheel_file(
     ).read_text() == "wheel skill\n"
 
 
-def test_generic_complete_with_ui_resolves_platform_specific_wheel_file(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(
-        "agent_skill_installer.installer.platform_module.machine",
-        lambda: "aarch64",
-    )
-    selector_text = """
-platform_specific:
-  wheel: arbiter-skill-{os}-{arch}
-  local_path: dist/arbiter-skill-{os}-{arch}
-"""
-    selector_wheel = make_selector_wheel(
-        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
-        package_name="arbiter-skill",
-        import_name="arbiter_skill",
-        version="2.0.0",
-        selector_text=selector_text,
-    )
-    target_project = SkillProject(
-        package_name="arbiter-skill-linux-arm64",
-        import_name="arbiter_skill_linux_arm64",
-        version="2.0.0",
-        skill_name="arbiter-skill-linux-arm64",
-        description="Arbiter skill.",
-    )
-    target_wheel = make_skill_wheel(
-        tmp_path / "arbiter_skill_linux_arm64-2.0.0-py3-none-any.whl",
-        target_project,
-    )
-    repo = make_repo(tmp_path / "repo")
-    args = Namespace(
-        command=None,
-        agent=None,
-        scope=None,
-        repo=repo,
-        codex_home=None,
-        claude_home=None,
-        home=None,
-        no_ui=False,
-        verbose=False,
-    )
-    prompter = ScriptedPrompter("install", "wheel", selector_wheel, ["codex"], "repo")
-
-    complete_generic_with_ui(args, prompter)
-
-    assert args.wheel_file == target_wheel.resolve()
-    assert getattr(args, "_validated_wheel_project").skill_name == (
-        "arbiter-skill-linux-arm64"
-    )
-
-
 def test_generic_complete_with_ui_requires_pypi_package_without_recent_default(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    seen_packages: list[str] = []
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.published_pypi_versions",
-        lambda project, *, limit=10: seen_packages.append(project.package_name) or [],
-    )
     args = Namespace(
         command=None,
         agent=None,
@@ -3129,7 +3777,6 @@ def test_generic_complete_with_ui_requires_pypi_package_without_recent_default(
         complete_generic_with_ui(args, prompter)
 
     assert not hasattr(args, "pypi_package") or args.pypi_package is None
-    assert seen_packages == []
     assert prompter.previews == [None, None, None]
     assert prompter.summaries == [
         "Installing a skill",
@@ -3151,29 +3798,8 @@ def test_generic_complete_with_ui_uses_entered_pypi_package(
         bundled_skill_source=make_skill(tmp_path / "awd-skill"),
     )
     wheel = make_skill_wheel(tmp_path / "awd.whl", project)
-    seen_packages: list[str] = []
-
-    def fake_versions(project: SkillProject, *, limit=10) -> list[str]:
-        seen_packages.append(project.pypi_project_name or project.package_name)
-        return ["0.0.1"]
-
-    def fake_download(
-        project: SkillProject,
-        version: str | None,
-        _download_dir: Path,
-    ) -> Path:
-        assert project.pypi_project_name == "agent-workflow-dsl"
-        assert version == "0.0.1"
-        return wheel
-
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.published_pypi_versions",
-        fake_versions,
-    )
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        fake_download,
-    )
+    requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, wheel, "0.0.1", requests)
     args = Namespace(
         command=None,
         agent=None,
@@ -3189,7 +3815,6 @@ def test_generic_complete_with_ui_uses_entered_pypi_package(
         "install",
         "pypi",
         "agent-workflow-dsl",
-        "0.0.1",
         ["codex"],
         "global",
     )
@@ -3197,8 +3822,8 @@ def test_generic_complete_with_ui_uses_entered_pypi_package(
     complete_generic_with_ui(args, prompter)
 
     assert args.pypi_package == "agent-workflow-dsl"
-    assert args.pypi_version == "0.0.1"
-    assert seen_packages == ["agent-workflow-dsl"]
+    assert args.pypi_version is None
+    assert requests == ["agent-workflow-dsl"]
     assert prompter.previews[2] == (
         "agent-skill-installer --no-ui install --pypi-package agent-workflow-dsl "
         "--agent all --scope global"
@@ -3286,14 +3911,7 @@ def test_generic_complete_with_ui_validates_pypi_package_contains_skill(
     wheel = tmp_path / "plain-package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("plain_package/__init__.py", "")
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.published_pypi_versions",
-        lambda _project, *, limit=10: ["1.0.0"],
-    )
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        lambda _project, _version, _download_dir: wheel,
-    )
+    patch_generic_pypi_build(monkeypatch, wheel, "1.0.0")
     args = Namespace(
         command=None,
         agent=None,
@@ -3309,7 +3927,6 @@ def test_generic_complete_with_ui_validates_pypi_package_contains_skill(
         "install",
         "pypi",
         "plain-package",
-        "1.0.0",
         ["codex"],
         "global",
     )
@@ -3321,7 +3938,6 @@ def test_generic_complete_with_ui_validates_pypi_package_contains_skill(
         ("select", "What would you like to do?"),
         ("select", "Install source"),
         ("version", "PyPI package name"),
-        ("version", "PyPI package version"),
     ]
 
 
@@ -3370,13 +3986,18 @@ def test_generic_complete_with_ui_stops_when_pypi_package_is_missing(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    def missing_package(_project, *, limit=10):
+    def missing_package(
+        *,
+        package: str,
+        wheel_dir: Path,
+    ) -> tuple[Path, str]:
+        assert package == "missing-package"
         raise InstallerError(
-            "failed to fetch PyPI metadata: HTTP Error 404: Not Found"
+            "pip wheel failed for missing-package: no matching distribution found"
         )
 
     monkeypatch.setattr(
-        "agent_skill_installer.__main__.published_pypi_versions",
+        "agent_skill_installer.__main__.build_pypi_wheel",
         missing_package,
     )
     args = Namespace(
@@ -3394,7 +4015,7 @@ def test_generic_complete_with_ui_stops_when_pypi_package_is_missing(
 
     with pytest.raises(
         InstallerError,
-        match="PyPI package not found: missing-package",
+        match="pip wheel failed for missing-package",
     ):
         complete_generic_with_ui(args, prompter)
 
@@ -3853,7 +4474,6 @@ def test_generic_multi_skill_upgrade_propagates_sibling_hook_ownership(
         / ".codex"
         / "skills"
         / "skill-two"
-        / "scripts"
         / ".skill-two-install.json"
     )
     skill_two_manifest = json.loads(skill_two_manifest_path.read_text())
@@ -3997,10 +4617,10 @@ def test_generic_console_installs_all_selected_github_source_skills(
     skill_two = repo / ".codex" / "skills" / "skill-two"
     assert (skill_one / "SKILL.md").read_text() == "github one\n"
     assert (skill_two / "SKILL.md").read_text() == "github two\n"
-    assert json.loads((skill_one / "scripts" / ".skill-one-install.json").read_text())[
+    assert json.loads((skill_one / ".skill-one-install.json").read_text())[
         "source_path"
     ] == "skill-one"
-    assert json.loads((skill_two / "scripts" / ".skill-two-install.json").read_text())[
+    assert json.loads((skill_two / ".skill-two-install.json").read_text())[
         "source_path"
     ] == "skill-two"
 
@@ -4043,9 +4663,7 @@ def test_generic_console_src_skill_matches_single_github_child_directory(
     skill_dir = repo / ".codex" / "skills" / "renamed-skill"
     assert "Installed renamed-skill main (GitHub archive) to Codex repo:" in output.out
     assert (skill_dir / "SKILL.md").read_text() == "github one\n"
-    manifest = json.loads(
-        (skill_dir / "scripts" / ".renamed-skill-install.json").read_text()
-    )
+    manifest = json.loads((skill_dir / ".renamed-skill-install.json").read_text())
     assert manifest["source_skill_name"] == "skill-one"
     assert manifest["source_skill_path"] == "skill-one"
     assert manifest["source_path"] == "skill-one"
@@ -4058,7 +4676,7 @@ def test_generic_console_src_skill_matches_single_wheel_child_directory(
     repo = make_repo(tmp_path / "repo")
     wheel = make_wheel_skill_collection(
         tmp_path / "example_agent_skill-1.2.3-py3-none-any.whl",
-        skills={"_skills/skill-one": "wheel one\n"},
+        skills={"skills/skill-one": "wheel one\n"},
     )
 
     exit_code = generic_main(
@@ -4084,11 +4702,9 @@ def test_generic_console_src_skill_matches_single_wheel_child_directory(
     skill_dir = repo / ".codex" / "skills" / "renamed-skill"
     assert "Installed renamed-skill 1.2.3 (wheel) to Codex repo:" in output.out
     assert (skill_dir / "SKILL.md").read_text() == "wheel one\n"
-    manifest = json.loads(
-        (skill_dir / "scripts" / ".renamed-skill-install.json").read_text()
-    )
+    manifest = json.loads((skill_dir / ".renamed-skill-install.json").read_text())
     assert manifest["source_skill_name"] == "skill-one"
-    assert manifest["source_skill_path"] == "example_agent_skill/_skills/skill-one"
+    assert manifest["source_skill_path"] == "example_agent_skill/skills/skill-one"
 
 
 def test_generic_console_renames_single_selected_source_skill(
@@ -4124,9 +4740,7 @@ def test_generic_console_renames_single_selected_source_skill(
     assert not (repo / ".codex" / "skills" / "skill-one").exists()
     assert not (repo / ".codex" / "skills" / "skill-two").exists()
     assert (skill_dir / "SKILL.md").read_text().endswith("two\n")
-    manifest = json.loads(
-        (skill_dir / "scripts" / ".renamed-skill-install.json").read_text()
-    )
+    manifest = json.loads((skill_dir / ".renamed-skill-install.json").read_text())
     assert manifest["skill_name"] == "renamed-skill"
     assert manifest["source_skill_name"] == "skill-two"
     assert manifest["source_skill_path"] == "skill-two"
@@ -4240,25 +4854,25 @@ def test_generic_complete_with_ui_prompts_for_source_skills(
     ]
 
 
-def test_generic_multi_skill_install_rolls_back_on_failure(
+def test_generic_multi_skill_install_does_not_commit_on_staging_failure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     source = make_skill_collection(tmp_path / "skills-root")
     repo = make_repo(tmp_path / "repo")
     calls: list[str] = []
-    original_install_target = __import__(
+    original_stage_install_target = __import__(
         "agent_skill_installer.__main__",
-        fromlist=["install_target"],
-    ).install_target
+        fromlist=["stage_install_target"],
+    ).stage_install_target
 
     def fail_second(project, *args, **kwargs):
         calls.append(project.skill_name)
         if project.skill_name == "skill-two":
             raise InstallerError("boom")
-        return original_install_target(project, *args, **kwargs)
+        return original_stage_install_target(project, *args, **kwargs)
 
-    monkeypatch.setattr("agent_skill_installer.__main__.install_target", fail_second)
+    monkeypatch.setattr("agent_skill_installer.__main__.stage_install_target", fail_second)
     args = Namespace(
         command="install",
         force=False,
@@ -4285,13 +4899,75 @@ def test_generic_multi_skill_install_rolls_back_on_failure(
         verbose=False,
     )
 
-    with pytest.raises(InstallerError, match="rolled back changes"):
+    with pytest.raises(InstallerError, match="boom"):
         run_generic_install(args)
 
     assert calls == ["skill-one", "skill-two"]
     assert not (repo / ".codex" / "skills" / "skill-one").exists()
     assert not (repo / ".codex" / "skills" / "skill-two").exists()
+    assert not (repo / ".codex").exists()
     assert not (repo / "AGENTS.md").exists()
+
+
+def test_generic_multi_skill_install_reports_all_rollback_cleanup_failures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = make_skill_collection(tmp_path / "skills-root")
+    repo = make_repo(tmp_path / "repo")
+    from agent_skill_installer import installer as installer_module
+
+    def fail_hook(_spec) -> None:
+        raise InstallerError("hook install failed")
+
+    original_remove_existing_path = installer_module.remove_existing_path
+
+    def fail_skill_cleanup(path: Path) -> None:
+        if path.name in {"skill-one", "skill-two"}:
+            raise OSError(f"{path.name} cleanup failed")
+        original_remove_existing_path(path)
+
+    monkeypatch.setattr("agent_skill_installer.installer.install_hook", fail_hook)
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.remove_existing_path",
+        fail_skill_cleanup,
+    )
+    args = Namespace(
+        command="install",
+        force=False,
+        skill_name=None,
+        dst_skill=None,
+        src_skills=None,
+        all_src_skills=True,
+        renames=None,
+        description=None,
+        pypi_package=None,
+        pypi_version=None,
+        wheel_file=None,
+        github_url=None,
+        github_ref=None,
+        github_path=None,
+        skill_path=source,
+        editable=False,
+        agent="codex",
+        scope="repo",
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        verbose=False,
+    )
+
+    with pytest.raises(InstallerError) as exc_info:
+        run_generic_install(args)
+
+    message = str(exc_info.value)
+    assert "install failed and rollback was incomplete" in message
+    assert "Original error: hook install failed" in message
+    assert "skill-one (codex repo)" in message
+    assert "skill-one cleanup failed" in message
+    assert "skill-two (codex repo)" in message
+    assert "skill-two cleanup failed" in message
 
 
 def test_generic_console_rejects_copy_without_local_skill_path(capsys) -> None:
@@ -4347,45 +5023,60 @@ def test_generic_console_installs_local_repo_with_skill_subdir(
     assert (skill_dir / "SKILL.md").read_text() == "editable skill\n"
 
 
-def test_generic_console_installs_platform_specific_local_path(
+def test_generic_console_local_copy_uses_external_wheel_editable_path(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(
-        "agent_skill_installer.installer.platform_module.machine",
-        lambda: "aarch64",
+    source_repo = make_skill_checkout(tmp_path / "local-skill-repo")
+    (source_repo / "skill" / "bin").mkdir()
+    (source_repo / "skill" / "bin" / "arbiter").write_text(
+        "#!/bin/sh\necho development launcher\n"
     )
-    selector_text = """
-platform_specific:
-  wheel: arbiter-skill-{os}-{arch}
-  local_path: dist/arbiter-skill-{os}-{arch}
-"""
-    config_text = """
+    (source_repo / "skill" / CONFIG_FILE_NAME).write_text(
+        """
 installer:
-  agents:
-    codex:
-      instructions:
-        title: Arbiter Native Client
-        body: Use the native Arbiter client.
+  external_wheels:
+    - package: "arbiter-client>=2.4,<2.5"
+      editable: ../client
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+          executable: true
+          replace: true
 """
-    selector = tmp_path / "arbiter-skill"
-    selector.mkdir()
-    (selector / SELECTOR_FILE_NAME).write_text(selector_text)
-    target = make_skill(selector / "dist" / "arbiter-skill-linux-arm64")
-    (target / CONFIG_FILE_NAME).write_text(config_text)
-    tool = target / "bin" / "arbiter"
-    tool.parent.mkdir()
-    tool.write_text("#!/bin/sh\n")
-    tool.chmod(0o755)
+    )
     repo = make_repo(tmp_path / "repo")
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl",
+        data="#!/bin/sh\necho copied arbiter\n",
+    )
+    digest = hashlib.sha256(external_wheel.read_bytes()).hexdigest()
+    pip_requests: list[tuple[str, str | None, Path | None]] = []
+
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        pip_requests.append((package, editable, cwd))
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return target, digest, "arbiter-client", "2.4.7"
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
 
     exit_code = generic_main(
         [
+            "--no-ui",
             "install",
             "--skill-path",
-            str(selector),
+            str(source_repo),
             "--copy",
             "--agent",
             "codex",
@@ -4398,63 +5089,17 @@ installer:
     output = capsys.readouterr()
 
     assert exit_code == 0
-    assert (
-        "Installed arbiter-skill-linux-arm64 local to Codex repo:"
-        in output.out
-    )
-    skill_dir = repo / ".codex" / "skills" / "arbiter-skill-linux-arm64"
+    assert "Installed local-skill-repo local to Codex repo:" in output.out
+    assert pip_requests == [
+        ("arbiter-client>=2.4,<2.5", "../client", source_repo / "skill")
+    ]
+    skill_dir = repo / ".codex" / "skills" / "local-skill-repo"
     assert not skill_dir.is_symlink()
-    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
-    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
-    assert not (skill_dir / CONFIG_FILE_NAME).exists()
-    hook = repo.joinpath("AGENTS.md").read_text()
-    assert "Arbiter Native Client" in hook
-    assert "Use the native Arbiter client." in hook
-
-
-def test_generic_console_rejects_unresolved_platform_specific_local_target(
-    tmp_path: Path,
-    capsys,
-) -> None:
-    selector = tmp_path / "selector"
-    selector.mkdir()
-    (selector / SELECTOR_FILE_NAME).write_text(
-        """
-platform_specific:
-  wheel: platform-target-one
-  local_path: target-one
-"""
+    assert (skill_dir / "bin" / "arbiter").read_text() == (
+        "#!/bin/sh\necho copied arbiter\n"
     )
-    target_one = selector / "target-one"
-    target_one.mkdir()
-    (target_one / SELECTOR_FILE_NAME).write_text(
-        """
-platform_specific:
-  wheel: platform-target-two
-  local_path: target-two
-"""
-    )
-    repo = make_repo(tmp_path / "repo")
-
-    exit_code = generic_main(
-        [
-            "install",
-            "--skill-path",
-            str(selector),
-            "--copy",
-            "--agent",
-            "codex",
-            "--scope",
-            "repo",
-            "--target-dir",
-            str(repo),
-        ]
-    )
-    output = capsys.readouterr()
-
-    assert exit_code == 1
-    assert "platform_specific local target was not resolved after one dispatch" in (
-        output.err
+    assert (source_repo / "skill" / "bin" / "arbiter").read_text() == (
+        "#!/bin/sh\necho development launcher\n"
     )
 
 
@@ -4558,18 +5203,14 @@ def test_generic_console_installs_pypi_skill(
     repo = make_repo(tmp_path / "repo")
     home = tmp_path / "home"
     wheel = make_skill_wheel(tmp_path / "example.whl", project)
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        lambda _project, _version, _download_dir: wheel,
-    )
+    requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, wheel, "2.0.0", requests)
 
     exit_code = generic_main(
         [
             "install",
             "--pypi-package",
-            "example-agent-skill",
-            "--pypi-version",
-            "2.0.0",
+            "example-agent-skill==2.0.0",
             "--agent",
             "codex",
             "--scope",
@@ -4591,71 +5232,27 @@ def test_generic_console_installs_pypi_skill(
     assert (
         repo / ".codex" / "skills" / "example-agent-skill" / "SKILL.md"
     ).read_text() == "wheel skill\n"
+    assert requests == ["example-agent-skill==2.0.0"]
     assert load_recent_pypi_packages(home) == ["example-agent-skill"]
 
 
-def test_generic_console_installs_platform_specific_pypi_wheel(
+def test_generic_console_installs_pypi_skill_with_package_spec(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(
-        "agent_skill_installer.installer.platform_module.machine",
-        lambda: "aarch64",
-    )
-    selector_text = """
-platform_specific:
-  wheel: arbiter-skill-{os}-{arch}
-  local_path: dist/arbiter-skill-{os}-{arch}
-"""
-    selector_wheel = make_selector_wheel(
-        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
-        package_name="arbiter-skill",
-        import_name="arbiter_skill",
-        version="2.0.0",
-        selector_text=selector_text,
-    )
-    target_project = SkillProject(
-        package_name="arbiter-skill-linux-arm64",
-        import_name="arbiter_skill_linux_arm64",
-        version="2.0.0",
-        skill_name="arbiter-skill-linux-arm64",
-        description="Arbiter skill.",
-    )
-    target_wheel = make_skill_wheel(
-        tmp_path / "arbiter_skill_linux_arm64-2.0.0-py3-none-any.whl",
-        target_project,
-    )
-    downloads: list[str] = []
-
-    def fake_download(
-        project: SkillProject,
-        version: str,
-        _download_dir: Path,
-    ) -> Path:
-        downloads.append(project.pypi_project_name or project.package_name)
-        assert version == "2.0.0"
-        if project.pypi_name == "arbiter-skill":
-            return selector_wheel
-        if project.pypi_name == "arbiter-skill-linux-arm64":
-            return target_wheel
-        raise AssertionError(project.pypi_name)
-
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        fake_download,
-    )
+    project = make_project(tmp_path)
     repo = make_repo(tmp_path / "repo")
     home = tmp_path / "home"
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, wheel, "2.0.0", requests)
 
     exit_code = generic_main(
         [
             "install",
             "--pypi-package",
-            "arbiter-skill",
-            "--pypi-version",
-            "2.0.0",
+            "example-agent-skill==2.0.0",
             "--agent",
             "codex",
             "--scope",
@@ -4669,66 +5266,221 @@ platform_specific:
     output = capsys.readouterr()
 
     assert exit_code == 0
-    assert downloads == ["arbiter-skill", "arbiter-skill-linux-arm64"]
     assert (
-        "Installed arbiter-skill-linux-arm64 2.0.0 (PyPI wheel) "
+        "Installed example-agent-skill 2.0.0 (PyPI wheel) "
         "to Codex repo:"
         in output.out
     )
-    assert (
-        repo / ".codex" / "skills" / "arbiter-skill-linux-arm64" / "SKILL.md"
-    ).read_text() == "wheel skill\n"
-    assert load_recent_pypi_packages(home) == ["arbiter-skill"]
+    assert requests == ["example-agent-skill==2.0.0"]
+    assert load_recent_pypi_packages(home) == ["example-agent-skill"]
 
 
-def test_generic_console_rejects_missing_platform_specific_pypi_target(
+def test_generic_console_installs_latest_pypi_skill_without_version(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(
-        "agent_skill_installer.installer.platform_module.machine",
-        lambda: "aarch64",
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, wheel, "2.1.0", requests)
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "example-agent-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+            "--home",
+            str(home),
+        ]
     )
-    selector_text = """
-platform_specific:
-  wheel: arbiter-skill-{os}-{arch}
-"""
-    selector_wheel = make_selector_wheel(
-        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed example-agent-skill 2.1.0 (PyPI wheel)" in output.out
+    assert requests == ["example-agent-skill"]
+    assert load_recent_pypi_packages(home) == ["example-agent-skill"]
+
+
+def test_generic_console_installs_pypi_skill_with_version_range(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, wheel, "2.5.0", requests)
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "example-agent-skill>=2,<3",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed example-agent-skill 2.5.0 (PyPI wheel) "
+        "to Codex repo:"
+        in output.out
+    )
+    assert requests == ["example-agent-skill>=2,<3"]
+    assert load_recent_pypi_packages(home) == ["example-agent-skill"]
+
+
+def test_generic_console_installs_pypi_skill_with_wildcard_version(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    wheel = make_skill_wheel(tmp_path / "example.whl", project)
+    requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, wheel, "1.8.0", requests)
+
+    exit_code = generic_main(
+        [
+            "install",
+            "--pypi-package",
+            "example-agent-skill==1.*",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed example-agent-skill 1.8.0 (PyPI wheel)" in output.out
+    assert requests == ["example-agent-skill==1.*"]
+
+
+def test_generic_console_reports_pypi_package_version_range_without_wheels(
+    monkeypatch,
+    capsys,
+) -> None:
+    def fail_build_pypi_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+    ) -> tuple[Path, str]:
+        assert package == "example-agent-skill>=2,<3"
+        raise InstallerError(
+            "pip wheel failed for example-agent-skill>=2,<3: "
+            "no matching distribution found"
+        )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.build_pypi_wheel",
+        fail_build_pypi_wheel,
+    )
+
+    exit_code = generic_main(
+        [
+            "--no-ui",
+            "install",
+            "--pypi-package",
+            "example-agent-skill>=2,<3",
+            "--agent",
+            "codex",
+            "--scope",
+            "global",
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "pip wheel failed for example-agent-skill>=2,<3" in output.err
+
+
+def test_generic_console_help_omits_pypi_version() -> None:
+    assert "--pypi-version" not in build_generic_parser().format_help()
+
+
+def test_generic_console_installs_pypi_skill_with_external_wheel(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    source_project = SkillProject(
         package_name="arbiter-skill",
         import_name="arbiter_skill",
         version="2.0.0",
-        selector_text=selector_text,
-    )
-    downloads: list[str] = []
-
-    def fake_download(
-        project: SkillProject,
-        version: str,
-        _download_dir: Path,
-    ) -> Path:
-        downloads.append(project.pypi_name)
-        assert version == "2.0.0"
-        if project.pypi_name == "arbiter-skill":
-            return selector_wheel
-        raise InstallerError(f"no wheel distribution found on PyPI for {project.pypi_name}")
-
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        fake_download,
+        skill_name="arbiter-skill",
+        description="Arbiter skill.",
     )
     repo = make_repo(tmp_path / "repo")
     home = tmp_path / "home"
+    skill_wheel = make_skill_wheel(
+        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
+        source_project,
+        skill_text="arbiter skill\n",
+        config_text="""
+installer:
+  external_wheels:
+    - package: "arbiter-client>=2.4,<2.5"
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+          executable: true
+""",
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl",
+        data="#!/bin/sh\necho arbiter\n",
+    )
+    digest = hashlib.sha256(external_wheel.read_bytes()).hexdigest()
+    pypi_requests: list[str] = []
+    patch_generic_pypi_build(monkeypatch, skill_wheel, "2.0.0", pypi_requests)
+
+    def fake_build_external_wheel(
+        *,
+        package: str,
+        wheel_dir: Path,
+        editable: str | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Path, str, str, str]:
+        assert package == "arbiter-client>=2.4,<2.5"
+        assert editable is None
+        target = wheel_dir / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return target, digest, "arbiter-client", "2.4.7"
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
 
     exit_code = generic_main(
         [
             "install",
             "--pypi-package",
-            "arbiter-skill",
-            "--pypi-version",
-            "2.0.0",
+            "arbiter-skill==2.0.0",
             "--agent",
             "codex",
             "--scope",
@@ -4741,91 +5493,13 @@ platform_specific:
     )
     output = capsys.readouterr()
 
-    assert exit_code == 1
-    assert downloads == ["arbiter-skill", "arbiter-skill-linux-arm64"]
-    assert "no wheel distribution found on PyPI for arbiter-skill-linux-arm64" in (
-        output.err
-    )
-    assert load_recent_pypi_packages(home) == []
-
-
-def test_generic_console_rejects_unresolved_platform_specific_pypi_target(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    selector_config = """
-platform_specific:
-  wheel: platform-target-one
-"""
-    target_config = """
-platform_specific:
-  wheel: platform-target-two
-"""
-    selector_wheel = make_selector_wheel(
-        tmp_path / "platform_selector-2.0.0-py3-none-any.whl",
-        package_name="platform-selector",
-        import_name="platform_selector",
-        version="2.0.0",
-        selector_text=selector_config,
-    )
-    target_project = SkillProject(
-        package_name="platform-target-one",
-        import_name="platform_target_one",
-        version="2.0.0",
-        skill_name="platform-target-one",
-        description="Platform target one.",
-    )
-    target_wheel = make_skill_wheel(
-        tmp_path / "platform_target_one-2.0.0-py3-none-any.whl",
-        target_project,
-        selector_text=target_config,
-    )
-    downloads: list[str] = []
-
-    def fake_download(
-        project: SkillProject,
-        version: str,
-        _download_dir: Path,
-    ) -> Path:
-        downloads.append(project.pypi_name)
-        assert version == "2.0.0"
-        if project.pypi_name == "platform-selector":
-            return selector_wheel
-        if project.pypi_name == "platform-target-one":
-            return target_wheel
-        raise AssertionError(project.pypi_name)
-
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        fake_download,
-    )
-    repo = make_repo(tmp_path / "repo")
-    home = tmp_path / "home"
-
-    exit_code = generic_main(
-        [
-            "install",
-            "--pypi-package",
-            "platform-selector",
-            "--pypi-version",
-            "2.0.0",
-            "--agent",
-            "codex",
-            "--scope",
-            "repo",
-            "--target-dir",
-            str(repo),
-            "--home",
-            str(home),
-        ]
-    )
-    output = capsys.readouterr()
-
-    assert exit_code == 1
-    assert downloads == ["platform-selector", "platform-target-one"]
-    assert "platform_specific target was not resolved after one dispatch" in output.err
-    assert load_recent_pypi_packages(home) == []
+    assert exit_code == 0
+    assert "Installed arbiter-skill 2.0.0 (PyPI wheel) to Codex repo:" in output.out
+    assert pypi_requests == ["arbiter-skill==2.0.0"]
+    skill_dir = repo / ".codex" / "skills" / "arbiter-skill"
+    assert (skill_dir / "SKILL.md").read_text() == "arbiter skill\n"
+    assert (skill_dir / "bin" / "arbiter").read_text() == "#!/bin/sh\necho arbiter\n"
+    assert load_recent_pypi_packages(home) == ["arbiter-skill"]
 
 
 def test_generic_console_installs_local_wheel_file(
@@ -4871,122 +5545,6 @@ def test_generic_console_installs_local_wheel_file(
     assert load_recent_pypi_packages(home) == []
 
 
-def test_generic_console_installs_platform_specific_local_wheel_file(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(
-        "agent_skill_installer.installer.platform_module.machine",
-        lambda: "aarch64",
-    )
-    selector_text = """
-platform_specific:
-  wheel: arbiter-skill-{os}-{arch}
-  local_path: dist/arbiter-skill-{os}-{arch}
-"""
-    selector_wheel = make_selector_wheel(
-        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
-        package_name="arbiter-skill",
-        import_name="arbiter_skill",
-        version="2.0.0",
-        selector_text=selector_text,
-    )
-    target_project = SkillProject(
-        package_name="arbiter-skill-linux-arm64",
-        import_name="arbiter_skill_linux_arm64",
-        version="2.0.0",
-        skill_name="arbiter-skill-linux-arm64",
-        description="Arbiter skill.",
-    )
-    target_wheel = make_skill_wheel(
-        tmp_path / "arbiter_skill_linux_arm64-2.0.0-py3-none-any.whl",
-        target_project,
-        config_text="installer:\n  version: 1\n",
-    )
-    with zipfile.ZipFile(target_wheel, "a") as archive:
-        write_zip_file(
-            archive,
-            f"{target_project.wheel_skill_prefix.as_posix()}/bin/arbiter",
-            "#!/bin/sh\n",
-            mode=0o755,
-        )
-    repo = make_repo(tmp_path / "repo")
-
-    exit_code = generic_main(
-        [
-            "install",
-            "--wheel-file",
-            str(selector_wheel),
-            "--agent",
-            "codex",
-            "--scope",
-            "repo",
-            "--target-dir",
-            str(repo),
-        ]
-    )
-    output = capsys.readouterr()
-
-    assert exit_code == 0
-    assert (
-        "Installed arbiter-skill-linux-arm64 2.0.0 (wheel) to Codex repo:"
-        in output.out
-    )
-    skill_dir = repo / ".codex" / "skills" / "arbiter-skill-linux-arm64"
-    assert (skill_dir / "SKILL.md").read_text() == "wheel skill\n"
-    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
-    assert not (skill_dir / CONFIG_FILE_NAME).exists()
-    manifest = read_raw_manifest(target_project, skill_dir)
-    assert manifest["source_path"] == str(target_wheel.resolve())
-
-
-def test_generic_console_rejects_missing_platform_specific_local_wheel_file(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(
-        "agent_skill_installer.installer.platform_module.machine",
-        lambda: "aarch64",
-    )
-    selector_text = """
-platform_specific:
-  wheel: arbiter-skill-{os}-{arch}
-"""
-    selector_wheel = make_selector_wheel(
-        tmp_path / "arbiter_skill-2.0.0-py3-none-any.whl",
-        package_name="arbiter-skill",
-        import_name="arbiter_skill",
-        version="2.0.0",
-        selector_text=selector_text,
-    )
-    repo = make_repo(tmp_path / "repo")
-
-    exit_code = generic_main(
-        [
-            "install",
-            "--wheel-file",
-            str(selector_wheel),
-            "--agent",
-            "codex",
-            "--scope",
-            "repo",
-            "--target-dir",
-            str(repo),
-        ]
-    )
-    output = capsys.readouterr()
-
-    assert exit_code == 1
-    assert (
-        "platform-specific wheel was not found next to selector wheel: "
-        "arbiter-skill-linux-arm64 2.0.0"
-    ) in output.err
-
-
 def test_generic_console_does_not_remember_failed_pypi_install(
     tmp_path: Path,
     monkeypatch,
@@ -4997,18 +5555,13 @@ def test_generic_console_does_not_remember_failed_pypi_install(
     wheel = tmp_path / "plain-package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("plain_package/__init__.py", "")
-    monkeypatch.setattr(
-        "agent_skill_installer.__main__.download_pypi_wheel",
-        lambda _project, _version, _download_dir: wheel,
-    )
+    patch_generic_pypi_build(monkeypatch, wheel, "1.0.0")
 
     exit_code = generic_main(
         [
             "install",
             "--pypi-package",
-            "plain-package",
-            "--pypi-version",
-            "1.0.0",
+            "plain-package==1.0.0",
             "--agent",
             "codex",
             "--scope",

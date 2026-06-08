@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import platform as platform_module
 import shutil
 import subprocess
 import sys
@@ -12,17 +11,19 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha256
 from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping
+from uuid import uuid4
 
 from omegaconf import OmegaConf
 from omegaconf.errors import OmegaConfBaseException
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from yaml import YAMLError
 
 from .config import (
     CONFIG_FILE_NAME,
-    SELECTOR_FILE_NAME,
     AgentInstructions,
     InstallerConfig,
     load_installer_config_text,
@@ -37,58 +38,11 @@ GITHUB_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 DEFAULT_GITHUB_REF = "main"
 AGENTS = ("codex", "claude")
 SCOPES = ("repo", "global")
-INSTALLER_METADATA_FILE_NAMES = frozenset({CONFIG_FILE_NAME, SELECTOR_FILE_NAME})
+INSTALLER_METADATA_FILE_NAMES = frozenset({CONFIG_FILE_NAME})
 
 
 class InstallerError(Exception):
     pass
-
-
-def normalize_platform_os(system_platform: str | None = None) -> str:
-    value = (system_platform or sys.platform).strip().lower()
-    if value.startswith("linux"):
-        return "linux"
-    if value == "darwin":
-        return "darwin"
-    if value.startswith(("win32", "cygwin", "msys")):
-        return "windows"
-    raise InstallerError(f"unsupported platform OS: {system_platform or sys.platform}")
-
-
-def normalize_platform_arch(machine: str | None = None) -> str:
-    value = (machine or platform_module.machine()).strip().lower()
-    normalized = value.replace("-", "_")
-    if normalized in {"x86_64", "amd64"}:
-        return "amd64"
-    if normalized in {"aarch64", "arm64"}:
-        return "arm64"
-    raise InstallerError(f"unsupported platform arch: {machine or platform_module.machine()}")
-
-
-def local_platform_values(
-    *,
-    system_platform: str | None = None,
-    machine: str | None = None,
-) -> dict[str, str]:
-    os_name = normalize_platform_os(system_platform)
-    arch = normalize_platform_arch(machine)
-    return {
-        "os": os_name,
-        "arch": arch,
-        "platform": f"{os_name}-{arch}",
-    }
-
-
-def render_platform_template(template: str) -> str:
-    try:
-        return template.format(**local_platform_values())
-    except KeyError as error:
-        name = str(error).strip("'")
-        raise InstallerError(
-            f"unknown platform_specific template field: {name}"
-        ) from error
-    except ValueError as error:
-        raise InstallerError(f"invalid platform_specific template: {error}") from error
 
 
 @dataclass(frozen=True)
@@ -100,7 +54,7 @@ class SkillProject:
     description: str
     hook_blocks: Mapping[str, str] = field(default_factory=dict)
     installer_config: InstallerConfig | None = None
-    bundled_skill_path: str = "_skill"
+    bundled_skill_path: str | None = None
     bundled_skill_source: Path | None = None
     pypi_project_name: str | None = None
     cli_name: str | None = None
@@ -129,7 +83,7 @@ class SkillProject:
 
     @property
     def manifest_relative_path(self) -> Path:
-        return Path("scripts") / f".{self.skill_name}-install.json"
+        return Path(f".{self.skill_name}-install.json")
 
     @property
     def sidecar_manifest_name(self) -> str:
@@ -145,7 +99,14 @@ class SkillProject:
 
     @property
     def wheel_skill_prefix(self) -> PurePosixPath:
-        return PurePosixPath(self.import_name, self.bundled_skill_path)
+        return PurePosixPath(self.import_name, self.required_bundled_skill_path())
+
+    def required_bundled_skill_path(self) -> str:
+        if self.bundled_skill_path is not None:
+            return self.bundled_skill_path
+        raise InstallerError(
+            "bundled_skill_path is required for packaged skill resources"
+        )
 
     def config_instructions(self, agent: str) -> AgentInstructions | None:
         config = self.installer_config
@@ -185,18 +146,24 @@ def load_packaged_installer_config(project: SkillProject) -> InstallerConfig | N
     if project.bundled_skill_source is not None:
         source = project.bundled_skill_source / CONFIG_FILE_NAME
         if source.is_file():
-            return load_installer_config_text(source.read_text(), source=source)
+            return load_installer_config_text(
+                source.read_text(),
+                source=source,
+                package_version=project.version,
+            )
         return None
 
+    bundled_skill_path = project.required_bundled_skill_path()
     config = resources.files(project.import_name).joinpath(
-        project.bundled_skill_path,
+        bundled_skill_path,
         CONFIG_FILE_NAME,
     )
     if not config.is_file():
         return None
     return load_installer_config_text(
         config.read_text(),
-        source=f"{project.import_name}/{project.bundled_skill_path}/{CONFIG_FILE_NAME}",
+        source=f"{project.import_name}/{bundled_skill_path}/{CONFIG_FILE_NAME}",
+        package_version=project.version,
     )
 
 
@@ -239,6 +206,48 @@ class InstallSourceMetadata:
     vcs: str | None = None
     commit: str | None = None
     dirty: bool | None = None
+
+
+@dataclass(frozen=True)
+class WheelFileCopyRecord:
+    wheel_path: str
+    skill_path: str
+    executable: bool
+    replace: bool
+
+
+@dataclass(frozen=True)
+class ExternalWheelInstallRecord:
+    package: str
+    editable: str | None
+    distribution: str
+    version: str
+    filename: str
+    sha256: str
+    copies: tuple[WheelFileCopyRecord, ...]
+
+
+@dataclass(frozen=True)
+class PreparedExternalWheel:
+    external_wheel: object
+    wheel_path: Path
+    digest: str
+    distribution: str
+    version: str
+    editable: str | None
+
+
+@dataclass
+class StagedInstall:
+    project: SkillProject
+    spec: TargetSpec
+    staging_root: Path
+    staged_skill_dir: Path
+    staged_sidecar_manifest_path: Path | None
+    sidecar_manifest_path: Path
+    previous_manifest_file: Path | None
+    skill_exists: bool
+    result: InstallResult
 
 
 @dataclass(frozen=True)
@@ -287,6 +296,7 @@ class Installer:
         claude_home: Path | None = None,
         force: bool = False,
         editable: bool = False,
+        pypi: bool = False,
         pypi_version: str | None = None,
         github_url: str | None = None,
         github_ref: str | None = None,
@@ -302,6 +312,7 @@ class Installer:
             claude_home=claude_home,
             force=force,
             editable=editable,
+            pypi=pypi,
             pypi_version=pypi_version,
             github_url=github_url,
             github_ref=github_ref,
@@ -459,7 +470,9 @@ def bundled_skill_root(project: SkillProject):
             return root
         raise InstallerError(f"bundled skill source does not contain SKILL.md: {root}")
 
-    packaged = resources.files(project.import_name).joinpath(project.bundled_skill_path)
+    packaged = resources.files(project.import_name).joinpath(
+        project.required_bundled_skill_path()
+    )
     if packaged.joinpath("SKILL.md").is_file():
         return packaged
     raise InstallerError(
@@ -934,12 +947,28 @@ def manifest_path(project: SkillProject, skill_dir: Path) -> Path:
     return skill_dir / project.manifest_relative_path
 
 
-def read_manifest(
+def manifest_path_candidates(project: SkillProject, skill_dir: Path) -> list[Path]:
+    candidates = [manifest_path(project, skill_dir)]
+    if not skill_dir.is_symlink():
+        # Temporary compatibility for very early installs. Remove no earlier
+        # than 2027-01-01.
+        candidates.append(skill_dir / "scripts" / project.sidecar_manifest_name)
+    return candidates
+
+
+def read_manifest_with_path(
     project: SkillProject,
     skill_dir: Path,
-) -> dict[str, object] | None:
-    path = manifest_path(project, skill_dir)
-    if not path.exists():
+) -> tuple[dict[str, object], Path] | None:
+    path = next(
+        (
+            candidate
+            for candidate in manifest_path_candidates(project, skill_dir)
+            if candidate.exists()
+        ),
+        None,
+    )
+    if path is None:
         return None
     data = read_manifest_file(path)
     accepted_packages = {project.package_name, *project.manifest_package_aliases}
@@ -947,7 +976,15 @@ def read_manifest(
         raise InstallerError(
             f"install manifest is not for {project.package_name}: {path}"
         )
-    return data
+    return data, path
+
+
+def read_manifest(
+    project: SkillProject,
+    skill_dir: Path,
+) -> dict[str, object] | None:
+    found = read_manifest_with_path(project, skill_dir)
+    return None if found is None else found[0]
 
 
 def read_manifest_file(path: Path) -> dict[str, object]:
@@ -1007,7 +1044,13 @@ def iter_managed_manifest_paths(skills_dir: Path):
     if not skills_dir.is_dir():
         return
     seen: set[Path] = set()
-    patterns = ("*/scripts/.*-install.json", ".*-install.json")
+    patterns = (
+        "*/.*-install.json",
+        # Temporary compatibility for very early installs. Remove no earlier
+        # than 2027-01-01.
+        "*/scripts/.*-install.json",
+        ".*-install.json",
+    )
     for pattern in patterns:
         for path in sorted(skills_dir.glob(pattern)):
             if path in seen or not path.is_file():
@@ -1178,6 +1221,10 @@ def remove_existing_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def unique_sibling_path(path: Path, label: str) -> Path:
+    return path.parent / f".{path.name}.{label}-{uuid4().hex}"
+
+
 def copy_bundled_skill(project: SkillProject, skill_dir: Path) -> list[str]:
     copied: list[str] = []
     for relative_path, source in iter_bundled_skill_files(project):
@@ -1206,30 +1253,6 @@ def fetch_json_url(
     if not isinstance(data, dict):
         raise InstallerError("PyPI metadata response was not a JSON object")
     return data
-
-
-def find_wheel_download_url(
-    project: SkillProject,
-    release_metadata: dict[str, object],
-) -> tuple[str, str]:
-    urls = release_metadata.get("urls")
-    if not isinstance(urls, list):
-        raise InstallerError("PyPI metadata did not contain release files")
-
-    wheels: list[tuple[str, str]] = []
-    for item in urls:
-        if not isinstance(item, dict):
-            continue
-        if item.get("packagetype") != "bdist_wheel":
-            continue
-        filename = item.get("filename")
-        url = item.get("url")
-        if isinstance(filename, str) and isinstance(url, str):
-            wheels.append((filename, url))
-
-    if not wheels:
-        raise InstallerError(f"no wheel distribution found on PyPI for {project.pypi_name}")
-    return sorted(wheels)[0]
 
 
 def published_pypi_versions(
@@ -1264,7 +1287,7 @@ def download_url(
     target: Path,
     *,
     timeout: float = PYPI_DOWNLOAD_TIMEOUT_SECONDS,
-    description: str = "PyPI wheel",
+    description: str = "download",
 ) -> Path:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response, target.open(
@@ -1278,6 +1301,80 @@ def download_url(
     return target
 
 
+def file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def wheel_distribution_version(wheel_path: Path) -> tuple[str, str]:
+    try:
+        distribution, version, _build, _tags = parse_wheel_filename(wheel_path.name)
+    except InvalidWheelFilename as error:
+        raise InstallerError(f"pip produced invalid wheel filename: {wheel_path}") from error
+    return str(distribution), str(version)
+
+
+def run_pip_wheel(
+    *,
+    package: str,
+    wheel_dir: Path,
+    editable: str | None = None,
+    cwd: Path | None = None,
+) -> Path:
+    target = editable if editable is not None else package
+    if target is None or not target.strip():
+        raise InstallerError("external wheel package must not be empty")
+    wheel_dir.mkdir(parents=True, exist_ok=True)
+    before = set(wheel_dir.glob("*.whl"))
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "wheel",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--no-deps",
+        "--wheel-dir",
+        str(wheel_dir),
+    ]
+    if editable is not None:
+        command.append("--editable")
+    command.append(target)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise InstallerError(f"failed to run pip wheel for {package}: {error}") from error
+    if completed.returncode != 0:
+        output = (completed.stderr or completed.stdout).strip()
+        detail = f": {output}" if output else ""
+        raise InstallerError(f"pip wheel failed for {package}{detail}")
+    wheels = sorted(set(wheel_dir.glob("*.whl")) - before)
+    if len(wheels) != 1:
+        raise InstallerError(
+            f"pip wheel for {package} produced {len(wheels)} wheels; expected 1"
+        )
+    return wheels[0]
+
+
+def build_pypi_wheel(
+    *,
+    package: str,
+    wheel_dir: Path,
+) -> tuple[Path, str]:
+    wheel_path = run_pip_wheel(package=package, wheel_dir=wheel_dir)
+    _distribution, version = wheel_distribution_version(wheel_path)
+    return wheel_path, version
+
+
 def download_pypi_wheel(
     project: SkillProject,
     version: str,
@@ -1286,14 +1383,28 @@ def download_pypi_wheel(
     version = version.strip()
     if not version:
         raise InstallerError("PyPI version must not be empty")
-    filename, url = find_wheel_download_url(
-        project,
-        fetch_json_url(
-            f"{project.pypi_base_url}/{project.pypi_name}/"
-            f"{urllib.parse.quote(version, safe='')}/json"
-        ),
+    wheel_path, _resolved_version = build_pypi_wheel(
+        package=f"{project.pypi_name}=={version}",
+        wheel_dir=download_dir,
     )
-    return download_url(url, download_dir / filename)
+    return wheel_path
+
+
+def build_external_wheel(
+    *,
+    package: str,
+    wheel_dir: Path,
+    editable: str | None = None,
+    cwd: Path | None = None,
+) -> tuple[Path, str, str, str]:
+    wheel_path = run_pip_wheel(
+        package=package,
+        wheel_dir=wheel_dir,
+        editable=editable,
+        cwd=cwd,
+    )
+    distribution, version = wheel_distribution_version(wheel_path)
+    return wheel_path, file_sha256(wheel_path), distribution, version
 
 
 def github_archive_url(source: GithubSource) -> str:
@@ -1431,6 +1542,195 @@ def copy_zip_skill_files(
         chmod_from_zip_info(target, info)
         copied.append(relative_path.as_posix())
     return copied
+
+
+def safe_external_wheel_path(value: str) -> PurePosixPath:
+    text = value.strip()
+    if not text:
+        raise InstallerError("external wheel path must not be empty")
+    path = PurePosixPath(text)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise InstallerError(f"unsafe external wheel path: {value}")
+    return path
+
+
+def safe_external_wheel_skill_path(project: SkillProject, value: str) -> Path:
+    text = value.strip()
+    if not text:
+        raise InstallerError("external wheel skill path must not be empty")
+    posix_path = PurePosixPath(text)
+    if posix_path.is_absolute() or any(
+        part in {"", ".", ".."} for part in posix_path.parts
+    ):
+        raise InstallerError(f"unsafe external wheel skill path: {value}")
+    path = Path(*posix_path.parts)
+    if is_installer_metadata_path(path) or path == project.manifest_relative_path:
+        raise InstallerError(f"external wheel skill path is reserved: {value}")
+    return path
+
+
+def copy_external_wheel_files(
+    project: SkillProject,
+    wheel_path: Path,
+    skill_dir: Path,
+    copies,
+    reserved_paths: set[str],
+    copied_paths: set[str],
+) -> list[WheelFileCopyRecord]:
+    copied: list[WheelFileCopyRecord] = []
+    try:
+        with zipfile.ZipFile(wheel_path) as archive:
+            names = {PurePosixPath(info.filename): info for info in archive.infolist()}
+            for rule in copies:
+                source = safe_external_wheel_path(rule.wheel_path)
+                target_relative = safe_external_wheel_skill_path(project, rule.skill_path)
+                target_key = target_relative.as_posix()
+                if target_key in copied_paths:
+                    raise InstallerError(
+                        "external wheel copy would overwrite installed skill file: "
+                        f"{target_key}"
+                    )
+                if target_key in reserved_paths and not rule.replace:
+                    raise InstallerError(
+                        "external wheel copy would overwrite installed skill file: "
+                        f"{target_key}"
+                    )
+                copied_paths.add(target_key)
+                reserved_paths.add(target_key)
+                info = names.get(source)
+                if info is None or info.is_dir():
+                    raise InstallerError(
+                        f"external wheel did not contain declared file: "
+                        f"{source.as_posix()}"
+                    )
+                target = skill_dir / target_relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(info))
+                chmod_from_zip_info(target, info)
+                if rule.executable:
+                    target.chmod((target.stat().st_mode & 0o777) | 0o755)
+                copied.append(
+                    WheelFileCopyRecord(
+                        wheel_path=source.as_posix(),
+                        skill_path=target_relative.as_posix(),
+                        executable=bool(rule.executable),
+                        replace=bool(rule.replace),
+                    )
+                )
+    except zipfile.BadZipFile as error:
+        raise InstallerError(
+            f"external wheel is not a valid zip file: {wheel_path}"
+        ) from error
+    return copied
+
+
+def validate_external_wheel_files(
+    project: SkillProject,
+    wheel_path: Path,
+    copies,
+) -> None:
+    try:
+        with zipfile.ZipFile(wheel_path) as archive:
+            names = {PurePosixPath(info.filename): info for info in archive.infolist()}
+            for rule in copies:
+                source = safe_external_wheel_path(rule.wheel_path)
+                safe_external_wheel_skill_path(project, rule.skill_path)
+                info = names.get(source)
+                if info is None or info.is_dir():
+                    raise InstallerError(
+                        f"external wheel did not contain declared file: "
+                        f"{source.as_posix()}"
+                    )
+    except zipfile.BadZipFile as error:
+        raise InstallerError(
+            f"external wheel is not a valid zip file: {wheel_path}"
+        ) from error
+
+
+def external_wheel_sources(project: SkillProject):
+    config = project.installer_config
+    if config is None:
+        config = load_packaged_installer_config(project)
+    return [] if config is None else config.installer.external_wheels
+
+
+def prepare_external_wheels(
+    project: SkillProject,
+    download_dir: Path,
+    *,
+    source_dir: Path | None = None,
+) -> list[PreparedExternalWheel]:
+    external_wheels = external_wheel_sources(project)
+    if not external_wheels:
+        return []
+
+    prepared: list[PreparedExternalWheel] = []
+    for external_wheel in external_wheels:
+        package = external_wheel.package.strip()
+        if not package:
+            raise InstallerError("external wheel package must not be empty")
+        editable = (
+            external_wheel.editable.strip()
+            if source_dir is not None and external_wheel.editable is not None
+            else None
+        )
+        if editable == "":
+            raise InstallerError(
+                f"external wheel editable path must not be empty for {package}"
+            )
+        wheel_path, digest, distribution, version = build_external_wheel(
+            package=package,
+            wheel_dir=download_dir,
+            editable=editable,
+            cwd=source_dir,
+        )
+        validate_external_wheel_files(project, wheel_path, external_wheel.copies)
+        prepared.append(
+            PreparedExternalWheel(
+                external_wheel=external_wheel,
+                wheel_path=wheel_path,
+                digest=digest,
+                distribution=distribution,
+                version=version,
+                editable=editable,
+            )
+        )
+    return prepared
+
+
+def copy_prepared_external_wheels(
+    project: SkillProject,
+    skill_dir: Path,
+    prepared_external_wheels: list[PreparedExternalWheel],
+    existing_skill_files: Iterable[str],
+) -> tuple[list[str], list[ExternalWheelInstallRecord]]:
+    copied_files: list[str] = []
+    records: list[ExternalWheelInstallRecord] = []
+    reserved_paths = set(existing_skill_files)
+    copied_paths: set[str] = set()
+    for prepared in prepared_external_wheels:
+        external_wheel = prepared.external_wheel
+        files = copy_external_wheel_files(
+            project,
+            prepared.wheel_path,
+            skill_dir,
+            external_wheel.copies,
+            reserved_paths,
+            copied_paths,
+        )
+        copied_files.extend(file.skill_path for file in files)
+        records.append(
+            ExternalWheelInstallRecord(
+                package=external_wheel.package.strip(),
+                editable=prepared.editable,
+                distribution=prepared.distribution,
+                version=prepared.version,
+                filename=prepared.wheel_path.name,
+                sha256=prepared.digest,
+                copies=tuple(files),
+            )
+        )
+    return copied_files, records
 
 
 def copy_github_archive_skill(
@@ -1644,9 +1944,19 @@ def write_manifest(
     source_url: str | None = None,
     source_ref: str | None = None,
     source_path: str | None = None,
+    external_wheels: list[ExternalWheelInstallRecord] | None = None,
+    write_path: Path | None = None,
+    manifest_path_value: Path | None = None,
+    installed_is_symlink: bool | None = None,
 ) -> None:
-    path = manifest_path(project, spec.skill_dir)
-    manifest_files = [] if spec.skill_dir.is_symlink() else [
+    path = write_path or manifest_path(project, spec.skill_dir)
+    manifest_value = manifest_path_value or path
+    is_symlink = (
+        spec.skill_dir.is_symlink()
+        if installed_is_symlink is None
+        else installed_is_symlink
+    )
+    manifest_files = [] if is_symlink else [
         project.manifest_relative_path.as_posix()
     ]
     data = {
@@ -1663,9 +1973,9 @@ def write_manifest(
         "hook_marker_end": spec.marker_end,
         "created_hook_file": created_hook_file,
         "created_dirs": [str(path) for path in created_dirs],
-        "files": sorted(files + manifest_files),
+        "files": sorted(set(files + manifest_files)),
         "install_mode": install_mode,
-        "manifest_path": str(path),
+        "manifest_path": str(manifest_value),
     }
     if project.source_skill_name is not None:
         data["source_skill_name"] = project.source_skill_name
@@ -1679,11 +1989,39 @@ def write_manifest(
         data["source_ref"] = source_ref
     if source_path is not None:
         data["source_path"] = source_path
+    if external_wheels:
+        data["external_wheels"] = [
+            {
+                "source_type": "pip_wheel",
+                "package": wheel.package,
+                **({"editable": wheel.editable} if wheel.editable is not None else {}),
+                "distribution": wheel.distribution,
+                "version": wheel.version,
+                "resolution": "python -m pip wheel",
+                "wheel": {
+                    "filename": wheel.filename,
+                    "sha256": wheel.sha256,
+                },
+                "copies": [
+                    {
+                        "wheel_path": copy.wheel_path,
+                        "skill_path": copy.skill_path,
+                        "executable": copy.executable,
+                        "replace": copy.replace,
+                    }
+                    for copy in wheel.copies
+                ],
+            }
+            for wheel in external_wheels
+        ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def sibling_manifest_candidates(skill_parent: Path) -> Iterable[Path]:
+    yield from skill_parent.glob("*/.*-install.json")
+    # Temporary compatibility for very early installs. Remove no earlier than
+    # 2027-01-01.
     yield from skill_parent.glob("*/scripts/.*-install.json")
     yield from skill_parent.glob(".*-install.json")
 
@@ -1723,6 +2061,7 @@ def sibling_created_ownership(
 def validate_install_source_selection(
     *,
     editable: bool = False,
+    pypi: bool = False,
     pypi_version: str | None = None,
     wheel_path: Path | None = None,
     github_source: GithubSource | None = None,
@@ -1731,6 +2070,7 @@ def validate_install_source_selection(
         name
         for name, enabled in (
             ("--editable", editable),
+            ("--pypi", pypi),
             ("--pypi-version", pypi_version is not None),
             ("--wheel-file", wheel_path is not None),
             ("--github-url", github_source is not None),
@@ -1741,18 +2081,33 @@ def validate_install_source_selection(
         raise InstallerError(f"{', '.join(selected)} cannot be combined")
 
 
-def install_target(
+def install_source_path(
+    *,
+    install_mode: str,
+    pypi_wheel_path: Path | None,
+    github_source: GithubSource | None,
+) -> str | None:
+    if github_source is not None and github_source.path is not None:
+        return github_source.path.as_posix()
+    if install_mode == "wheel" and pypi_wheel_path is not None:
+        return str(pypi_wheel_path)
+    return None
+
+
+def stage_install_target(
     project: SkillProject,
     spec: TargetSpec,
     *,
     force: bool = False,
     editable: bool = False,
     editable_source_dir: Path | None = None,
+    external_wheel_source_dir: Path | None = None,
     pypi_version: str | None = None,
     pypi_wheel_path: Path | None = None,
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
-) -> InstallResult:
+    transaction_created_dirs: Iterable[Path] = (),
+) -> StagedInstall:
     effective_editable = editable or editable_source_dir is not None
     validate_install_source_selection(
         editable=effective_editable,
@@ -1762,11 +2117,14 @@ def install_target(
     )
 
     skill_exists = spec.skill_dir.exists() or spec.skill_dir.is_symlink()
-    previous_manifest = read_manifest(project, spec.skill_dir) if skill_exists else None
+    previous_manifest_entry = (
+        read_manifest_with_path(project, spec.skill_dir) if skill_exists else None
+    )
+    previous_manifest = (
+        None if previous_manifest_entry is None else previous_manifest_entry[0]
+    )
     previous_manifest_file = (
-        manifest_path(project, spec.skill_dir)
-        if skill_exists and previous_manifest is not None
-        else None
+        None if previous_manifest_entry is None else previous_manifest_entry[1]
     )
     previous_version = manifest_package_version(previous_manifest)
     package_version = (
@@ -1807,12 +2165,14 @@ def install_target(
         raise InstallerError(
             f"refusing to replace unowned skill directory: {spec.skill_dir}"
         )
-
     created_dirs = [
         Path(path)
         for path in (previous_manifest or {}).get("created_dirs", [])
         if isinstance(path, str)
     ]
+    for directory in transaction_created_dirs:
+        if directory not in created_dirs:
+            created_dirs.append(directory)
     sibling_created_dirs, sibling_created_hook_file = sibling_created_ownership(
         spec,
         skill_name=project.skill_name,
@@ -1827,56 +2187,104 @@ def install_target(
         or (previous_created_hook_file is None and not spec.hook_path.exists())
     )
 
-    if skill_exists:
-        remove_existing_path(spec.skill_dir)
-    if previous_manifest_file is not None:
-        previous_manifest_file.unlink(missing_ok=True)
-
+    staging_created_dirs = missing_parent_dirs(spec.skill_dir)
     remember_created_dirs(created_dirs, spec.skill_dir)
-    if pypi_version is not None or pypi_wheel_path is not None:
-        if pypi_wheel_path is None:
-            raise InstallerError("missing PyPI wheel for requested install source")
-        spec.skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_files = copy_pypi_wheel_skill(project, pypi_wheel_path, spec.skill_dir)
-    elif github_source is not None:
-        spec.skill_dir.mkdir(parents=True, exist_ok=True)
-        if github_archive_path is None:
-            raise InstallerError("missing GitHub archive for requested install source")
-        skill_files = copy_github_archive_skill(
-            project,
-            github_archive_path,
-            spec.skill_dir,
-            github_source.path,
+    staging_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".{spec.skill_dir.name}.install-",
+            dir=spec.skill_dir.parent,
         )
-    elif source_dir is not None:
-        spec.skill_dir.parent.mkdir(parents=True, exist_ok=True)
-        skill_files = symlink_local_skill(project, spec.skill_dir, source_dir)
-    else:
-        spec.skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_files = copy_bundled_skill(project, spec.skill_dir)
-
-    remember_created_dirs(created_dirs, spec.hook_path)
-    install_hook(spec)
-    write_manifest(
-        project,
-        spec,
-        files=skill_files,
-        created_dirs=created_dirs,
-        created_hook_file=created_hook_file,
-        package_version=package_version,
-        install_mode=install_mode,
-        source_dir=source_dir,
-        source_url=github_source.url if github_source is not None else None,
-        source_ref=github_source.ref if github_source is not None else None,
-        source_path=(
-            github_source.path.as_posix()
-            if github_source is not None and github_source.path is not None
-            else str(pypi_wheel_path)
-            if install_mode == "wheel" and pypi_wheel_path is not None
-            else None
-        ),
     )
-    return InstallResult(
+    staged_skill_dir = staging_root / spec.skill_dir.name
+    sidecar_manifest_path = spec.skill_dir.parent / project.sidecar_manifest_name
+    staged_sidecar_manifest_path: Path | None = None
+    external_wheels_temp_dir = tempfile.TemporaryDirectory(
+        prefix="agent-skill-installer-external-wheels-"
+    )
+    try:
+        installed_is_symlink = source_dir is not None
+        prepared_external_wheels = (
+            []
+            if installed_is_symlink
+            else prepare_external_wheels(
+                project,
+                Path(external_wheels_temp_dir.name),
+                source_dir=external_wheel_source_dir,
+            )
+        )
+
+        if pypi_version is not None or pypi_wheel_path is not None:
+            if pypi_wheel_path is None:
+                raise InstallerError("missing PyPI wheel for requested install source")
+            staged_skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_files = copy_pypi_wheel_skill(
+                project,
+                pypi_wheel_path,
+                staged_skill_dir,
+            )
+        elif github_source is not None:
+            staged_skill_dir.mkdir(parents=True, exist_ok=True)
+            if github_archive_path is None:
+                raise InstallerError("missing GitHub archive for requested install source")
+            skill_files = copy_github_archive_skill(
+                project,
+                github_archive_path,
+                staged_skill_dir,
+                github_source.path,
+            )
+        elif source_dir is not None:
+            skill_files = symlink_local_skill(project, staged_skill_dir, source_dir)
+        else:
+            staged_skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_files = copy_bundled_skill(project, staged_skill_dir)
+
+        external_wheel_files, external_wheel_records = copy_prepared_external_wheels(
+            project,
+            staged_skill_dir,
+            prepared_external_wheels,
+            skill_files,
+        )
+        skill_files.extend(external_wheel_files)
+
+        remember_created_dirs(created_dirs, spec.hook_path)
+        if installed_is_symlink:
+            staged_sidecar_manifest_path = (
+                staging_root / project.sidecar_manifest_name
+            )
+            staged_manifest_path = staged_sidecar_manifest_path
+            final_manifest_path = sidecar_manifest_path
+        else:
+            staged_manifest_path = staged_skill_dir / project.manifest_relative_path
+            final_manifest_path = spec.skill_dir / project.manifest_relative_path
+        write_manifest(
+            project,
+            spec,
+            files=skill_files,
+            created_dirs=created_dirs,
+            created_hook_file=created_hook_file,
+            package_version=package_version,
+            install_mode=install_mode,
+            source_dir=source_dir,
+            source_url=github_source.url if github_source is not None else None,
+            source_ref=github_source.ref if github_source is not None else None,
+            source_path=install_source_path(
+                install_mode=install_mode,
+                pypi_wheel_path=pypi_wheel_path,
+                github_source=github_source,
+            ),
+            external_wheels=external_wheel_records,
+            write_path=staged_manifest_path,
+            manifest_path_value=final_manifest_path,
+            installed_is_symlink=installed_is_symlink,
+        )
+    except Exception:
+        remove_existing_path(staging_root)
+        remove_created_dirs(staging_created_dirs)
+        raise
+    finally:
+        external_wheels_temp_dir.cleanup()
+
+    result = InstallResult(
         action="install",
         agent=spec.agent,
         scope=spec.scope,
@@ -1890,18 +2298,264 @@ def install_target(
         source_dir=source_dir,
         source_url=github_source.url if github_source is not None else None,
         source_ref=github_source.ref if github_source is not None else None,
-        source_path=(
-            github_source.path.as_posix()
-            if github_source is not None and github_source.path is not None
-            else str(pypi_wheel_path)
-            if install_mode == "wheel" and pypi_wheel_path is not None
-            else None
+        source_path=install_source_path(
+            install_mode=install_mode,
+            pypi_wheel_path=pypi_wheel_path,
+            github_source=github_source,
         ),
+    )
+    return StagedInstall(
+        project=project,
+        spec=spec,
+        staging_root=staging_root,
+        staged_skill_dir=staged_skill_dir,
+        staged_sidecar_manifest_path=staged_sidecar_manifest_path,
+        sidecar_manifest_path=sidecar_manifest_path,
+        previous_manifest_file=previous_manifest_file,
+        skill_exists=skill_exists,
+        result=result,
     )
 
 
+def cleanup_staged_installs(staged_installs: Iterable[StagedInstall]) -> None:
+    for staged in staged_installs:
+        remove_existing_path(staged.staging_root)
+
+
+def staged_install_label(staged: StagedInstall) -> str:
+    return f"{staged.project.skill_name} ({staged.spec.agent} {staged.spec.scope})"
+
+
+def cleanup_staged_install_errors(staged_installs: Iterable[StagedInstall]) -> list[str]:
+    errors: list[str] = []
+    for staged in staged_installs:
+        try:
+            remove_existing_path(staged.staging_root)
+        except Exception as error:
+            errors.append(
+                f"{staged_install_label(staged)}: remove staging directory "
+                f"{staged.staging_root} failed: {error}"
+            )
+    return errors
+
+
+def record_recovery_error(
+    errors: list[str],
+    subject: str,
+    action: str,
+    callback,
+) -> None:
+    try:
+        callback()
+    except Exception as error:
+        errors.append(f"{subject}: {action} failed: {error}")
+
+
+def recovery_error_details(errors: list[str]) -> str:
+    if len(errors) == 1:
+        return errors[0]
+    return "\n" + "\n".join(f"- {error}" for error in errors)
+
+
+def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[InstallResult]:
+    staged_list = list(staged_installs)
+    backup_skill_dirs: dict[Path, Path] = {}
+    backup_sidecar_manifest_paths: dict[Path, Path] = {}
+    skill_swapped: set[Path] = set()
+    sidecar_swapped: set[Path] = set()
+    hook_snapshots: dict[Path, str | None] = {}
+    staged_by_skill_dir = {staged.spec.skill_dir: staged for staged in staged_list}
+    staged_by_sidecar = {staged.sidecar_manifest_path: staged for staged in staged_list}
+
+    for staged in staged_list:
+        hook_path = staged.spec.hook_path
+        if hook_path not in hook_snapshots:
+            hook_snapshots[hook_path] = (
+                hook_path.read_text()
+                if hook_path.exists()
+                else None
+            )
+
+    try:
+        for staged in staged_list:
+            if staged.skill_exists:
+                backup = unique_sibling_path(staged.spec.skill_dir, "previous")
+                staged.spec.skill_dir.rename(backup)
+                backup_skill_dirs[staged.spec.skill_dir] = backup
+            if (
+                staged.staged_sidecar_manifest_path is not None
+                or staged.previous_manifest_file == staged.sidecar_manifest_path
+            ) and staged.sidecar_manifest_path.exists():
+                backup = unique_sibling_path(staged.sidecar_manifest_path, "previous")
+                staged.sidecar_manifest_path.rename(backup)
+                backup_sidecar_manifest_paths[staged.sidecar_manifest_path] = backup
+
+        for staged in staged_list:
+            staged.staged_skill_dir.rename(staged.spec.skill_dir)
+            skill_swapped.add(staged.spec.skill_dir)
+            if staged.staged_sidecar_manifest_path is not None:
+                staged.staged_sidecar_manifest_path.rename(staged.sidecar_manifest_path)
+                sidecar_swapped.add(staged.sidecar_manifest_path)
+
+        for staged in staged_list:
+            install_hook(staged.spec)
+    except Exception as install_error:
+        rollback_errors: list[str] = []
+        for hook_path, hook_text in hook_snapshots.items():
+            def restore_hook(
+                hook_path: Path = hook_path,
+                hook_text: str | None = hook_text,
+            ) -> None:
+                if hook_text is None:
+                    if hook_path.exists():
+                        hook_path.unlink()
+                else:
+                    hook_path.parent.mkdir(parents=True, exist_ok=True)
+                    hook_path.write_text(hook_text)
+
+            record_recovery_error(
+                rollback_errors,
+                f"hook {hook_path}",
+                "restore hook",
+                restore_hook,
+            )
+        for sidecar_path in sidecar_swapped:
+            staged = staged_by_sidecar.get(sidecar_path)
+            subject = staged_install_label(staged) if staged else str(sidecar_path)
+
+            def remove_sidecar(sidecar_path: Path = sidecar_path) -> None:
+                if sidecar_path.exists():
+                    sidecar_path.unlink()
+
+            record_recovery_error(
+                rollback_errors,
+                subject,
+                f"remove new sidecar manifest {sidecar_path}",
+                remove_sidecar,
+            )
+        for skill_dir in skill_swapped:
+            staged = staged_by_skill_dir.get(skill_dir)
+            subject = staged_install_label(staged) if staged else str(skill_dir)
+
+            def remove_skill(skill_dir: Path = skill_dir) -> None:
+                if skill_dir.exists() or skill_dir.is_symlink():
+                    remove_existing_path(skill_dir)
+
+            record_recovery_error(
+                rollback_errors,
+                subject,
+                f"remove new skill directory {skill_dir}",
+                remove_skill,
+            )
+        for skill_dir, backup in backup_skill_dirs.items():
+            staged = staged_by_skill_dir.get(skill_dir)
+            subject = staged_install_label(staged) if staged else str(skill_dir)
+
+            def restore_skill(
+                skill_dir: Path = skill_dir,
+                backup: Path = backup,
+            ) -> None:
+                if backup.exists() or backup.is_symlink():
+                    backup.rename(skill_dir)
+
+            record_recovery_error(
+                rollback_errors,
+                subject,
+                f"restore previous skill directory from {backup}",
+                restore_skill,
+            )
+        for sidecar_path, backup in backup_sidecar_manifest_paths.items():
+            staged = staged_by_sidecar.get(sidecar_path)
+            subject = staged_install_label(staged) if staged else str(sidecar_path)
+
+            def restore_sidecar(
+                sidecar_path: Path = sidecar_path,
+                backup: Path = backup,
+            ) -> None:
+                if backup.exists():
+                    backup.rename(sidecar_path)
+
+            record_recovery_error(
+                rollback_errors,
+                subject,
+                f"restore previous sidecar manifest from {backup}",
+                restore_sidecar,
+            )
+        rollback_errors.extend(cleanup_staged_install_errors(staged_list))
+        if rollback_errors:
+            raise InstallerError(
+                "install failed and rollback was incomplete: "
+                f"{recovery_error_details(rollback_errors)}. "
+                f"Original error: {install_error}"
+            ) from install_error
+        raise InstallerError(
+            f"install failed; rolled back changes: {install_error}"
+        ) from install_error
+
+    post_cleanup_errors: list[str] = []
+    for skill_dir, backup in backup_skill_dirs.items():
+        staged = staged_by_skill_dir.get(skill_dir)
+        subject = staged_install_label(staged) if staged else str(skill_dir)
+        record_recovery_error(
+            post_cleanup_errors,
+            subject,
+            f"remove previous skill backup {backup}",
+            lambda backup=backup: remove_existing_path(backup),
+        )
+    for sidecar_path, backup in backup_sidecar_manifest_paths.items():
+        staged = staged_by_sidecar.get(sidecar_path)
+        subject = staged_install_label(staged) if staged else str(sidecar_path)
+        record_recovery_error(
+            post_cleanup_errors,
+            subject,
+            f"remove previous sidecar manifest backup {backup}",
+            lambda backup=backup: backup.unlink(missing_ok=True),
+        )
+    post_cleanup_errors.extend(cleanup_staged_install_errors(staged_list))
+    if post_cleanup_errors:
+        subject = "skill is" if len(staged_list) == 1 else "skills are"
+        raise InstallerError(
+            f"{subject} live, but post-install cleanup failed: "
+            f"{recovery_error_details(post_cleanup_errors)}"
+        )
+
+    return [staged.result for staged in staged_list]
+
+
+def install_target(
+    project: SkillProject,
+    spec: TargetSpec,
+    *,
+    force: bool = False,
+    editable: bool = False,
+    editable_source_dir: Path | None = None,
+    external_wheel_source_dir: Path | None = None,
+    pypi_version: str | None = None,
+    pypi_wheel_path: Path | None = None,
+    github_source: GithubSource | None = None,
+    github_archive_path: Path | None = None,
+) -> InstallResult:
+    staged = stage_install_target(
+        project,
+        spec,
+        force=force,
+        editable=editable,
+        editable_source_dir=editable_source_dir,
+        external_wheel_source_dir=external_wheel_source_dir,
+        pypi_version=pypi_version,
+        pypi_wheel_path=pypi_wheel_path,
+        github_source=github_source,
+        github_archive_path=github_archive_path,
+    )
+    return commit_staged_installs([staged])[0]
+
+
 def remove_created_dirs(paths: Iterable[object]) -> None:
-    directories = [Path(path) for path in paths if isinstance(path, str)]
+    directories = [
+        Path(path)
+        for path in paths
+        if isinstance(path, str | Path)
+    ]
     for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
         try:
             directory.rmdir()
@@ -1913,8 +2567,11 @@ def remove_created_dirs(paths: Iterable[object]) -> None:
 
 def uninstall_target(project: SkillProject, spec: TargetSpec) -> InstallResult:
     skill_exists = spec.skill_dir.exists() or spec.skill_dir.is_symlink()
-    manifest = read_manifest(project, spec.skill_dir) if skill_exists else None
-    manifest_file = manifest_path(project, spec.skill_dir) if manifest is not None else None
+    manifest_entry = (
+        read_manifest_with_path(project, spec.skill_dir) if skill_exists else None
+    )
+    manifest = None if manifest_entry is None else manifest_entry[0]
+    manifest_file = None if manifest_entry is None else manifest_entry[1]
     package_version = manifest_package_version(manifest)
     if skill_exists and manifest is None:
         raise InstallerError(
@@ -1960,6 +2617,7 @@ def install(
     claude_home: Path | None = None,
     force: bool = False,
     editable: bool = False,
+    pypi: bool = False,
     pypi_version: str | None = None,
     github_url: str | None = None,
     github_ref: str | None = None,
@@ -1974,6 +2632,7 @@ def install(
     )
     validate_install_source_selection(
         editable=editable,
+        pypi=pypi,
         pypi_version=pypi_version,
         github_source=github_source,
     )
@@ -1982,39 +2641,79 @@ def install(
 
     def install_targets(
         pypi_wheel_path: Path | None = None,
+        pypi_version_override: str | None = None,
         github_archive_path: Path | None = None,
     ) -> list[InstallResult]:
-        return [
-            install_target(
+        staged_installs: list[StagedInstall] = []
+        commit_started = False
+        created_dirs: list[Path] = []
+        for agent in selected_agents:
+            spec = target_spec(
                 project,
-                target_spec(
-                    project,
-                    agent,
-                    scope,
-                    repo=repo,
-                    home=home,
-                    codex_home=codex_home,
-                    claude_home=claude_home,
-                ),
-                force=force,
-                editable=editable,
-                pypi_version=pypi_version,
-                pypi_wheel_path=pypi_wheel_path,
-                github_source=github_source,
-                github_archive_path=github_archive_path,
+                agent,
+                scope,
+                repo=repo,
+                home=home,
+                codex_home=codex_home,
+                claude_home=claude_home,
             )
-            for agent in selected_agents
-        ]
+            for directory in missing_parent_dirs(spec.skill_dir):
+                if directory not in created_dirs:
+                    created_dirs.append(directory)
+        try:
+            for agent in selected_agents:
+                staged_installs.append(
+                    stage_install_target(
+                        project,
+                        target_spec(
+                            project,
+                            agent,
+                            scope,
+                            repo=repo,
+                            home=home,
+                            codex_home=codex_home,
+                            claude_home=claude_home,
+                        ),
+                        force=force,
+                        editable=editable,
+                        pypi_version=pypi_version_override or pypi_version,
+                        pypi_wheel_path=pypi_wheel_path,
+                        github_source=github_source,
+                        github_archive_path=github_archive_path,
+                        transaction_created_dirs=created_dirs,
+                    )
+                )
+            commit_started = True
+            return commit_staged_installs(staged_installs)
+        except Exception:
+            if not commit_started:
+                cleanup_staged_installs(staged_installs)
+                remove_created_dirs(created_dirs)
+            raise
 
-    if pypi_version is None and github_source is None:
+    if not pypi and pypi_version is None and github_source is None:
         return install_targets()
 
-    if pypi_version is not None:
+    if pypi or pypi_version is not None:
         with tempfile.TemporaryDirectory(
             prefix="agent-skill-installer-pypi-"
         ) as temp_dir:
-            wheel_path = download_pypi_wheel(project, pypi_version, Path(temp_dir))
-            return install_targets(pypi_wheel_path=wheel_path)
+            if pypi_version is not None:
+                wheel_path = download_pypi_wheel(
+                    project,
+                    pypi_version,
+                    Path(temp_dir),
+                )
+                resolved_version = pypi_version
+            else:
+                wheel_path, resolved_version = build_pypi_wheel(
+                    package=project.pypi_name,
+                    wheel_dir=Path(temp_dir),
+                )
+            return install_targets(
+                pypi_wheel_path=wheel_path,
+                pypi_version_override=resolved_version,
+            )
 
     assert github_source is not None
     with tempfile.TemporaryDirectory(prefix="agent-skill-installer-github-") as temp_dir:

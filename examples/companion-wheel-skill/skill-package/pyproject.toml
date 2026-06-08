@@ -3,10 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wheel-agent-skill"
+name = "companion-wheel-skill"
 version = "0.1.0"
-description = "Example agent skill packaged as a wheel"
-readme = "README.md"
+description = "Example skill that replaces a launcher from a companion wheel"
 requires-python = ">=3.10"
 license = "MIT"
 

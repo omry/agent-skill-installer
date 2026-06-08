@@ -28,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
   "omegaconf>=2.3.0",
+  "packaging>=24.0",
   "textual>=0.89.0",
 ]
 

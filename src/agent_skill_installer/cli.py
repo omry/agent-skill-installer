@@ -14,13 +14,11 @@ from .installer import (
     InstallerError,
     InstallResult,
     SkillProject,
-    compare_versions,
     default_repo_path,
     describe_target,
     find_repo_root,
     install_source_metadata,
     inspect_installations,
-    published_pypi_versions,
     running_on_tty,
 )
 
@@ -55,7 +53,6 @@ TEXTUAL_APP_TITLE = "Agent Skill Installer"
 CommandPreviewBuilder = Callable[[object], str | None]
 PromptValidator = Callable[[str], str | None]
 PROMPT_BACK = "__agent_skill_installer_prompt_back__"
-NO_PYPI_VERSION_CHOICE = "__agent_skill_installer_no_pypi_versions__"
 DEFAULT_SUBMIT_LABEL = "Continue"
 DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE = "Complete the selections to build the no-UI command."
 ACTION_BUTTON_IDS = ("continue", "back", "quit")
@@ -2024,6 +2021,15 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
                 ),
             )
             subparser.add_argument(
+                "--pypi",
+                action="store_true",
+                default=None,
+                help=(
+                    f"Resolve the latest compatible {project.pypi_name} wheel "
+                    "with pip and install its bundled skill files."
+                ),
+            )
+            subparser.add_argument(
                 "--pypi-version",
                 metavar="VERSION",
                 help=(
@@ -2080,8 +2086,8 @@ def install_source_choices(project: SkillProject) -> list[dict[str, str]]:
         },
         {
             "name": (
-                "PyPI wheel version "
-                "(requires network; choose published or manual version)"
+                "PyPI wheel "
+                "(requires network; pip resolves compatible package)"
             ),
             "value": "pypi",
         },
@@ -2116,51 +2122,6 @@ def install_source_choices(project: SkillProject) -> list[dict[str, str]]:
         },
         *packaged_choices,
     ]
-
-
-def pypi_version_choice_name(
-    version: str,
-    *,
-    latest_version: str | None,
-    bundled_version: str,
-) -> str:
-    details: list[str] = []
-    if version == latest_version:
-        details.append("latest")
-        if compare_versions(version, bundled_version) > 0:
-            details.append(f"newer than bundled {bundled_version}")
-    if compare_versions(version, bundled_version) == 0:
-        details.append("same as bundled")
-    if not details:
-        return version
-    return f"{version} ({', '.join(details)})"
-
-
-def pypi_version_choices(
-    project: SkillProject,
-    *,
-    bundled_version: str | None = None,
-    limit: int = 10,
-) -> list[dict[str, object]]:
-    bundled_version = bundled_version or project.version
-    try:
-        versions = published_pypi_versions(project, limit=limit)
-    except InstallerError:
-        versions = []
-
-    latest_version = versions[0] if versions else None
-    choices = [
-        {
-            "name": pypi_version_choice_name(
-                version,
-                latest_version=latest_version,
-                bundled_version=bundled_version,
-            ),
-            "value": version,
-        }
-        for version in versions
-    ]
-    return choices
 
 
 def quote_command(parts: Sequence[object]) -> str:
@@ -2253,6 +2214,7 @@ def build_no_ui_command(
     agent: str | None = None,
     scope: str | None = None,
     editable: bool | None = None,
+    pypi: bool | None = None,
     pypi_version: str | None = None,
     github_url: str | None = None,
     github_ref: str | None = None,
@@ -2281,6 +2243,7 @@ def build_no_ui_command(
                     ],
                     agent=agent,
                     editable=editable,
+                    pypi=pypi,
                     pypi_version=pypi_version,
                     github_url=github_url,
                     github_ref=github_ref,
@@ -2304,6 +2267,11 @@ def build_no_ui_command(
         editable
         if editable is not None
         else bool(getattr(args, "editable", False))
+    )
+    pypi = (
+        pypi
+        if pypi is not None
+        else bool(getattr(args, "pypi", False))
     )
     pypi_version = (
         pypi_version
@@ -2333,6 +2301,8 @@ def build_no_ui_command(
             parts.append("--force")
         if editable:
             parts.append("--editable")
+        elif pypi:
+            parts.append("--pypi")
         elif pypi_version:
             parts.extend(["--pypi-version", pypi_version])
         elif github_url:
@@ -2879,6 +2849,7 @@ def complete_with_ui(
                 [
                     "command",
                     "editable",
+                    "pypi",
                     "pypi_version",
                     "github_url",
                     "github_ref",
@@ -2904,6 +2875,7 @@ def complete_with_ui(
         if (
             args.command == "install"
             and getattr(args, "editable", None) is None
+            and getattr(args, "pypi", None) is None
             and getattr(args, "pypi_version", None) is None
             and getattr(args, "github_url", None) is None
         ):
@@ -2915,9 +2887,7 @@ def complete_with_ui(
                         project,
                         args,
                         editable=source_value == "editable",
-                        pypi_version=(
-                            project.version if source_value == "pypi" else None
-                        ),
+                        pypi=source_value == "pypi",
                         github_url=(
                             f"https://github.com/OWNER/{project.skill_name}"
                             if source_value == "github"
@@ -2926,7 +2896,14 @@ def complete_with_ui(
                     )
 
                 install_source = prompt_step(
-                    ["editable", "pypi_version", "github_url", "github_ref", "github_path"],
+                    [
+                        "editable",
+                        "pypi",
+                        "pypi_version",
+                        "github_url",
+                        "github_ref",
+                        "github_path",
+                    ],
                     lambda: prompter.select(
                         f"Install source for {project.skill_name}",
                         source_choices,
@@ -2937,55 +2914,32 @@ def complete_with_ui(
                     continue
                 if install_source == "editable":
                     args.editable = True
+                    args.pypi = False
                     args.pypi_version = None
                     args.github_url = None
                     args.github_ref = None
                     args.github_path = None
                 elif install_source == "pypi":
                     args.editable = False
-                    args.pypi_version = ""
+                    args.pypi = True
+                    args.pypi_version = None
                     args.github_url = None
                     args.github_ref = None
                     args.github_path = None
                 elif install_source == "github":
                     args.editable = False
+                    args.pypi = False
                     args.pypi_version = None
                     args.github_url = ""
                 else:
                     args.editable = False
+                    args.pypi = False
                     args.pypi_version = None
                     args.github_url = None
                     args.github_ref = None
                     args.github_path = None
                 continue
             args.editable = False
-
-        if args.command == "install" and getattr(args, "pypi_version", None) == "":
-            version_choices = pypi_version_choices(project)
-            default_pypi_version = (
-                version_choices[0]["value"] if version_choices else project.version
-            )
-
-            def pypi_version_preview(version: object) -> str | None:
-                return build_no_ui_command(
-                    project,
-                    args,
-                    pypi_version=str(version).strip() or default_pypi_version,
-                )
-
-            pypi_version = prompt_step(
-                ["pypi_version"],
-                lambda: prompter.version(
-                    "PyPI package version",
-                    default_pypi_version,
-                    version_choices,
-                    command_preview_builder=pypi_version_preview,
-                ),
-            )
-            if pypi_version == PROMPT_BACK:
-                continue
-            args.pypi_version = str(pypi_version).strip() or default_pypi_version
-            continue
 
         if args.command == "install" and getattr(args, "github_url", None) == "":
             def github_url_preview(url: object) -> str | None:
@@ -3229,6 +3183,8 @@ def complete_with_ui(
         args.claude_home = None
     if not hasattr(args, "editable") or args.editable is None:
         args.editable = False
+    if not hasattr(args, "pypi") or args.pypi is None:
+        args.pypi = False
     if not hasattr(args, "pypi_version"):
         args.pypi_version = None
     if not hasattr(args, "github_url"):
@@ -3254,6 +3210,8 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
         args.force = False
     if not hasattr(args, "editable") or args.editable is None:
         args.editable = False
+    if not hasattr(args, "pypi") or args.pypi is None:
+        args.pypi = False
     if not hasattr(args, "pypi_version"):
         args.pypi_version = None
     if not hasattr(args, "github_url"):
@@ -3269,6 +3227,7 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
             name
             for name, enabled in (
                 ("--editable", args.editable),
+                ("--pypi", args.pypi),
                 ("--pypi-version", args.pypi_version is not None),
                 ("--github-url", args.github_url is not None),
             )
@@ -3407,6 +3366,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 claude_home=args.claude_home,
                 force=args.force,
                 editable=args.editable,
+                pypi=args.pypi,
                 pypi_version=args.pypi_version,
                 github_url=args.github_url,
                 github_ref=args.github_ref,
@@ -3439,6 +3399,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     claude_home=args.claude_home,
                     force=args.force,
                     editable=args.editable,
+                    pypi=args.pypi,
                     pypi_version=args.pypi_version,
                     github_url=args.github_url,
                     github_ref=args.github_ref,
@@ -3470,7 +3431,12 @@ def should_use_ui(args: argparse.Namespace, explicit_no_ui: bool) -> bool:
 
 
 def print_pypi_install_attempt(project: SkillProject, args: argparse.Namespace) -> None:
-    if args.command != "install" or getattr(args, "pypi_version", None) is None:
+    if args.command != "install":
+        return
+    if getattr(args, "pypi", False):
+        print(f"Installing from PyPI: {project.pypi_name}", file=sys.stderr)
+        return
+    if getattr(args, "pypi_version", None) is None:
         return
     print(
         f"Installing from PyPI: {project.pypi_name}=={args.pypi_version}",
@@ -3500,6 +3466,8 @@ def prepare_args(args: argparse.Namespace) -> None:
         args.claude_home = None
     if not hasattr(args, "editable") or args.editable is None:
         args.editable = False
+    if not hasattr(args, "pypi") or args.pypi is None:
+        args.pypi = False
     if not hasattr(args, "pypi_version"):
         args.pypi_version = None
     if not hasattr(args, "github_url"):

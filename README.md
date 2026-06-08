@@ -45,8 +45,8 @@ agent-skill-installer --no-ui install \
 | --- | --- |
 | Installing a skill | [Installing Skills](https://github.com/omry/agent-skill-installer/blob/main/docs/installing-skills.md) |
 | Writing a skill directory or GitHub skill repo | [Authoring Skills](https://github.com/omry/agent-skill-installer/blob/main/docs/authoring-skills.md) |
-| Publishing a skill on PyPI or embedding the installer API | [Packaging And API](https://github.com/omry/agent-skill-installer/blob/main/docs/packaging-and-api.md) |
-| Publishing a skill that installs platform-specific variants | [Platform-Specific Skills](https://github.com/omry/agent-skill-installer/blob/main/docs/platform-specific-skills.md) |
+| Publishing a skill on PyPI or with platform wheels | [Packaging](https://github.com/omry/agent-skill-installer/blob/main/docs/packaging.md) |
+| Embedding the installer API or exposing a wrapper CLI | [API And Wrapper CLI](https://github.com/omry/agent-skill-installer/blob/main/docs/api-and-wrapper-cli.md) |
 | Maintaining releases | [Maintainer Guide](https://github.com/omry/agent-skill-installer/blob/main/docs/maintainer-guide.md) |
 
 ## Examples
@@ -57,7 +57,5 @@ The [`examples/`](https://github.com/omry/agent-skill-installer/blob/main/exampl
   skill and exposes a project-specific wrapper command.
 - `examples/wheel-skill/` is a plain wheel-packaged skill for generic
   `--wheel-file` installs.
-- `examples/platform-specific-skill/` demonstrates a selector wheel that
-  resolves to a platform-specific skill payload.
 - `examples/api-install/` shows direct Python API usage without a wrapper
   console script.

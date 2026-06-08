@@ -7,7 +7,7 @@ import pytest
 from agent_skill_installer.config import (
     InstallerConfigError,
     load_installer_config,
-    load_platform_selector_config,
+    load_installer_config_text,
 )
 
 
@@ -143,17 +143,26 @@ installer:
     )
 
 
-def test_loads_platform_specific_selector_metadata(tmp_path: Path) -> None:
-    config_path = write_config(
-        tmp_path / "agent-skill-selector.yaml",
+def test_loads_external_wheel_copy_rules_with_package_version_context() -> None:
+    config = load_installer_config_text(
         """
-platform_specific:
-  wheel: arbiter-skill-{os}-{arch}
-  local_path: dist/arbiter-skill-{os}-{arch}
+installer:
+  external_wheels:
+    - package: arbiter-client==${package.version}
+      editable: ../client
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+          executable: true
+          replace: true
 """,
+        package_version="2.0.0",
     )
 
-    config = load_platform_selector_config(config_path)
-
-    assert config.platform_specific.wheel == "arbiter-skill-{os}-{arch}"
-    assert config.platform_specific.local_path == "dist/arbiter-skill-{os}-{arch}"
+    external_wheel = config.installer.external_wheels[0]
+    assert external_wheel.package == "arbiter-client==2.0.0"
+    assert external_wheel.editable == "../client"
+    assert external_wheel.copies[0].wheel_path == "arbiter_client/bin/arbiter"
+    assert external_wheel.copies[0].skill_path == "bin/arbiter"
+    assert external_wheel.copies[0].executable is True
+    assert external_wheel.copies[0].replace is True

@@ -240,6 +240,6 @@ agent-skill-installer --no-ui install \
   --scope global
 ```
 
-Use the [Packaging And API](packaging-and-api.md) guide only when you want to
-ship the skill inside a Python wheel, expose a custom installer command, or call
-the installer from Python code.
+Use the [Packaging](packaging.md) guide when you want to ship the skill inside a
+Python wheel. Use [API And Wrapper CLI](api-and-wrapper-cli.md) when you want to
+expose a custom installer command or call the installer from Python code.

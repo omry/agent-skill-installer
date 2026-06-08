@@ -17,7 +17,7 @@ agent-skill-installer --no-ui install \
 ```
 
 The Python package files are only there to produce the wheel. The bundled skill
-files live in `src/wheel_agent_skill/_skill/`. The
+files live in `wheel_agent_skill/skill/`. The
 `agent-skill-installer.yaml` file is install-time metadata for configured
 discoverability text and schema-validated hook metadata; it is consumed from the
 wheel but not copied into the installed skill directory.

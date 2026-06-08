@@ -3,10 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wheel-agent-skill"
+name = "example-native-client"
 version = "0.1.0"
-description = "Example agent skill packaged as a wheel"
-readme = "README.md"
+description = "Example companion package that provides an executable"
 requires-python = ">=3.10"
 license = "MIT"
 

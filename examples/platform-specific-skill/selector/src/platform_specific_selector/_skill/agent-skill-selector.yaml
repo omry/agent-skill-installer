@@ -1,3 +1,0 @@
-platform_specific:
-  wheel: platform-specific-skill-{os}-{arch}
-  local_path: ../../../../targets/platform-specific-skill-{os}-{arch}/src/platform_specific_skill_{os}_{arch}/_skill

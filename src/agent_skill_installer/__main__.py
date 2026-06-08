@@ -4,13 +4,14 @@ import argparse
 from dataclasses import replace
 from email.parser import Parser
 import json
-import shutil
 import shlex
 import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Sequence
+
+from packaging.requirements import InvalidRequirement, Requirement
 
 from . import __version__
 from .cli import (
@@ -31,13 +32,8 @@ from .config import (
     CONFIG_FILE_NAME,
     InstallerConfig,
     InstallerConfigError,
-    PlatformSpecific,
-    PlatformSelectorConfig,
-    SELECTOR_FILE_NAME,
     load_installer_config,
     load_installer_config_text,
-    load_platform_selector_config,
-    load_platform_selector_config_text,
 )
 from .installer import (
     AGENTS,
@@ -47,21 +43,23 @@ from .installer import (
     InstallResult,
     InstallationStatus,
     SkillProject,
+    StagedInstall,
+    cleanup_staged_installs,
+    commit_staged_installs,
+    build_pypi_wheel,
     default_repo_path,
     discover_managed_installations,
     download_github_archive,
-    download_pypi_wheel,
     find_repo_root,
     github_archive_relative_path,
-    install_target,
     local_skill_source_for_candidate,
-    manifest_path,
+    missing_parent_dirs,
     normalize_agents,
     parse_github_url,
-    published_pypi_versions,
     read_manifest,
-    render_platform_template,
+    remove_created_dirs,
     running_on_tty,
+    stage_install_target,
     target_spec,
     validate_install_source_selection,
 )
@@ -75,7 +73,7 @@ RECENT_PYPI_KEY = "pypi_packages"
 RECENT_GITHUB_KEY = "github_urls"
 VALIDATED_PYPI_FIELDS = [
     "_validated_pypi_package",
-    "_validated_pypi_resolved_package",
+    "_validated_pypi_requirement",
     "_validated_pypi_version",
     "_validated_pypi_wheel_path",
     "_validated_pypi_project",
@@ -219,8 +217,8 @@ def build_parser() -> argparse.ArgumentParser:
     source = install.add_mutually_exclusive_group()
     source.add_argument(
         "--pypi-package",
-        metavar="NAME",
-        help="PyPI package containing a bundled agent skill.",
+        metavar="REQUIREMENT",
+        help="PyPI package requirement containing a bundled agent skill.",
     )
     source.add_argument(
         "--wheel-file",
@@ -242,11 +240,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help="Local repository or directory containing SKILL.md or skill/SKILL.md.",
-    )
-    install.add_argument(
-        "--pypi-version",
-        metavar="VERSION",
-        help="PyPI package version to install. Defaults to the latest wheel release.",
     )
     install.add_argument(
         "--github-ref",
@@ -409,9 +402,15 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
             if getattr(args, "github_path", None):
                 parts.extend(["--github-path", args.github_path])
         elif getattr(args, "pypi_package", None):
-            parts.extend(["--pypi-package", args.pypi_package])
-            if getattr(args, "pypi_version", None):
-                parts.extend(["--pypi-version", args.pypi_version])
+            parts.extend(
+                [
+                    "--pypi-package",
+                    pypi_package_spec_arg(
+                        args.pypi_package,
+                        getattr(args, "pypi_version", None),
+                    ),
+                ]
+            )
         elif getattr(args, "wheel_file", None) is not None:
             parts.extend(["--wheel-file", args.wheel_file])
         else:
@@ -889,68 +888,6 @@ def target_repo_path(
     return repo_root_for_ui(args) or default_repo_path()
 
 
-def pypi_project_for_versions(package_name: str) -> SkillProject:
-    return SkillProject(
-        package_name=package_name,
-        import_name=GENERIC_IMPORT_NAME,
-        version="0",
-        skill_name=package_name,
-        description="",
-        pypi_project_name=package_name,
-    )
-
-
-def generic_pypi_version_choices(
-    package_name: str,
-    *,
-    limit: int = 10,
-) -> list[dict[str, str]]:
-    try:
-        versions = published_pypi_versions(
-            pypi_project_for_versions(package_name),
-            limit=limit,
-        )
-    except InstallerError:
-        versions = []
-
-    return [
-        {
-            "name": version,
-            "value": version,
-        }
-        for version in versions
-    ]
-
-
-def required_generic_pypi_version_choices(
-    package_name: str,
-    *,
-    limit: int = 10,
-) -> list[dict[str, str]]:
-    package = package_name.strip()
-    if not package:
-        raise UsageError("PyPI package name must not be empty")
-    try:
-        versions = published_pypi_versions(
-            pypi_project_for_versions(package),
-            limit=limit,
-        )
-    except InstallerError as error:
-        message = str(error)
-        if "HTTP Error 404" in message or "404: Not Found" in message:
-            raise UsageError(f"PyPI package not found: {package}") from error
-        raise UsageError(f"could not read PyPI metadata for {package}: {message}") from error
-    if not versions:
-        raise UsageError(f"no wheel releases found on PyPI for {package}")
-    return [
-        {
-            "name": version,
-            "value": version,
-        }
-        for version in versions
-    ]
-
-
 def recent_installations_path(home: Path | None = None) -> Path:
     base = (home or Path.home()).expanduser()
     return base / RECENT_STATE_DIR_NAME / RECENT_INSTALLS_FILE_NAME
@@ -1050,36 +987,29 @@ def value_choices(values: list[str]) -> list[dict[str, str]]:
 
 
 def validate_pypi_skill_package(args: argparse.Namespace) -> None:
-    version = resolve_pypi_version(args)
-    requested_package = args.pypi_package
+    requested_spec = args.pypi_package
+    requested_package = pypi_package_name(args)
+    requested_requirement = pypi_package_requirement(args)
     cleanup_validated_pypi_download(args)
     temp_dir = tempfile.TemporaryDirectory(
         prefix="agent-skill-installer-validate-pypi-"
     )
     try:
-        wheel_path = download_pypi_wheel(
-            pypi_project_for_versions(args.pypi_package),
-            version,
-            Path(temp_dir.name),
-        )
-        resolved_package, wheel_path = resolve_platform_specific_pypi_wheel(
-            requested_package,
-            wheel_path,
-            version,
-            Path(temp_dir.name),
+        wheel_path, version = build_pypi_wheel(
+            package=requested_requirement,
+            wheel_dir=Path(temp_dir.name),
         )
         projects = read_pypi_projects(
             args,
             wheel_path,
             version,
-            pypi_project_name=resolved_package,
+            pypi_project_name=requested_package,
         )
     except Exception:
         temp_dir.cleanup()
         raise
-    args.pypi_version = version
-    args._validated_pypi_package = requested_package
-    args._validated_pypi_resolved_package = resolved_package
+    args._validated_pypi_package = requested_spec
+    args._validated_pypi_requirement = requested_requirement
     args._validated_pypi_version = version
     args._validated_pypi_wheel_path = wheel_path
     args._validated_pypi_project = projects[0]
@@ -1096,6 +1026,7 @@ def validate_selected_pypi_skill_package(
     validation_args = copy_args(args)
     validation_args.pypi_package = package
     validation_args.pypi_version = version
+    normalize_pypi_package_args(validation_args)
     validate_pypi_skill_package(validation_args)
     cleanup_validated_pypi_download(args)
     args.pypi_package = validation_args.pypi_package
@@ -1115,11 +1046,14 @@ def cleanup_validated_pypi_download(args: argparse.Namespace) -> None:
 
 def validated_pypi_download(
     args: argparse.Namespace,
-    version: str,
 ) -> tuple[Path, list[SkillProject]] | None:
     if getattr(args, "_validated_pypi_package", None) != args.pypi_package:
         return None
-    if getattr(args, "_validated_pypi_version", None) != version:
+    try:
+        requirement = pypi_package_requirement(args)
+    except UsageError:
+        return None
+    if getattr(args, "_validated_pypi_requirement", None) != requirement:
         return None
     wheel_path = getattr(args, "_validated_pypi_wheel_path", None)
     projects = getattr(args, "_validated_pypi_projects", None)
@@ -1132,11 +1066,15 @@ def validated_pypi_download(
     return wheel_path, projects
 
 
+def validated_pypi_version(args: argparse.Namespace) -> str | None:
+    version = getattr(args, "_validated_pypi_version", None)
+    return version if isinstance(version, str) and version else None
+
+
 def validate_wheel_file(args: argparse.Namespace) -> None:
     wheel_path = args.wheel_file.expanduser().resolve()
     if not wheel_path.is_file():
         raise InstallerError(f"wheel file does not exist: {wheel_path}")
-    wheel_path = resolve_platform_specific_wheel_file(wheel_path)
     projects = read_pypi_projects(args, wheel_path, None)
     args.wheel_file = wheel_path
     args._validated_wheel_file = wheel_path
@@ -1345,11 +1283,7 @@ def install_source_projects_for_ui(args: argparse.Namespace) -> list[SkillProjec
         validated = validated_github_download(args, parsed)
         return [] if validated is None else validated[1]
     if source == "pypi" and args.pypi_package is not None:
-        try:
-            version = resolve_pypi_version(args)
-        except InstallerError:
-            return []
-        validated = validated_pypi_download(args, version)
+        validated = validated_pypi_download(args)
         return [] if validated is None else validated[1]
     return []
 
@@ -1578,7 +1512,6 @@ def complete_install_with_ui(
         return prompt_step(fields, prompt)
 
     source = selected_install_source(args)
-    source_was_prompted = getattr(args, "_selected_install_source", None) == source
     if source is None:
         if install_source_count(args) > 1:
             clear_install_sources(args)
@@ -1594,12 +1527,10 @@ def complete_install_with_ui(
         if selected_source == PROMPT_BACK:
             return PROMPT_BACK
         source = str(selected_source)
-        source_was_prompted = True
         clear_install_sources(args)
         args._selected_install_source = source
 
     if source == "pypi":
-        version_choices: list[dict[str, str]] | None = None
         if args.pypi_package is None:
             package_choices = recent_pypi_package_choices(args)
             default_package = (
@@ -1609,15 +1540,16 @@ def complete_install_with_ui(
             )
 
             def validate_pypi_package(value: str) -> str | None:
-                nonlocal version_choices
                 package_name = value.strip() or default_package
                 if not package_name:
                     return "PyPI package name must not be empty"
                 try:
-                    version_choices = required_generic_pypi_version_choices(
-                        package_name
+                    validate_selected_pypi_skill_package(
+                        args,
+                        package=package_name,
+                        version=None,
                     )
-                except UsageError as error:
+                except (InstallerError, InstallerConfigError, UsageError) as error:
                     return str(error)
                 return None
 
@@ -1647,55 +1579,7 @@ def complete_install_with_ui(
             if not package:
                 raise UsageError("PyPI package name must not be empty")
             args.pypi_package = package
-        if source_was_prompted and args.pypi_version is None:
-            if version_choices is None:
-                version_choices = required_generic_pypi_version_choices(
-                    args.pypi_package
-                )
-            default_version = (
-                version_choices[0]["value"]
-                if version_choices
-                else ""
-            )
-
-            def validate_pypi_version(value: str) -> str | None:
-                version = str(value).strip() or default_version or None
-                try:
-                    validate_selected_pypi_skill_package(
-                        args,
-                        package=args.pypi_package,
-                        version=version,
-                    )
-                except (InstallerError, InstallerConfigError, UsageError) as error:
-                    return str(error)
-                return None
-
-            version_result = run_prompt(
-                ["pypi_version", *VALIDATED_PYPI_FIELDS],
-                lambda: prompter.version(
-                    "PyPI package version",
-                    default_version,
-                    version_choices,
-                    command_preview_builder=lambda value: preview_command(
-                        args,
-                        command="install",
-                        pypi_version=str(value).strip() or default_version or None,
-                    ),
-                    summary_builder=lambda value: install_decision_summary(
-                        args,
-                        command="install",
-                        source="pypi",
-                        pypi_version=str(value).strip() or default_version,
-                    ),
-                    validator=validate_pypi_version,
-                ),
-            )
-            if version_result == PROMPT_BACK:
-                return PROMPT_BACK
-            version = str(version_result).strip()
-            args.pypi_version = version or None
-        version = resolve_pypi_version(args)
-        if validated_pypi_download(args, version) is None:
+        if validated_pypi_download(args) is None:
             validate_pypi_skill_package(args)
     elif source == "wheel":
         if args.wheel_file is None:
@@ -2142,6 +2026,7 @@ def complete_with_ui(
     prompter: Prompter | None = None,
 ) -> argparse.Namespace:
     ensure_arg_defaults(args)
+    normalize_pypi_package_args(args)
     prompter = prompter or TextualPrompter(generic_project())
     print("agent-skill-installer")
 
@@ -2298,13 +2183,11 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
             flag = "--editable" if args.editable else "--copy"
             raise UsageError(f"{flag} requires --skill-path")
         if args.pypi_package is not None:
-            args.pypi_package = args.pypi_package.strip()
-            if not args.pypi_package:
-                raise UsageError("--pypi-package must not be empty")
-        if args.pypi_version is not None:
+            normalize_pypi_package_args(args)
+        elif args.pypi_version is not None:
             args.pypi_version = args.pypi_version.strip()
             if not args.pypi_version:
-                raise UsageError("--pypi-version must not be empty")
+                raise UsageError("PyPI version must not be empty")
         if args.wheel_file is not None:
             if not str(args.wheel_file).strip():
                 raise UsageError("--wheel-file must not be empty")
@@ -2340,6 +2223,82 @@ def normalize_skill_name(value: str) -> str:
     ):
         raise InstallerError(f"invalid skill name: {value!r}")
     return skill_name
+
+
+def parse_pypi_package_spec(
+    package_spec: str,
+    version: str | None,
+) -> tuple[str, str | None]:
+    package_text = package_spec.strip()
+    if not package_text:
+        raise UsageError("--pypi-package must not be empty")
+
+    explicit_version = version.strip() if version is not None else None
+    if explicit_version is not None and not explicit_version:
+        raise UsageError("PyPI version must not be empty")
+
+    try:
+        requirement = Requirement(package_text)
+    except InvalidRequirement as error:
+        raise UsageError(
+            "--pypi-package must be a package name or requirement specifier"
+        ) from error
+
+    if requirement.url is not None:
+        raise UsageError("--pypi-package does not support direct URL requirements")
+    if requirement.marker is not None:
+        raise UsageError("--pypi-package does not support environment markers")
+    if requirement.extras:
+        raise UsageError("--pypi-package does not support extras")
+
+    package_specifier = str(requirement.specifier) or None
+    if package_specifier is not None and explicit_version is not None:
+        raise UsageError("package spec already includes a PyPI version")
+
+    return requirement.name, package_specifier or (
+        f"=={explicit_version}" if explicit_version is not None else None
+    )
+
+
+def normalize_pypi_package_args(args: argparse.Namespace) -> None:
+    if args.pypi_package is None:
+        if args.pypi_version is not None:
+            args.pypi_version = args.pypi_version.strip()
+            if not args.pypi_version:
+                raise UsageError("PyPI version must not be empty")
+        return
+
+    args.pypi_package = args.pypi_package.strip()
+    _package_name, _version = parse_pypi_package_spec(
+        args.pypi_package,
+        args.pypi_version,
+    )
+
+
+def pypi_package_spec_arg(package_spec: str, version: str | None) -> str:
+    if version:
+        package_name, _version_spec = parse_pypi_package_spec(package_spec, None)
+        return f"{package_name}=={version}"
+    return package_spec
+
+
+def pypi_package_requirement(args: argparse.Namespace) -> str:
+    if args.pypi_package is None:
+        raise UsageError("--pypi-package is required")
+    return pypi_package_spec_arg(
+        args.pypi_package,
+        getattr(args, "pypi_version", None),
+    )
+
+
+def pypi_package_name(args: argparse.Namespace) -> str:
+    if args.pypi_package is None:
+        raise UsageError("--pypi-package is required")
+    package_name, _version_spec = parse_pypi_package_spec(
+        args.pypi_package,
+        args.pypi_version,
+    )
+    return package_name
 
 
 def unquote_scalar(value: str) -> str:
@@ -2441,7 +2400,7 @@ def read_skill_project_from_dir(
 ) -> SkillProject:
     skill_file = source / "SKILL.md"
     config = (
-        load_installer_config(source / CONFIG_FILE_NAME)
+        load_installer_config(source / CONFIG_FILE_NAME, package_version=version)
         if (source / CONFIG_FILE_NAME).is_file()
         else None
     )
@@ -2636,6 +2595,7 @@ def read_github_projects(
                 load_installer_config_text(
                     config_text,
                     source=f"{source.url}/{skill_prefix.as_posix()}/{CONFIG_FILE_NAME}",
+                    package_version=source.version_label,
                 )
                 if config_text is not None
                 else None
@@ -2681,10 +2641,6 @@ def wheel_skill_prefixes(archive: zipfile.ZipFile) -> list[PurePosixPath]:
         candidates.append(path.parent)
     if not candidates:
         raise InstallerError("wheel did not contain a bundled SKILL.md")
-    shorthand = [candidate for candidate in candidates if candidate.name == "_skill"]
-    if shorthand:
-        shorthand.sort(key=lambda item: len(item.parts))
-        return [shorthand[0]]
     return sorted(set(candidates), key=lambda item: item.as_posix())
 
 
@@ -2715,222 +2671,8 @@ def wheel_archive_metadata(archive: zipfile.ZipFile) -> dict[str, str]:
     return {}
 
 
-def normalize_distribution_name(name: str) -> str:
-    return name.replace("_", "-").replace(".", "-").lower()
-
-
-def platform_specific_wheel_name(config: PlatformSelectorConfig) -> str | None:
-    platform_specific = config.platform_specific
-    if platform_specific.wheel is None:
-        return None
-    return render_platform_template(platform_specific.wheel).strip()
-
-
-def platform_specific_local_path(
-    platform_specific: PlatformSpecific,
-    config_dir: Path,
-) -> Path:
-    if platform_specific.local_path is None:
-        raise InstallerError(
-            "platform_specific.local_path is required for local installs"
-        )
-    rendered = render_platform_template(platform_specific.local_path).strip()
-    if not rendered:
-        raise InstallerError("platform_specific.local_path must not be empty")
-    path = Path(rendered)
-    if path.is_absolute():
-        raise InstallerError("platform_specific.local_path must be relative")
-    return (config_dir / path).expanduser().resolve()
-
-
-def local_selector_candidates(selected_source: Path) -> list[Path]:
-    candidates: list[Path] = []
-    local_source = local_skill_source_for_candidate(selected_source)
-    if local_source is not None:
-        candidates.append(local_source[1] / SELECTOR_FILE_NAME)
-    candidates.extend(
-        [
-            selected_source / SELECTOR_FILE_NAME,
-            selected_source / "skill" / SELECTOR_FILE_NAME,
-        ]
-    )
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        unique.append(candidate)
-    return unique
-
-
-def platform_specific_local_target(selected_source: Path) -> Path | None:
-    selected = selected_source.expanduser().resolve()
-    for config_path in local_selector_candidates(selected):
-        if not config_path.is_file():
-            continue
-        config = load_platform_selector_config(config_path)
-        platform_specific = config.platform_specific
-        wheel_name = platform_specific_wheel_name(config)
-        if wheel_name and normalize_distribution_name(selected.name) == (
-            normalize_distribution_name(wheel_name)
-        ):
-            return None
-        target = platform_specific_local_path(platform_specific, config_path.parent)
-        if target == selected or target == config_path.parent.resolve():
-            return None
-        return target
-    return None
-
-
-def ensure_platform_specific_local_target_resolved(target: Path) -> None:
-    next_target = platform_specific_local_target(target)
-    if next_target is not None:
-        raise InstallerError(
-            "platform_specific local target was not resolved after one dispatch: "
-            f"{target} resolves to {next_target}"
-        )
-
-
-def wheel_platform_selector_config(
-    wheel_path: Path,
-    package_name: str,
-) -> PlatformSelectorConfig | None:
-    try:
-        with zipfile.ZipFile(wheel_path) as archive:
-            configs: list[tuple[PurePosixPath, PlatformSelectorConfig]] = []
-            for info in archive.infolist():
-                if info.is_dir():
-                    continue
-                path = PurePosixPath(info.filename)
-                if path.is_absolute() or ".." in path.parts:
-                    raise InstallerError(f"unsafe path in PyPI wheel: {info.filename}")
-                if path.name != SELECTOR_FILE_NAME:
-                    continue
-                text = archive.read(info).decode("utf-8")
-                config = load_platform_selector_config_text(
-                    text,
-                    source=f"{package_name} wheel/{path.as_posix()}",
-                )
-                configs.append((path.parent, config))
-    except UnicodeDecodeError as error:
-        raise InstallerError(
-            f"{SELECTOR_FILE_NAME} is not valid UTF-8 in wheel: {wheel_path}"
-        ) from error
-    except zipfile.BadZipFile as error:
-        raise InstallerError(f"wheel file is not a valid zip file: {wheel_path}") from error
-    if not configs:
-        return None
-    configs.sort(key=lambda item: item[0].as_posix())
-    return configs[0][1]
-
-
-def matching_sibling_wheel(
-    selector_wheel: Path,
-    package_name: str,
-    version: str | None,
-) -> Path | None:
-    wanted_name = normalize_distribution_name(package_name)
-    wanted_version = version.strip() if version else None
-    matches: list[tuple[bool, Path]] = []
-    for candidate in sorted(selector_wheel.parent.glob("*.whl")):
-        if candidate == selector_wheel:
-            continue
-        candidate_name, candidate_version = wheel_filename_metadata(candidate)
-        if normalize_distribution_name(candidate_name) != wanted_name:
-            continue
-        exact_version = wanted_version is not None and candidate_version == wanted_version
-        if wanted_version is None or exact_version:
-            matches.append((exact_version, candidate))
-    if not matches:
-        return None
-    matches.sort(key=lambda item: (not item[0], item[1].name))
-    return matches[0][1]
-
-
-def resolve_platform_specific_wheel_file(
-    wheel_path: Path,
-    *,
-    version: str | None = None,
-) -> Path:
-    current_path = wheel_path.expanduser().resolve()
-    fallback_package, fallback_version = wheel_filename_metadata(current_path)
-    try:
-        with zipfile.ZipFile(current_path) as archive:
-            metadata = wheel_archive_metadata(archive)
-    except zipfile.BadZipFile as error:
-        raise InstallerError(f"wheel file is not a valid zip file: {current_path}") from error
-    package_name = metadata.get("name") or fallback_package
-    config = wheel_platform_selector_config(current_path, package_name)
-    if config is None:
-        return current_path
-    target_package = platform_specific_wheel_name(config)
-    if target_package is None:
-        return current_path
-    if normalize_distribution_name(target_package) == normalize_distribution_name(
-        package_name
-    ):
-        return current_path
-    target_version = version or metadata.get("version") or fallback_version
-    target = matching_sibling_wheel(current_path, target_package, target_version)
-    if target is None:
-        raise InstallerError(
-            "platform-specific wheel was not found next to selector wheel: "
-            f"{target_package} {target_version}"
-        )
-    target_config = wheel_platform_selector_config(target, target_package)
-    if target_config is not None:
-        next_package = platform_specific_wheel_name(target_config)
-        if next_package is not None and normalize_distribution_name(
-            next_package
-        ) != normalize_distribution_name(target_package):
-            raise InstallerError(
-                "platform_specific target was not resolved after one dispatch: "
-                f"{target_package} resolves to {next_package}"
-            )
-    return target
-
-
-def resolve_platform_specific_pypi_wheel(
-    package_name: str,
-    wheel_path: Path,
-    version: str,
-    download_dir: Path,
-) -> tuple[str, Path]:
-    config = wheel_platform_selector_config(wheel_path, package_name)
-    if config is None:
-        return package_name, wheel_path
-    target_package = platform_specific_wheel_name(config)
-    if target_package is None:
-        return package_name, wheel_path
-    if normalize_distribution_name(target_package) == normalize_distribution_name(
-        package_name
-    ):
-        return package_name, wheel_path
-    project = SkillProject(
-        package_name=target_package,
-        import_name=GENERIC_IMPORT_NAME,
-        version=version,
-        skill_name=target_package,
-        description="",
-        pypi_project_name=target_package,
-    )
-    target_wheel = download_pypi_wheel(project, version, download_dir)
-    target_config = wheel_platform_selector_config(target_wheel, target_package)
-    if target_config is not None:
-        next_package = platform_specific_wheel_name(target_config)
-        if next_package is not None and normalize_distribution_name(
-            next_package
-        ) != normalize_distribution_name(target_package):
-            raise InstallerError(
-                "platform_specific target was not resolved after one dispatch: "
-                f"{target_package} resolves to {next_package}"
-            )
-    return target_package, target_wheel
-
-
 def wheel_prefix_uses_package_fallback(prefix: PurePosixPath) -> bool:
-    return not prefix.parts or prefix.name == "_skill"
+    return not prefix.parts or prefix.name == "skill"
 
 
 def read_pypi_project(
@@ -2970,7 +2712,11 @@ def read_pypi_projects(
 
     package_name = (
         pypi_project_name
-        or getattr(args, "pypi_package", None)
+        or (
+            pypi_package_name(args)
+            if getattr(args, "pypi_package", None) is not None
+            else None
+        )
         or archive_metadata.get("name")
         or fallback_package
     )
@@ -2982,15 +2728,16 @@ def read_pypi_projects(
             load_installer_config_text(
                 config_text,
                 source=f"{package_name} wheel/{prefix.as_posix()}/{CONFIG_FILE_NAME}",
+                package_version=wheel_version,
             )
             if config_text is not None
             else None
         )
-        import_name = prefix.parts[0] if prefix.parts else GENERIC_IMPORT_NAME
+        import_name = prefix.parts[0] if prefix.parts else ""
         bundled_skill_path = (
             PurePosixPath(*prefix.parts[1:]).as_posix()
             if len(prefix.parts) > 1
-            else "_skill"
+            else ""
         )
         metadata = skill_metadata(skill_text)
         fallback_name = (
@@ -3015,33 +2762,12 @@ def read_pypi_projects(
                 or description_from_skill_text(skill_text, target_name),
                 installer_config=config or InstallerConfig(),
                 bundled_skill_path=bundled_skill_path,
-                pypi_project_name=pypi_project_name
-                or getattr(args, "pypi_package", None),
+                pypi_project_name=package_name,
                 source_skill_name=source_name,
                 source_skill_path=prefix.as_posix() if prefix.parts else None,
             )
         )
     return projects
-
-
-def resolve_pypi_version(args: argparse.Namespace) -> str:
-    if args.pypi_version is not None:
-        version = args.pypi_version.strip()
-        if not version:
-            raise InstallerError("--pypi-version must not be empty")
-        return version
-    project = SkillProject(
-        package_name=args.pypi_package,
-        import_name=GENERIC_IMPORT_NAME,
-        version="0",
-        skill_name=args.pypi_package,
-        description="",
-        pypi_project_name=args.pypi_package,
-    )
-    versions = published_pypi_versions(project, limit=1)
-    if not versions:
-        raise InstallerError(f"no wheel releases found on PyPI for {args.pypi_package}")
-    return versions[0]
 
 
 def parse_rename_specs(values: Sequence[str] | None) -> dict[str, str]:
@@ -3187,16 +2913,18 @@ def select_source_projects(
     return selected
 
 
-def install_for_targets(
+def stage_project_for_targets(
     project: SkillProject,
     args: argparse.Namespace,
     *,
     editable_source_dir: Path | None = None,
+    external_wheel_source_dir: Path | None = None,
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
     pypi_version: str | None = None,
     pypi_wheel_path: Path | None = None,
-) -> list[InstallResult]:
+    transaction_created_dirs: Iterable[Path] = (),
+) -> list[StagedInstall]:
     validate_install_source_selection(
         editable=editable_source_dir is not None,
         pypi_version=pypi_version,
@@ -3205,7 +2933,7 @@ def install_for_targets(
     )
     repo = args.repo if args.scope == "repo" else None
     return [
-        install_target(
+        stage_install_target(
             project,
             target_spec(
                 project,
@@ -3218,87 +2946,15 @@ def install_for_targets(
             ),
             force=args.force,
             editable_source_dir=editable_source_dir,
+            external_wheel_source_dir=external_wheel_source_dir,
             pypi_version=pypi_version,
             pypi_wheel_path=pypi_wheel_path,
             github_source=github_source,
             github_archive_path=github_archive_path,
+            transaction_created_dirs=transaction_created_dirs,
         )
         for agent in normalize_agents([args.agent])
     ]
-
-
-def remove_snapshot_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.is_dir():
-        shutil.rmtree(path)
-
-
-def snapshot_install_paths(projects: Sequence[SkillProject], args: argparse.Namespace):
-    temp_dir = tempfile.TemporaryDirectory(
-        prefix="agent-skill-installer-rollback-"
-    )
-    records: list[tuple[Path, str, Path | str | None, bool]] = []
-    seen: set[Path] = set()
-    for project in projects:
-        for agent in normalize_agents([args.agent]):
-            spec = target_spec(
-                project,
-                agent,
-                args.scope,
-                repo=args.repo if args.scope == "repo" else None,
-                home=args.home,
-                codex_home=args.codex_home,
-                claude_home=args.claude_home,
-            )
-            for path in (
-                spec.skill_dir,
-                manifest_path(project, spec.skill_dir),
-                spec.skill_dir.parent / project.sidecar_manifest_name,
-                spec.hook_path,
-            ):
-                if path in seen:
-                    continue
-                seen.add(path)
-                if path.is_symlink():
-                    records.append((path, "symlink", str(path.readlink()), path.is_dir()))
-                elif path.is_dir():
-                    backup = Path(temp_dir.name) / str(len(records))
-                    shutil.copytree(path, backup, symlinks=True)
-                    records.append((path, "dir", backup, False))
-                elif path.is_file():
-                    backup = Path(temp_dir.name) / str(len(records))
-                    backup.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(path, backup)
-                    records.append((path, "file", backup, False))
-                else:
-                    records.append((path, "missing", None, False))
-    return temp_dir, records
-
-
-def restore_install_paths(
-    records: Sequence[tuple[Path, str, Path | str | None, bool]],
-) -> None:
-    for path, _kind, _backup, _target_is_directory in sorted(
-        records,
-        key=lambda item: len(item[0].parts),
-        reverse=True,
-    ):
-        if path.exists() or path.is_symlink():
-            remove_snapshot_path(path)
-    for path, kind, backup, target_is_directory in records:
-        if kind == "missing":
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if kind == "symlink":
-            assert isinstance(backup, str)
-            path.symlink_to(backup, target_is_directory=target_is_directory)
-        elif kind == "dir":
-            assert isinstance(backup, Path)
-            shutil.copytree(backup, path, symlinks=True)
-        elif kind == "file":
-            assert isinstance(backup, Path)
-            shutil.copy2(backup, path)
 
 
 def validate_install_plan(
@@ -3329,7 +2985,29 @@ def validate_install_plan(
                     )
 
 
-def install_project_for_targets(
+def transaction_created_dirs(
+    projects: Sequence[SkillProject],
+    args: argparse.Namespace,
+) -> list[Path]:
+    created_dirs: list[Path] = []
+    for project in projects:
+        for agent in normalize_agents([args.agent]):
+            spec = target_spec(
+                project,
+                agent,
+                args.scope,
+                repo=args.repo if args.scope == "repo" else None,
+                home=args.home,
+                codex_home=args.codex_home,
+                claude_home=args.claude_home,
+            )
+            for directory in missing_parent_dirs(spec.skill_dir):
+                if directory not in created_dirs:
+                    created_dirs.append(directory)
+    return created_dirs
+
+
+def stage_selected_project_for_targets(
     project: SkillProject,
     args: argparse.Namespace,
     *,
@@ -3338,10 +3016,16 @@ def install_project_for_targets(
     github_archive_path: Path | None = None,
     pypi_version: str | None = None,
     pypi_wheel_path: Path | None = None,
-) -> list[InstallResult]:
+    transaction_created_dirs: Iterable[Path] = (),
+) -> list[StagedInstall]:
     editable_source_dir = (
         project.bundled_skill_source
         if local_editable
+        else None
+    )
+    external_wheel_source_dir = (
+        project.bundled_skill_source
+        if not local_editable
         else None
     )
     project_github_source = github_source
@@ -3350,14 +3034,16 @@ def install_project_for_targets(
             github_source,
             path=PurePosixPath(project.source_skill_path),
         )
-    return install_for_targets(
+    return stage_project_for_targets(
         project,
         args,
         editable_source_dir=editable_source_dir,
+        external_wheel_source_dir=external_wheel_source_dir,
         github_source=project_github_source,
         github_archive_path=github_archive_path,
         pypi_version=pypi_version,
         pypi_wheel_path=pypi_wheel_path,
+        transaction_created_dirs=transaction_created_dirs,
     )
 
 
@@ -3372,23 +3058,13 @@ def install_projects_for_targets(
     pypi_wheel_path: Path | None = None,
 ) -> list[InstallResult]:
     validate_install_plan(projects, args)
-    if len(projects) == 1:
-        return install_project_for_targets(
-            projects[0],
-            args,
-            local_editable=local_editable,
-            github_source=github_source,
-            github_archive_path=github_archive_path,
-            pypi_version=pypi_version,
-            pypi_wheel_path=pypi_wheel_path,
-        )
-
-    temp_dir, records = snapshot_install_paths(projects, args)
+    created_dirs = transaction_created_dirs(projects, args)
+    staged_installs: list[StagedInstall] = []
+    commit_started = False
     try:
-        results: list[InstallResult] = []
         for project in projects:
-            results.extend(
-                install_project_for_targets(
+            staged_installs.extend(
+                stage_selected_project_for_targets(
                     project,
                     args,
                     local_editable=local_editable,
@@ -3396,20 +3072,16 @@ def install_projects_for_targets(
                     github_archive_path=github_archive_path,
                     pypi_version=pypi_version,
                     pypi_wheel_path=pypi_wheel_path,
+                    transaction_created_dirs=created_dirs,
                 )
             )
-        return results
-    except Exception as error:
-        try:
-            restore_install_paths(records)
-        except Exception as rollback_error:
-            raise InstallerError(
-                "install failed and rollback was incomplete: "
-                f"{rollback_error}. Original error: {error}"
-            ) from error
-        raise InstallerError(f"install failed; rolled back changes: {error}") from error
-    finally:
-        temp_dir.cleanup()
+        commit_started = True
+        return commit_staged_installs(staged_installs)
+    except Exception:
+        if not commit_started:
+            cleanup_staged_installs(staged_installs)
+            remove_created_dirs(created_dirs)
+        raise
 
 
 def run_install(args: argparse.Namespace) -> list[InstallResult]:
@@ -3418,22 +3090,9 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
     ):
         raise InstallerError("--github-ref and --github-path require --github-url")
     if args.pypi_package is None and args.pypi_version is not None:
-        raise InstallerError("--pypi-version requires --pypi-package")
+        raise InstallerError("PyPI version requires --pypi-package")
 
     if args.skill_path is not None:
-        target = platform_specific_local_target(args.skill_path)
-        if target is not None:
-            target_args = copy_args(args)
-            target_args.skill_path = target
-            ensure_platform_specific_local_target_resolved(target)
-            projects = select_source_projects(target_args, read_local_projects(target_args))
-            if any(project.bundled_skill_source is None for project in projects):
-                raise InstallerError("local install source was not resolved")
-            return install_projects_for_targets(
-                projects,
-                target_args,
-                local_editable=getattr(target_args, "editable", None) is not False,
-            )
         projects = select_source_projects(args, read_local_projects(args))
         if any(project.bundled_skill_source is None for project in projects):
             raise InstallerError("local install source was not resolved")
@@ -3451,7 +3110,6 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
             wheel_path = args.wheel_file.expanduser().resolve()
             if not wheel_path.is_file():
                 raise InstallerError(f"wheel file does not exist: {wheel_path}")
-            wheel_path = resolve_platform_specific_wheel_file(wheel_path)
             projects = read_pypi_projects(args, wheel_path, None)
         projects = select_source_projects(args, projects)
         return install_projects_for_targets(
@@ -3493,11 +3151,13 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
         return results
 
     assert args.pypi_package is not None
-    requested_package = args.pypi_package
-    version = resolve_pypi_version(args)
-    validated_download = validated_pypi_download(args, version)
+    package_name = pypi_package_name(args)
+    validated_download = validated_pypi_download(args)
     if validated_download is not None:
         wheel_path, projects = validated_download
+        version = validated_pypi_version(args)
+        if version is None:
+            raise InstallerError("validated PyPI wheel did not record a version")
         projects = select_source_projects(args, projects)
         results = install_projects_for_targets(
             projects,
@@ -3506,33 +3166,19 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
             pypi_wheel_path=wheel_path,
         )
     else:
-        download_project = SkillProject(
-            package_name=args.pypi_package,
-            import_name=GENERIC_IMPORT_NAME,
-            version=version,
-            skill_name=args.pypi_package,
-            description="",
-            pypi_project_name=args.pypi_package,
-        )
+        requirement = pypi_package_requirement(args)
         with tempfile.TemporaryDirectory(
             prefix="agent-skill-installer-pypi-"
         ) as temp_dir:
-            wheel_path = download_pypi_wheel(
-                download_project,
-                version,
-                Path(temp_dir),
-            )
-            resolved_package, wheel_path = resolve_platform_specific_pypi_wheel(
-                requested_package,
-                wheel_path,
-                version,
-                Path(temp_dir),
+            wheel_path, version = build_pypi_wheel(
+                package=requirement,
+                wheel_dir=Path(temp_dir),
             )
             projects = read_pypi_projects(
                 args,
                 wheel_path,
                 version,
-                pypi_project_name=resolved_package,
+                pypi_project_name=package_name,
             )
             projects = select_source_projects(args, projects)
             results = install_projects_for_targets(
@@ -3541,7 +3187,7 @@ def run_install(args: argparse.Namespace) -> list[InstallResult]:
                 pypi_version=version,
                 pypi_wheel_path=wheel_path,
             )
-    remember_recent_pypi_package(requested_package, home=args.home)
+    remember_recent_pypi_package(package_name, home=args.home)
     return results
 
 
@@ -3565,6 +3211,7 @@ def run_uninstall(args: argparse.Namespace) -> list[InstallResult]:
         skill_name=skill_name,
         cli_name="agent-skill-installer",
         description=f"Use the {skill_name} agent skill.",
+        installer_config=InstallerConfig(),
     )
     return Installer(project).uninstall(
         [args.agent],
@@ -3590,6 +3237,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         ensure_arg_defaults(args)
+        normalize_pypi_package_args(args)
         if not args.no_ui and running_on_tty() and needs_ui(args):
             complete_with_ui(args)
         else:
