@@ -90,6 +90,56 @@ When this file is omitted, the installer writes a default discoverability block
 using the skill name and description. The default trigger text is `$<skill_name>`
 for Codex and `/<skill_name>` for Claude Code.
 
+### Payload File Selection
+
+Copied installs include every file under the directory containing `SKILL.md` by
+default. The installer always skips its own metadata, install manifests, Python
+cache directories, and `.pyc` files:
+
+- `agent-skill-installer.yaml`
+- `.<skill_name>-install.json`
+- `__pycache__/`
+- `*.pyc`
+
+If the skill directory also contains packaging, test, or maintenance files,
+declare the installed payload explicitly with `installer.payload.include` and
+`installer.payload.exclude`:
+
+```yaml
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - agents/**
+      - bin/**
+      - scripts/**
+      - references/**
+    exclude:
+      - bin/cache/**
+      - tests/**
+```
+
+Payload rules are evaluated against POSIX-style paths relative to the directory
+that contains `SKILL.md`. A file is installed when it matches at least one
+`include` pattern and no `exclude` pattern. Excludes win over includes.
+
+Pattern matching uses Python `fnmatch` semantics, not `.gitignore` semantics:
+
+- Patterns are matched against the whole relative path, such as
+  `scripts/tool.py`.
+- `/` is not special to `*`, so `*.py` can match `scripts/tool.py`.
+- `**` is not a special recursive operator; it behaves like repeated `*`.
+- Prefer explicit directory prefixes like `scripts/**` or `bin/**` when the
+  selected files should be easy to read.
+
+`include` defaults to `["**"]`, and `exclude` defaults to `[]`, preserving the
+old recursive-copy behavior. `SKILL.md` must remain selected; installation fails
+if the include/exclude rules remove it.
+
+Payload filters apply to copied local installs, PyPI wheel extraction, and
+GitHub archive extraction. Editable local installs remain symlinks to the source
+directory, so they expose the source tree exactly as it exists on disk.
+
 Only `installer.version: 1` is currently supported. Unknown fields are rejected
 in typed config sections so typos are caught during install. `installer.shared`
 and per-agent `hooks_direct` are escape hatches for shared or backend-specific
@@ -107,8 +157,14 @@ class InstallerConfig:
     installer: InstallerRoot = field(default_factory=InstallerRoot)
 
 @dataclass
+class PayloadFiles:
+    include: list[str] = field(default_factory=lambda: ["**"])
+    exclude: list[str] = field(default_factory=list)
+
+@dataclass
 class InstallerRoot:
     version: int = 1
+    payload: PayloadFiles = field(default_factory=PayloadFiles)
     shared: dict[str, Any] = field(default_factory=dict)
     agents: AgentConfigs = field(default_factory=AgentConfigs)
 

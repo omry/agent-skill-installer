@@ -536,6 +536,41 @@ def test_editable_install_links_local_checkout_skill_files(
     assert manifest["source_dir"] == str(checkout / "skill")
 
 
+def test_editable_install_manifest_lists_unfiltered_symlink_source_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = make_project(tmp_path)
+    project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            """
+installer:
+  payload:
+    include:
+      - SKILL.md
+"""
+        ),
+    )
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    (checkout / "skill" / "scripts" / "tool.py").write_text("print('hello')\n")
+    (checkout / "skill" / "notes.txt").write_text("editable source note\n")
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.chdir(checkout)
+
+    Installer(project).install(["codex"], "repo", repo=repo, editable=True)
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert skill_dir.is_symlink()
+    manifest = read_install_manifest(project, skill_dir)
+    assert manifest["files"] == [
+        "SKILL.md",
+        "agents/openai.yaml",
+        "notes.txt",
+        "scripts/tool.py",
+    ]
+
+
 def test_editable_install_skips_external_wheels_and_uses_checked_in_launcher(
     tmp_path: Path,
     monkeypatch,
@@ -632,6 +667,135 @@ def test_pypi_wheel_install_extracts_only_project_skill(
     assert result.version == "2.0.0"
     assert (skill_dir / "SKILL.md").read_text() == "pypi\n"
     assert not (skill_dir / project.import_name / "__init__.py").exists()
+
+
+def test_copy_local_skill_honors_payload_file_selection(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    source = project.bundled_skill_source
+    assert source is not None
+    (source / "pyproject.toml").write_text("[project]\nname = 'packaging'\n")
+    (source / "MANIFEST.in").write_text("recursive-include demo *\n")
+    (source / "bin").mkdir()
+    (source / "bin" / "tool").write_text("#!/bin/sh\n")
+    project = replace(
+        project,
+        installer_config=load_installer_config_text(
+            """
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - bin/**
+"""
+        ),
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert sorted(
+        path.relative_to(skill_dir).as_posix()
+        for path in skill_dir.rglob("*")
+        if path.is_file() and not path.name.startswith(".")
+    ) == ["SKILL.md", "bin/tool"]
+    manifest = read_raw_manifest(project, skill_dir)
+    assert manifest["files"] == [
+        ".example-agent-skill-install.json",
+        "SKILL.md",
+        "bin/tool",
+    ]
+
+
+def test_copy_local_skill_default_includes_adjacent_files_recursively(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    source = project.bundled_skill_source
+    assert source is not None
+    (source / "pyproject.toml").write_text("[project]\nname = 'packaging'\n")
+    (source / "references").mkdir()
+    (source / "references" / "guide.md").write_text("guide\n")
+    repo = make_repo(tmp_path / "repo")
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+    assert (skill_dir / "pyproject.toml").read_text() == (
+        "[project]\nname = 'packaging'\n"
+    )
+    assert (skill_dir / "references" / "guide.md").read_text() == "guide\n"
+
+
+def test_copy_local_skill_payload_exclude_wins_over_include(
+    tmp_path: Path,
+) -> None:
+    project = replace(
+        make_project(tmp_path),
+        installer_config=load_installer_config_text(
+            """
+installer:
+  payload:
+    include:
+      - "**"
+    exclude:
+      - scripts/**
+"""
+        ),
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert (skill_dir / "SKILL.md").exists()
+    assert (skill_dir / "agents" / "openai.yaml").exists()
+    assert not (skill_dir / "scripts" / "tool.py").exists()
+
+
+def test_copy_local_skill_payload_requires_selected_skill_file(
+    tmp_path: Path,
+) -> None:
+    project = replace(
+        make_project(tmp_path),
+        installer_config=load_installer_config_text(
+            """
+installer:
+  payload:
+    include:
+      - scripts/**
+"""
+        ),
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(InstallerError, match="did not include SKILL.md"):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert not (repo / ".codex" / "skills" / project.skill_name).exists()
+
+
+def test_payload_patterns_use_fnmatch_path_semantics(tmp_path: Path) -> None:
+    project = replace(
+        make_project(tmp_path),
+        installer_config=load_installer_config_text(
+            """
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - "*.py"
+"""
+        ),
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert (skill_dir / "scripts" / "tool.py").read_text() == "print('tool')\n"
+    assert not (skill_dir / "agents" / "openai.yaml").exists()
 
 
 def test_pypi_wheel_install_copies_declared_external_wheel_file(
@@ -1201,7 +1365,9 @@ def test_run_pip_wheel_uses_current_python_module(
     command, cwd = calls[0]
     assert command[:4] == [sys.executable, "-m", "pip", "wheel"]
     assert "--no-deps" in command
-    assert command[-3:] == ["--no-build-isolation", "--editable", "../client"]
+    assert command[-1:] == ["../client"]
+    assert "--editable" not in command
+    assert "--no-build-isolation" not in command
     assert cwd == tmp_path / "skill"
 
 
@@ -1363,6 +1529,38 @@ def test_copy_github_archive_skill_extracts_root_skill(tmp_path: Path) -> None:
     assert not (skill_dir / CONFIG_FILE_NAME).exists()
 
 
+def test_copy_github_archive_skill_honors_payload_file_selection(
+    tmp_path: Path,
+) -> None:
+    project = replace(
+        make_project(tmp_path),
+        installer_config=load_installer_config_text(
+            """
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - bin/**
+"""
+        ),
+    )
+    archive = make_github_archive(
+        tmp_path / "github.zip",
+        skill_path="",
+        skill_text="root github\n",
+    )
+    with zipfile.ZipFile(archive, "a") as zip_archive:
+        root = "example-agent-skill-main"
+        zip_archive.writestr(f"{root}/pyproject.toml", "[project]\n")
+        zip_archive.writestr(f"{root}/bin/arbiter", "#!/bin/sh\n")
+    skill_dir = tmp_path / "skill"
+
+    copied = copy_github_archive_skill(project, archive, skill_dir)
+
+    assert copied == ["SKILL.md", "bin/arbiter"]
+    assert not (skill_dir / "pyproject.toml").exists()
+
+
 def test_parse_github_url_supports_overrides_and_blob_path() -> None:
     source = parse_github_url(
         "https://github.com/example/demo/blob/main/skill/SKILL.md",
@@ -1413,6 +1611,84 @@ def test_copy_pypi_wheel_skill_extracts_only_bundled_skill(tmp_path: Path) -> No
     assert not (skill_dir / CONFIG_FILE_NAME).exists()
     assert not (skill_dir / project.import_name / "__init__.py").exists()
     assert not (skill_dir / f"{project.import_name}-1.2.3.dist-info").exists()
+
+
+def test_copy_pypi_wheel_skill_honors_payload_file_selection(tmp_path: Path) -> None:
+    project = replace(
+        make_project(tmp_path),
+        installer_config=load_installer_config_text(
+            """
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - bin/**
+"""
+        ),
+    )
+    wheel = make_skill_wheel(
+        tmp_path / "example.whl",
+        project,
+        config_text="installer:\n  version: 1\n",
+        extra_skill_files={
+            "pyproject.toml": "[project]\n",
+            "bin/arbiter": "#!/bin/sh\n",
+        },
+    )
+    skill_dir = tmp_path / "skill"
+
+    copied = copy_pypi_wheel_skill(project, wheel, skill_dir)
+
+    assert copied == ["SKILL.md", "bin/arbiter"]
+    assert not (skill_dir / "pyproject.toml").exists()
+
+
+def test_generic_console_wheel_install_uses_embedded_payload_selection(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    wheel = make_skill_wheel(
+        tmp_path / "example.whl",
+        project,
+        config_text="""
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - bin/**
+""",
+        extra_skill_files={
+            "pyproject.toml": "[project]\n",
+            "bin/arbiter": "#!/bin/sh\n",
+        },
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = generic_main(
+        [
+            "--no-ui",
+            "install",
+            "--wheel-file",
+            str(wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Installed example-agent-skill 1.2.3" in output.out
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    assert sorted(
+        path.relative_to(skill_dir).as_posix()
+        for path in skill_dir.rglob("*")
+        if path.is_file() and not path.name.startswith(".")
+    ) == ["SKILL.md", "bin/arbiter"]
 
 
 def test_copy_pypi_wheel_skill_rejects_missing_skill(tmp_path: Path) -> None:
@@ -5307,6 +5583,58 @@ def test_generic_console_installs_github_skill(
         skill_dir,
     )["source_url"] == "https://github.com/example/demo"
     assert load_recent_github_urls(home) == ["https://github.com/example/demo"]
+
+
+def test_generic_console_github_install_uses_embedded_payload_selection(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+    archive = make_github_archive(tmp_path / "github.zip")
+    with zipfile.ZipFile(archive, "a") as zip_archive:
+        root = "example-agent-skill-main"
+        zip_archive.writestr(
+            f"{root}/skill/{CONFIG_FILE_NAME}",
+            """
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - bin/**
+""",
+        )
+        zip_archive.writestr(f"{root}/skill/pyproject.toml", "[project]\n")
+        zip_archive.writestr(f"{root}/skill/bin/arbiter", "#!/bin/sh\n")
+    monkeypatch.setattr(
+        "agent_skill_installer.__main__.download_github_archive",
+        lambda _source, _download_dir: archive,
+    )
+
+    exit_code = generic_main(
+        [
+            "--no-ui",
+            "install",
+            "--github-url",
+            "https://github.com/example/demo",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert output.err == ""
+    skill_dir = repo / ".codex" / "skills" / "demo"
+    assert sorted(
+        path.relative_to(skill_dir).as_posix()
+        for path in skill_dir.rglob("*")
+        if path.is_file() and not path.name.startswith(".")
+    ) == ["SKILL.md", "bin/arbiter"]
 
 
 def test_generic_console_does_not_remember_failed_github_install(

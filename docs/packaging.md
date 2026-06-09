@@ -21,6 +21,40 @@ agent configs, or references, are installed with the skill. ASI does not copy
 `agent-skill-installer.yaml` or Python cache files (`__pycache__/`, `*.pyc`)
 from the payload into the installed skill.
 
+If the payload directory also contains package-maintenance files, use
+`installer.payload.include` and `installer.payload.exclude` in
+`agent-skill-installer.yaml` to select the installed payload files explicitly:
+
+```yaml
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - agents/**
+      - bin/**
+      - scripts/**
+      - references/**
+    exclude:
+      - tests/**
+      - pyproject.toml
+```
+
+Rules are matched against POSIX-style paths relative to the `SKILL.md`
+directory. A file is installed when it matches at least one `include` pattern
+and no `exclude` pattern. Excludes win over includes. `include` defaults to
+`["**"]`, and `exclude` defaults to `[]`, so omitting `payload` preserves the
+old recursive-copy behavior.
+
+Pattern matching uses Python `fnmatch` semantics, not `.gitignore` semantics:
+`*` can match `/`, `**` is not a special recursive operator, and patterns are
+matched against the whole relative path. Prefer explicit directory prefixes like
+`bin/**` and `scripts/**` for clarity. `SKILL.md` must remain selected; ASI
+rejects a payload selection that excludes it.
+
+Payload filters apply when ASI copies a local skill directory or extracts a
+skill from a wheel or GitHub archive. Editable local installs are symlinks and
+therefore expose the source tree as-is.
+
 A package can contain multiple skills. Each directory with a `SKILL.md` is
 detected as a separate source skill:
 
@@ -146,8 +180,8 @@ the current platform; ASI does not choose between platform-specific package
 names.
 
 `editable` is optional and only for local copied installs from a checkout. In
-that case, ASI runs pip with `--editable` for that relative path instead of
-resolving `package` from an index.
+that case, ASI builds a wheel from that relative path instead of resolving
+`package` from an index.
 
 `skill_path` is always relative to the installed skill directory. Absolute
 paths, empty path parts, `.`, and `..` are rejected. Set `executable: true` when

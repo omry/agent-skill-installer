@@ -166,3 +166,20 @@ installer:
     assert external_wheel.copies[0].skill_path == "bin/arbiter"
     assert external_wheel.copies[0].executable is True
     assert external_wheel.copies[0].replace is True
+
+
+def test_loads_payload_file_selection() -> None:
+    config = load_installer_config_text(
+        """
+installer:
+  payload:
+    include:
+      - SKILL.md
+      - bin/**
+    exclude:
+      - bin/cache/**
+"""
+    )
+
+    assert config.installer.payload.include == ["SKILL.md", "bin/**"]
+    assert config.installer.payload.exclude == ["bin/cache/**"]

@@ -131,8 +131,15 @@ class ExternalWheelSource:
 
 
 @dataclass
+class PayloadFiles:
+    include: list[str] = field(default_factory=lambda: ["**"])
+    exclude: list[str] = field(default_factory=list)
+
+
+@dataclass
 class InstallerRoot:
     version: int = 1
+    payload: PayloadFiles = field(default_factory=PayloadFiles)
     shared: dict[str, Any] = field(default_factory=dict)
     external_wheels: list[ExternalWheelSource] = field(default_factory=list)
     agents: AgentConfigs = field(default_factory=AgentConfigs)

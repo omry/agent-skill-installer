@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ from .config import (
     CONFIG_FILE_NAME,
     AgentInstructions,
     InstallerConfig,
+    PayloadFiles,
     load_installer_config_text,
 )
 
@@ -557,6 +559,44 @@ def validate_skill_root(root) -> None:
     validate_skill_frontmatter_file(root.joinpath("SKILL.md"))
 
 
+def payload_files(project: SkillProject) -> PayloadFiles:
+    config = project.installer_config or load_packaged_installer_config(project)
+    if config is None:
+        return PayloadFiles()
+    return config.installer.payload
+
+
+def payload_path_text(relative_path: Path | PurePosixPath) -> str:
+    return PurePosixPath(*relative_path.parts).as_posix()
+
+
+def payload_pattern_matches(pattern: str, relative_path: Path | PurePosixPath) -> bool:
+    text = payload_path_text(relative_path)
+    return fnmatch.fnmatchcase(text, pattern)
+
+
+def is_payload_path_selected(
+    project: SkillProject,
+    relative_path: Path | PurePosixPath,
+) -> bool:
+    payload = payload_files(project)
+    return any(
+        payload_pattern_matches(pattern, relative_path)
+        for pattern in payload.include
+    ) and not any(
+        payload_pattern_matches(pattern, relative_path)
+        for pattern in payload.exclude
+    )
+
+
+def validate_selected_skill_payload(project: SkillProject, copied: list[str]) -> None:
+    if "SKILL.md" not in copied:
+        raise InstallerError(
+            f"installer payload selection for {project.skill_name} did not include "
+            "SKILL.md"
+        )
+
+
 def zip_relative_path(filename: str) -> PurePosixPath | None:
     path = PurePosixPath(filename)
     if path.is_absolute() or ".." in path.parts:
@@ -650,6 +690,8 @@ def iter_bundled_skill_files(project: SkillProject):
                 if child.suffix == ".pyc":
                     continue
                 if is_installer_metadata_path(relative_path):
+                    continue
+                if not is_payload_path_selected(project, relative_path):
                     continue
                 yield relative_path, child
 
@@ -1304,6 +1346,7 @@ def copy_bundled_skill(project: SkillProject, skill_dir: Path) -> list[str]:
         target.parent.mkdir(parents=True, exist_ok=True)
         copy_skill_file(source, target)
         copied.append(relative_path.as_posix())
+    validate_selected_skill_payload(project, copied)
     return copied
 
 
@@ -1412,9 +1455,6 @@ def run_pip_wheel(
         "--wheel-dir",
         str(wheel_dir),
     ]
-    if editable is not None:
-        command.append("--no-build-isolation")
-        command.append("--editable")
     command.append(target)
     try:
         completed = subprocess.run(
@@ -1593,6 +1633,8 @@ def github_archive_skill_relative_path(
     if is_installer_metadata_path(relative):
         return None
     if relative == PurePosixPath(project.manifest_relative_path.as_posix()):
+        return None
+    if not is_payload_path_selected(project, relative):
         return None
     return Path(*relative.parts)
 
@@ -1829,8 +1871,7 @@ def copy_github_archive_skill(
             f"GitHub archive is not a valid zip file: {archive_path}"
         ) from error
 
-    if "SKILL.md" not in copied:
-        raise InstallerError("GitHub archive did not contain a usable SKILL.md")
+    validate_selected_skill_payload(project, copied)
     return copied
 
 
@@ -1854,6 +1895,8 @@ def wheel_skill_relative_path(
         return None
     if relative == PurePosixPath(project.manifest_relative_path.as_posix()):
         return None
+    if not is_payload_path_selected(project, relative):
+        return None
     return Path(*relative.parts)
 
 
@@ -1864,6 +1907,12 @@ def copy_pypi_wheel_skill(
 ) -> list[str]:
     try:
         with zipfile.ZipFile(wheel_path) as wheel:
+            skill_path = project.wheel_skill_prefix / "SKILL.md"
+            validate_zip_skill_frontmatter(
+                wheel,
+                skill_path,
+                source=f"{wheel_path}:{skill_path.as_posix()}",
+            )
             copied = copy_zip_skill_files(
                 wheel,
                 skill_dir,
@@ -1874,14 +1923,16 @@ def copy_pypi_wheel_skill(
             f"PyPI wheel is not a valid zip file: {wheel_path}"
         ) from error
 
-    if "SKILL.md" not in copied:
-        raise InstallerError(
-            f"PyPI wheel did not contain {project.wheel_skill_prefix.as_posix()}/SKILL.md"
-        )
+    validate_selected_skill_payload(project, copied)
     return copied
 
 
-def iter_local_skill_files(project: SkillProject, root: Path):
+def iter_local_skill_files(
+    project: SkillProject,
+    root: Path,
+    *,
+    apply_payload_filter: bool = True,
+):
     for source in sorted(root.rglob("*")):
         relative_path = source.relative_to(root)
         if "__pycache__" in relative_path.parts:
@@ -1894,6 +1945,11 @@ def iter_local_skill_files(project: SkillProject, root: Path):
             continue
         if relative_path == project.manifest_relative_path:
             continue
+        if apply_payload_filter and not is_payload_path_selected(
+            project,
+            relative_path,
+        ):
+            continue
         yield relative_path, source
 
 
@@ -1905,7 +1961,11 @@ def symlink_local_skill(
     skill_dir.symlink_to(source_root, target_is_directory=True)
     return [
         relative_path.as_posix()
-        for relative_path, _source in iter_local_skill_files(project, source_root)
+        for relative_path, _source in iter_local_skill_files(
+            project,
+            source_root,
+            apply_payload_filter=False,
+        )
     ]
 
 
