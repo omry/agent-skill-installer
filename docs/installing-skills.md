@@ -43,7 +43,8 @@ range:
 agent-skill-installer --no-ui install \
   --pypi-package your-skill-package==1.2.3 \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 Version ranges and wildcards are also supported, for example
@@ -64,7 +65,8 @@ Install from a local wheel file:
 agent-skill-installer --no-ui install \
   --wheel-file dist/your_skill_package-1.2.3-py3-none-any.whl \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 Local wheel installs read the bundled `SKILL.md` from the wheel file without
@@ -77,7 +79,8 @@ Install from GitHub:
 agent-skill-installer --no-ui install \
   --github-url https://github.com/OWNER/REPO \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 Repository-root GitHub installs use the `main` ref by default and look for
@@ -98,7 +101,8 @@ agent-skill-installer --no-ui install \
   --github-ref v1 \
   --github-path packages/my-skill \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 GitHub installs are intended for source skill directories. Installing a GitHub
@@ -114,7 +118,8 @@ agent-skill-installer --no-ui install \
   --skill-path ./my-skill \
   --editable \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 `--skill-path` accepts a directory that contains `SKILL.md`, a repository that
@@ -132,7 +137,8 @@ agent-skill-installer --no-ui install \
   --src-skill skill-one \
   --src-skill skill-two \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 Use `--all-src-skills` to intentionally install every discovered source skill,
@@ -147,23 +153,29 @@ does not provide its own installer config.
 ## Targets
 
 Use `--agent codex`, `--agent claude`, `--agent codex,claude`, or
-`--agent all`. Use `--scope repo` for a repository-scoped directory or
-`--scope global` for the current user.
+`--agent all`.
+
+Use `--scope global` to install into the selected agent's config directory, or
+`--scope dir` to install into a directory. Add `--repo` with `--scope dir` when
+the directory must be resolved to, and asserted as, a Git or Sapling repository
+root. Plain directory installs use the exact target directory and do not imply
+that any agent runtime will automatically discover that directory.
 
 | Agent | Scope | Skill directory | Hook file |
 | --- | --- | --- | --- |
-| Codex | `repo` | `<repo>/.codex/skills/<skill_name>` | `<repo>/AGENTS.md` |
+| Codex | `dir` | `<target-dir>/.codex/skills/<skill_name>` | `<target-dir>/AGENTS.md` |
 | Codex | `global` | `~/.codex/skills/<skill_name>` | `~/.codex/AGENTS.md` |
-| Claude Code | `repo` | `<repo>/.claude/skills/<skill_name>` | `<repo>/CLAUDE.md` |
+| Claude Code | `dir` | `<target-dir>/.claude/skills/<skill_name>` | `<target-dir>/CLAUDE.md` |
 | Claude Code | `global` | `~/.claude/skills/<skill_name>` | `~/.claude/CLAUDE.md` |
 
-For repo scope, pass `--target-dir PATH` to install into a repository other than the
-current working directory. For global scope, pass `--codex-home PATH` or
-`--claude-home PATH` to override the default agent home directories.
+For directory targets, pass `--target-dir PATH` to install somewhere other than
+the current working directory. With `--repo`, the installer walks upward from
+that path to find a `.git` or `.sl` root. For global targets, pass
+`--codex-home PATH` or `--claude-home PATH` to override the default agent home
+directories.
 
-In the text UI, the install location screen offers user global, current
-directory when a repository is detected, and choose directory. Directory choices
-show when they resolve to a Git or Sapling repository and install with repo scope.
+In the text UI, the install location screen offers agent config directory,
+current repository directory when one is detected, and directory.
 When the install source is a local repository or skill directory, the UI also
 asks whether to install an editable symlink or a copied snapshot. If the source
 contains multiple skills, the UI prompts for source skill selection and defaults
@@ -177,7 +189,8 @@ Uninstall a skill installed by this tool:
 agent-skill-installer --no-ui uninstall \
   --skill-name my-skill \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 Uninstall uses the install manifest written by the installer. It removes the

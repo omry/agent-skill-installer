@@ -43,12 +43,13 @@ AGENT_LABELS = {
     "claude": "Claude Code",
 }
 SCOPE_LABELS = {
-    "repo": "Current directory",
+    "dir": "Directory",
     "global": "User global",
 }
 AGENT_TARGET_VALUES = set(AGENTS)
 INSTALLATION_TARGET_SEPARATOR = ":"
 SPECIFIC_DIRECTORY_VALUE = "specific"
+InstallationTarget = tuple[str, str, bool]
 TEXTUAL_APP_TITLE = "Agent Skill Installer"
 CommandPreviewBuilder = Callable[[object], str | None]
 PromptValidator = Callable[[str], str | None]
@@ -1971,24 +1972,21 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
         )
         subparser.add_argument(
             "--scope",
-            choices=SCOPES,
-            help="Install for a repository-scoped directory or for the current user.",
+            type=parse_scope_arg,
+            help="Install location scope: global agent config home or a directory.",
         )
         subparser.add_argument(
             "--target-dir",
             dest="repo",
             metavar="PATH",
             type=Path,
-            help=(
-                "Directory to use with --scope repo. Must be inside a Git or "
-                "Sapling repository. Defaults to cwd."
-            ),
+            help="Directory to use with --scope dir. Defaults to cwd.",
         )
         subparser.add_argument(
             "--repo",
-            dest="repo",
-            type=Path,
-            help=argparse.SUPPRESS,
+            dest="repo_target",
+            action="store_true",
+            help="With --scope dir, resolve and require a Git/Sapling repository root.",
         )
         subparser.add_argument(
             "--codex-home",
@@ -2179,7 +2177,7 @@ def agent_arg_from_values(values: Sequence[str]) -> str:
 
 
 def agent_arg_from_targets(
-    targets: Sequence[tuple[str, str]],
+    targets: Sequence[InstallationTarget],
     *,
     preferred_agent: str | None = None,
 ) -> str:
@@ -2195,24 +2193,44 @@ def agent_arg_from_targets(
     return agent_arg_for_agents(agents, prefer_all=True)
 
 
-def scope_arg_from_targets(targets: Sequence[tuple[str, str]]) -> str:
-    scopes = {scope for _, scope in targets}
+def scope_arg_from_targets(targets: Sequence[InstallationTarget]) -> str:
+    scopes = {scope for _, scope, _ in targets}
     if len(scopes) != 1:
         raise UsageError("cannot represent selected targets as one --scope value")
     return scopes.pop()
+
+
+def repo_target_arg_from_targets(targets: Sequence[InstallationTarget]) -> bool:
+    repo_targets = {repo_target for _, scope, repo_target in targets if scope == "dir"}
+    if len(repo_targets) > 1:
+        raise UsageError("cannot represent selected targets as one --repo value")
+    return repo_targets.pop() if repo_targets else False
 
 
 def selected_agents_for_command(agent: str) -> list[str]:
     return split_agent_arg(agent)
 
 
+def parse_scope_arg(value: str) -> str:
+    if value in {"dir", "global", "repo"}:
+        return value
+    raise argparse.ArgumentTypeError("scope must be global or dir")
+
+
+def normalize_args_scope(args: argparse.Namespace) -> None:
+    if getattr(args, "scope", None) == "repo":
+        args.scope = "dir"
+        args.repo_target = True
+
+
 def build_no_ui_command(
     project: SkillProject,
     args: argparse.Namespace | str,
     *,
-    targets: Sequence[tuple[str, str]] | None = None,
+    targets: Sequence[InstallationTarget] | None = None,
     agent: str | None = None,
     scope: str | None = None,
+    repo_target: bool | None = None,
     editable: bool | None = None,
     pypi: bool | None = None,
     pypi_version: str | None = None,
@@ -2225,13 +2243,22 @@ def build_no_ui_command(
 ) -> str | None:
     if isinstance(args, str):
         args = argparse.Namespace(command=args, verbose=False)
+    normalize_args_scope(args)
+    if scope == "repo":
+        scope = "dir"
+        repo_target = True
     command = getattr(args, "command", None)
     if command not in {"install", "uninstall"}:
         return None
 
     if targets:
-        scopes = list(dict.fromkeys(target_scope for _, target_scope in targets))
-        if len(scopes) > 1:
+        target_groups = list(
+            dict.fromkeys(
+                (target_scope, target_repo_target)
+                for _, target_scope, target_repo_target in targets
+            )
+        )
+        if len(target_groups) > 1:
             commands = [
                 build_no_ui_command(
                     project,
@@ -2240,6 +2267,7 @@ def build_no_ui_command(
                         target
                         for target in targets
                         if target[1] == target_scope
+                        and target[2] == target_repo_target
                     ],
                     agent=agent,
                     editable=editable,
@@ -2252,7 +2280,7 @@ def build_no_ui_command(
                     codex_home=codex_home,
                     claude_home=claude_home,
                 )
-                for target_scope in scopes
+                for target_scope, target_repo_target in target_groups
             ]
             return "\n".join(command for command in commands if command)
         agent = agent_arg_from_targets(
@@ -2260,9 +2288,15 @@ def build_no_ui_command(
             preferred_agent=agent or getattr(args, "agent", None),
         )
         scope = scope_arg_from_targets(targets)
+        repo_target = repo_target_arg_from_targets(targets)
 
     agent = agent or getattr(args, "agent", None) or TARGET_ALL
-    scope = scope or getattr(args, "scope", None) or "global"
+    repo_target = (
+        repo_target
+        if repo_target is not None
+        else bool(getattr(args, "repo_target", False))
+    )
+    scope = scope or getattr(args, "scope", None) or ("dir" if repo_target else "global")
     editable = (
         editable
         if editable is not None
@@ -2313,6 +2347,8 @@ def build_no_ui_command(
                 parts.extend(["--github-path", github_path])
 
     parts.extend(["--agent", agent, "--scope", scope])
+    if scope == "dir" and repo_target:
+        parts.append("--repo")
 
     repo = repo if repo is not None else getattr(args, "repo", None)
     codex_home = (
@@ -2324,7 +2360,7 @@ def build_no_ui_command(
         else getattr(args, "claude_home", None)
     )
 
-    if scope == "repo" and repo is not None:
+    if scope == "dir" and repo is not None:
         parts.extend(["--target-dir", repo])
     elif scope == "global":
         selected_agents = selected_agents_for_command(agent)
@@ -2368,15 +2404,18 @@ def selected_agents_from_values(selected_agents: Sequence[str]) -> list[str]:
     return agents
 
 
-def installation_target_value(agent: str, scope: str) -> str:
-    return f"{agent}{INSTALLATION_TARGET_SEPARATOR}{scope}"
+def installation_target_value(agent: str, scope: str, repo_target: bool = False) -> str:
+    suffix = ":repo" if repo_target else ":dir"
+    return f"{agent}{INSTALLATION_TARGET_SEPARATOR}{scope}{suffix}"
 
 
-def parse_installation_target(value: str) -> tuple[str, str]:
-    agent, separator, scope = value.partition(INSTALLATION_TARGET_SEPARATOR)
+def parse_installation_target(value: str) -> InstallationTarget:
+    agent, separator, rest = value.partition(INSTALLATION_TARGET_SEPARATOR)
+    scope, _, repo_part = rest.partition(INSTALLATION_TARGET_SEPARATOR)
+    repo_target = repo_part == "repo"
     if not separator or agent not in AGENTS or scope not in SCOPES:
         raise UsageError(f"unknown installation target: {value}")
-    return agent, scope
+    return agent, scope, repo_target
 
 
 def find_ui_repo_root(args: argparse.Namespace) -> Path | None:
@@ -2393,10 +2432,16 @@ def repo_label(repo: Path | None) -> str:
 def installation_choice_label(
     scope: str,
     *,
+    repo_target: bool = False,
     repo: Path | None,
     status: InstallationStatus | None = None,
 ) -> str:
-    label = "global" if scope == "global" else f"directory ({repo_label(repo)})"
+    if scope == "global":
+        label = "global"
+    elif repo_target:
+        label = f"repository directory ({repo_label(repo)})"
+    else:
+        label = f"directory ({repo_label(repo)})"
     if status is not None:
         label = f"{label} ({installed_status_phrase(status)})"
     return label
@@ -2427,9 +2472,9 @@ def installation_scope_choice_label(
     claude_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
-        return "Choose directory"
+        return "Directory"
     if scope == "global":
-        return "Global"
+        return "Agent config directory"
     return (
         "Current directory (repository)"
         if repo is not None
@@ -2454,7 +2499,7 @@ def installation_scope_choice_description(
     claude_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
-        return "Prompt for a directory"
+        return "Install files into an explicit directory; automatic discovery is not implied"
     if scope == "global":
         paths = [
             str(
@@ -2467,8 +2512,10 @@ def installation_scope_choice_description(
             )
             for agent in agents
         ]
-        return "\n".join(["Install in agent home directory", *paths])
-    return directory_repository_summary(repo or default_repo_path())
+        return "\n".join(["Install in agent config directory", *paths])
+    if repo is None:
+        return "Install into a detected Git or Sapling repository root"
+    return directory_repository_summary(repo)
 
 
 def installed_statuses_by_target(
@@ -2478,9 +2525,9 @@ def installed_statuses_by_target(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
-) -> dict[tuple[str, str], InstallationStatus]:
+) -> dict[InstallationTarget, InstallationStatus]:
     return {
-        (status.agent, status.scope): status
+        (status.agent, status.scope, status.repo_target): status
         for status in inspect_installations(
             project,
             repo=repo,
@@ -2587,10 +2634,14 @@ def installation_option_choices(
     choices = [{"name": "All", "value": TARGET_ALL, "kind": "all"}]
     for agent in agents:
         target_choices: list[dict[str, object]] = []
-        for scope in ("global", "repo"):
-            if scope == "repo" and not repo_available:
+        for scope, repo_target in (
+            ("global", False),
+            ("dir", True),
+            ("dir", False),
+        ):
+            if scope == "dir" and repo_target and not repo_available:
                 continue
-            status = installed_by_target.get((agent, scope))
+            status = installed_by_target.get((agent, scope, repo_target))
             if command == "uninstall" and status is None:
                 continue
             target_choices.append(
@@ -2598,10 +2649,11 @@ def installation_option_choices(
                     "name": "    "
                     + installation_choice_label(
                         scope,
+                        repo_target=repo_target,
                         repo=repo,
                         status=status,
                     ),
-                    "value": installation_target_value(agent, scope),
+                    "value": installation_target_value(agent, scope, repo_target),
                     "kind": "target",
                 }
             )
@@ -2636,7 +2688,7 @@ def normalize_installation_targets(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
-) -> list[tuple[str, str]]:
+) -> list[InstallationTarget]:
     if isinstance(selected_options, str):
         selected_options = [selected_options]
     if command == "install":
@@ -2663,7 +2715,12 @@ def normalize_installation_targets(
                 scopes.append(scope)
         if not scopes:
             raise UsageError("choose at least one installation target")
-        return [(agent, scope) for scope in scopes for agent in agents]
+        targets: list[InstallationTarget] = []
+        for selected_scope in scopes:
+            scope = "dir" if selected_scope in {"repo", SPECIFIC_DIRECTORY_VALUE} else selected_scope
+            repo_target = selected_scope == "repo"
+            targets.extend((agent, scope, repo_target) for agent in agents)
+        return targets
 
     available = [
         parse_installation_target(choice["value"])
@@ -2682,7 +2739,7 @@ def normalize_installation_targets(
     if TARGET_ALL in selected_options:
         return available
 
-    targets: list[tuple[str, str]] = []
+    targets: list[InstallationTarget] = []
     for selected in selected_options:
         target = parse_installation_target(selected)
         if target not in available:
@@ -2717,14 +2774,15 @@ def installation_summary_text(
         codex_home=codex_home,
         claude_home=claude_home,
     )
-    by_target = {
-        (status.agent, status.scope): status
-        for status in statuses
-    }
+    by_target = {}
+    for status in statuses:
+        scope = "dir" if status.scope == "repo" else status.scope
+        repo_target = True if status.scope == "repo" else status.repo_target
+        by_target[(status.agent, scope, repo_target)] = status
 
     lines: list[str] = []
-    repo_statuses = [by_target[(agent, "repo")] for agent in AGENTS]
-    global_statuses = [by_target[(agent, "global")] for agent in AGENTS]
+    repo_statuses = [by_target[(agent, "dir", True)] for agent in AGENTS]
+    global_statuses = [by_target[(agent, "global", False)] for agent in AGENTS]
 
     repo_available = any(status.status != "unavailable" for status in repo_statuses)
     repo_installed = [
@@ -2756,15 +2814,16 @@ def installation_summary_text(
 def normalize_targets(
     selected_targets: Sequence[str],
     scope: str,
-) -> list[tuple[str, str]]:
+    repo_target: bool = False,
+) -> list[InstallationTarget]:
     if TARGET_ALL in selected_targets:
-        return [(agent, scope) for agent in AGENTS]
+        return [(agent, scope, repo_target) for agent in AGENTS]
 
-    targets: list[tuple[str, str]] = []
+    targets: list[InstallationTarget] = []
     for selected in selected_targets:
         if selected not in AGENT_TARGET_VALUES:
             raise UsageError(f"unknown installation target: {selected}")
-        target = (selected, scope)
+        target = (selected, scope, repo_target)
         if target not in targets:
             targets.append(target)
 
@@ -2773,12 +2832,12 @@ def normalize_targets(
     return targets
 
 
-def targets_from_args(args: argparse.Namespace) -> list[tuple[str, str]] | None:
+def targets_from_args(args: argparse.Namespace) -> list[InstallationTarget] | None:
     if getattr(args, "agent", None) is None or getattr(args, "scope", None) is None:
         return None
 
     agents = selected_agents_for_command(args.agent)
-    return [(agent, args.scope) for agent in agents]
+    return [(agent, args.scope, bool(getattr(args, "repo_target", False))) for agent in agents]
 
 
 def complete_with_ui(
@@ -2855,6 +2914,7 @@ def complete_with_ui(
                     "github_ref",
                     "github_path",
                     "scope",
+                    "repo_target",
                     "selected_agents",
                     "targets",
                     "repo",
@@ -2989,7 +3049,7 @@ def complete_with_ui(
                     return build_no_ui_command(
                         project,
                         args,
-                        targets=[(agent, "global") for agent in agents],
+                        targets=[(agent, "global", False) for agent in agents],
                         agent=agent_arg_from_values(selected),
                     )
 
@@ -2997,6 +3057,7 @@ def complete_with_ui(
                     [
                         "selected_agents",
                         "targets",
+                        "repo_target",
                         "repo",
                         "codex_home",
                         "claude_home",
@@ -3071,7 +3132,7 @@ def complete_with_ui(
 
             if args.command == "install":
                 selected_options = prompt_step(
-                    ["targets", "repo", "codex_home", "claude_home"],
+                    ["targets", "repo_target", "repo", "codex_home", "claude_home"],
                     lambda: prompter.select(
                         f"Install location for {project.skill_name}",
                         option_choices,
@@ -3082,7 +3143,7 @@ def complete_with_ui(
             else:
                 default_options = default_installation_option_values(selected_agents)
                 selected_options = prompt_step(
-                    ["targets", "repo", "codex_home", "claude_home"],
+                    ["targets", "repo_target", "repo", "codex_home", "claude_home"],
                     lambda: prompter.checkbox(
                         f"Select {project.skill_name} installations",
                         option_choices,
@@ -3098,7 +3159,7 @@ def complete_with_ui(
                 args.command == "install"
                 and str(selected_options) == SPECIFIC_DIRECTORY_VALUE
             ):
-                selected_targets = [(agent, "repo") for agent in selected_agents]
+                selected_targets = [(agent, "dir", False) for agent in selected_agents]
 
                 def specific_repo_preview(repo: object) -> str | None:
                     return build_no_ui_command(
@@ -3109,7 +3170,7 @@ def complete_with_ui(
                     )
 
                 repo = prompt_step(
-                    ["targets", "repo"],
+                    ["targets", "repo_target", "repo"],
                     lambda: prompter.path(
                         "Directory path",
                         default_repo_path(),
@@ -3121,6 +3182,7 @@ def complete_with_ui(
                 if repo == PROMPT_BACK:
                     continue
                 args.targets = selected_targets
+                args.repo_target = False
                 args.repo = repo
                 continue
             targets = normalize_installation_targets(
@@ -3135,8 +3197,9 @@ def complete_with_ui(
                 claude_home=getattr(args, "claude_home", None),
             )
             args.targets = targets
+            args.repo_target = repo_target_arg_from_targets(targets)
             if (
-                any(scope == "repo" for _, scope in targets)
+                any(scope == "dir" and repo_target for _, scope, repo_target in targets)
                 and getattr(args, "repo", None) is None
             ):
                 args.repo = repo_root
@@ -3145,7 +3208,7 @@ def complete_with_ui(
         args.targets = targets
 
         if (
-            any(scope == "repo" for _, scope in targets)
+            any(scope == "dir" for _, scope, _ in targets)
             and getattr(args, "repo", None) is None
         ):
             def repo_preview(repo: object) -> str | None:
@@ -3157,7 +3220,7 @@ def complete_with_ui(
                 )
 
             repo = prompt_step(
-                ["repo"],
+                ["repo_target", "repo"],
                 lambda: prompter.path(
                     "Directory path",
                     default_repo_path(),
@@ -3181,6 +3244,10 @@ def complete_with_ui(
         args.codex_home = None
     if not hasattr(args, "claude_home"):
         args.claude_home = None
+    if not hasattr(args, "repo_target"):
+        args.repo_target = False
+    if not hasattr(args, "repo"):
+        args.repo = None
     if not hasattr(args, "editable") or args.editable is None:
         args.editable = False
     if not hasattr(args, "pypi") or args.pypi is None:
@@ -3199,13 +3266,21 @@ def complete_with_ui(
 
 
 def require_noninteractive_args(args: argparse.Namespace) -> None:
+    normalize_args_scope(args)
     if args.command is None:
         raise UsageError("choose install or uninstall")
     if getattr(args, "agent", None) is None:
         raise UsageError("--agent is required when the text UI is disabled")
     args.agent = normalize_agent_arg(args.agent)
+    if not hasattr(args, "repo_target"):
+        args.repo_target = False
     if getattr(args, "scope", None) is None:
-        raise UsageError("--scope is required when the text UI is disabled")
+        if getattr(args, "repo_target", False):
+            args.scope = "dir"
+        else:
+            raise UsageError("--scope is required when the text UI is disabled")
+    if args.scope == "global" and getattr(args, "repo_target", False):
+        raise UsageError("--repo can only be used with --scope dir")
     if not hasattr(args, "force"):
         args.force = False
     if not hasattr(args, "editable") or args.editable is None:
@@ -3301,11 +3376,15 @@ def result_target_label(result: InstallResult) -> str:
     agent = AGENT_LABELS.get(result.agent, result.agent)
     if result.scope == "global":
         return f"{agent} global"
-    if result.scope == "repo":
-        repo_name = result.hook_path.parent.name
-        if repo_name and repo_name != "repo":
-            return f"{agent} repo ({repo_name})"
-        return f"{agent} repo"
+    if result.scope == "dir":
+        directory_name = result.hook_path.parent.name
+        if result.repo_target:
+            if directory_name and directory_name != "repo":
+                return f"{agent} repo ({directory_name})"
+            return f"{agent} repo"
+        if directory_name:
+            return f"{agent} directory ({directory_name})"
+        return f"{agent} directory"
     return f"{agent} {result.scope}"
 
 
@@ -3351,15 +3430,17 @@ def print_results(results: Sequence[InstallResult], *, verbose: bool = False) ->
 
 
 def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
+    normalize_args_scope(args)
     installer = Installer(project)
     targets = getattr(args, "targets", None)
     if targets is None:
         agents = selected_agents_for_command(args.agent)
-        repo = args.repo if args.scope == "repo" else None
+        repo = args.repo if args.scope == "dir" else None
         if args.command == "install":
             return installer.install(
                 agents,
                 args.scope,
+                repo_target=getattr(args, "repo_target", False),
                 repo=repo,
                 home=args.home,
                 codex_home=args.codex_home,
@@ -3376,6 +3457,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
             return installer.uninstall(
                 agents,
                 args.scope,
+                repo_target=getattr(args, "repo_target", False),
                 repo=repo,
                 home=args.home,
                 codex_home=args.codex_home,
@@ -3384,15 +3466,20 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
         raise UsageError(f"unknown command: {args.command}")
 
     results: list[InstallResult] = []
-    scopes = list(dict.fromkeys(scope for _, scope in targets))
-    for scope in scopes:
-        agents = [agent for agent, target_scope in targets if target_scope == scope]
-        repo = args.repo if scope == "repo" else None
+    groups = list(dict.fromkeys((scope, repo_target) for _, scope, repo_target in targets))
+    for scope, repo_target in groups:
+        agents = [
+            agent
+            for agent, target_scope, target_repo_target in targets
+            if target_scope == scope and target_repo_target == repo_target
+        ]
+        repo = args.repo if scope == "dir" else None
         if args.command == "install":
             results.extend(
                 installer.install(
                     agents,
                     scope,
+                    repo_target=repo_target,
                     repo=repo,
                     home=args.home,
                     codex_home=args.codex_home,
@@ -3411,6 +3498,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 installer.uninstall(
                     agents,
                     scope,
+                    repo_target=repo_target,
                     repo=repo,
                     home=args.home,
                     codex_home=args.codex_home,
@@ -3427,7 +3515,9 @@ def should_use_ui(args: argparse.Namespace, explicit_no_ui: bool) -> bool:
         return False
     if args.command is None:
         return True
-    return getattr(args, "agent", None) is None or getattr(args, "scope", None) is None
+    if getattr(args, "agent", None) is None:
+        return True
+    return getattr(args, "scope", None) is None and not getattr(args, "repo_target", False)
 
 
 def print_pypi_install_attempt(project: SkillProject, args: argparse.Namespace) -> None:

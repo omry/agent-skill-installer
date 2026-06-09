@@ -1,1 +1,1 @@
-`--target-dir PATH` is now the canonical flag for directory-scoped installs; `--repo` remains supported as a compatibility alias. The TUI now presents these installs as directory choices and shows when the selected directory resolves to a Git or Sapling repository.
+`--target-dir PATH` is now the canonical flag for choosing the directory used by directory-scoped installs. The TUI now presents these installs as directory choices and shows when the selected directory resolves to a Git or Sapling repository.

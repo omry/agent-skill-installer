@@ -23,8 +23,8 @@ Run it from this repository checkout without publishing anything:
 ```bash
 python -m pip install -e .
 python -m pip install -e examples/demo-installer
-demo-agent-skill --no-ui install --agent codex --scope repo --target-dir /path/to/repo
-demo-agent-skill --no-ui uninstall --agent codex --scope repo --target-dir /path/to/repo
+demo-agent-skill --no-ui install --agent codex --scope dir --repo --target-dir /path/to/repo
+demo-agent-skill --no-ui uninstall --agent codex --scope dir --repo --target-dir /path/to/repo
 ```
 
 The important files are:
@@ -50,7 +50,8 @@ python -m build --wheel --no-isolation --outdir /tmp/wheel-agent-skill-dist exam
 agent-skill-installer --no-ui install \
   --wheel-file /tmp/wheel-agent-skill-dist/wheel_agent_skill-0.1.0-py3-none-any.whl \
   --agent codex \
-  --scope repo \
+  --scope dir \
+  --repo \
   --target-dir /path/to/repo
 ```
 
@@ -90,12 +91,14 @@ Run it from this repository checkout:
 ```bash
 PYTHONPATH=src python examples/api-install/install_demo_skill.py install \
   --agent codex \
-  --scope repo \
+  --scope dir \
+  --repo \
   --target-dir /path/to/repo
 
 PYTHONPATH=src python examples/api-install/install_demo_skill.py uninstall \
   --agent codex \
-  --scope repo \
+  --scope dir \
+  --repo \
   --target-dir /path/to/repo
 ```
 

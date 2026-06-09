@@ -39,7 +39,8 @@ agent-skill-installer --no-ui install \
   --skill-path examples/companion-wheel-skill/skill-package/companion_wheel_skill/skill \
   --copy \
   --agent codex \
-  --scope repo \
+  --scope dir \
+  --repo \
   --target-dir /path/to/repo
 ```
 

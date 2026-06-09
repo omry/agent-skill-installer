@@ -207,7 +207,8 @@ agent-skill-installer --no-ui install \
   --skill-path . \
   --editable \
   --agent codex \
-  --scope repo \
+  --scope dir \
+  --repo \
   --target-dir /path/to/test-repo
 ```
 
@@ -223,7 +224,8 @@ Uninstall after testing:
 agent-skill-installer --no-ui uninstall \
   --skill-name my-skill \
   --agent codex \
-  --scope repo \
+  --scope dir \
+  --repo \
   --target-dir /path/to/test-repo
 ```
 

@@ -85,7 +85,8 @@ Verify the built artifact before publishing:
 agent-skill-installer --no-ui install \
   --wheel-file dist/your_skill_package-1.2.3-py3-none-any.whl \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 After publishing to PyPI, install by package requirement:
@@ -94,7 +95,8 @@ After publishing to PyPI, install by package requirement:
 agent-skill-installer --no-ui install \
   --pypi-package your-skill-package==1.2.3 \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 Omit the version to let pip choose the latest compatible release, or use a range

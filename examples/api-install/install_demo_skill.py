@@ -26,13 +26,19 @@ def split_agents(value: str) -> list[str]:
     return agents
 
 
+def parse_scope(value: str) -> str:
+    if value in {"dir", "global", "repo"}:
+        return value
+    raise argparse.ArgumentTypeError("scope must be global or dir")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Install the API demo skill.")
     parser.add_argument("command", choices=["install", "uninstall"])
     parser.add_argument("--agent", required=True, type=split_agents)
-    parser.add_argument("--scope", required=True, choices=["repo", "global"])
+    parser.add_argument("--scope", required=True, type=parse_scope)
     parser.add_argument("--target-dir", dest="repo", metavar="PATH", type=Path)
-    parser.add_argument("--repo", dest="repo", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--repo", dest="repo_target", action="store_true")
     parser.add_argument("--codex-home", type=Path)
     parser.add_argument("--claude-home", type=Path)
     return parser
@@ -40,11 +46,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.scope == "repo":
+        args.scope = "dir"
+        args.repo_target = True
     installer = Installer(PROJECT)
     if args.command == "install":
         results = installer.install(
             args.agent,
             args.scope,
+            repo_target=args.repo_target,
             repo=args.repo,
             codex_home=args.codex_home,
             claude_home=args.claude_home,
@@ -53,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         results = installer.uninstall(
             args.agent,
             args.scope,
+            repo_target=args.repo_target,
             repo=args.repo,
             codex_home=args.codex_home,
             claude_home=args.claude_home,

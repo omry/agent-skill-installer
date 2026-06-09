@@ -17,8 +17,8 @@ From the repository root:
 ```bash
 python -m pip install -e .
 python -m pip install -e examples/demo-installer
-demo-agent-skill --no-ui install --agent all --scope repo --target-dir /path/to/repo
-demo-agent-skill --no-ui uninstall --agent all --scope repo --target-dir /path/to/repo
+demo-agent-skill --no-ui install --agent all --scope dir --repo --target-dir /path/to/repo
+demo-agent-skill --no-ui uninstall --agent all --scope dir --repo --target-dir /path/to/repo
 ```
 
 For a real skill package, replace the package metadata, `SkillProject` values,

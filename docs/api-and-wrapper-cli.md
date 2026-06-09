@@ -54,21 +54,21 @@ scope. Pass `--no-ui` to disable the UI and require a complete noninteractive
 command:
 
 ```bash
-your-skill-package --no-ui install --agent codex --scope repo
+your-skill-package --no-ui install --agent codex --scope dir --repo
 ```
 
 For wrapper commands, `--pypi` installs from the wrapper project's PyPI package
 and lets pip resolve the compatible wheel:
 
 ```bash
-your-skill-package --no-ui install --pypi --agent codex --scope repo
+your-skill-package --no-ui install --pypi --agent codex --scope dir --repo
 ```
 
 Use `--pypi-version VERSION` only when you need an exact wrapper-project
 version:
 
 ```bash
-your-skill-package --no-ui install --pypi-version 1.2.3 --agent codex --scope repo
+your-skill-package --no-ui install --pypi-version 1.2.3 --agent codex --scope dir --repo
 ```
 
 Important `SkillProject` fields:

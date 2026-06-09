@@ -317,11 +317,45 @@ def test_installs_and_uninstalls_codex_repo_scope(tmp_path: Path) -> None:
     assert project.manifest_relative_path.as_posix() in manifest["files"]
     assert project.marker_start in (repo / "AGENTS.md").read_text()
 
-    removed = installer.uninstall(["codex"], "repo", repo=repo)[0]
+    removed = installer.uninstall(["codex"], "dir", repo_target=True, repo=repo)[0]
 
     assert removed.status == "removed"
     assert not skill_dir.exists()
     assert not (repo / "AGENTS.md").exists()
+
+
+def test_installs_codex_dir_target_into_plain_directory(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    installer = Installer(project)
+    target = tmp_path / "plain-directory"
+    target.mkdir()
+
+    result = installer.install(
+        ["codex"],
+        "dir",
+        repo=target,
+    )[0]
+
+    skill_dir = target / ".codex" / "skills" / project.skill_name
+    assert result.status == "installed"
+    assert result.repo_target is False
+    assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
+    assert project.marker_start in (target / "AGENTS.md").read_text()
+
+
+def test_repo_flag_requires_vcs_repo(tmp_path: Path, monkeypatch) -> None:
+    project = make_project(tmp_path)
+    target = tmp_path / "plain-directory"
+    target.mkdir()
+    monkeypatch.setattr("agent_skill_installer.installer.find_repo_root", lambda _: None)
+
+    with pytest.raises(InstallerError, match="--repo requires"):
+        Installer(project).install(
+            ["codex"],
+            "dir",
+            repo_target=True,
+            repo=target,
+        )
 
 
 def test_packaged_install_requires_explicit_bundled_skill_path(tmp_path: Path) -> None:
@@ -346,14 +380,16 @@ def test_inspect_accepts_legacy_scripts_manifest(tmp_path: Path) -> None:
     installer = Installer(project)
     repo = make_repo(tmp_path / "repo")
 
-    installer.install(["codex"], "repo", repo=repo)
+    installer.install(["codex"], "dir", repo_target=True, repo=repo)
     skill_dir = repo / ".codex" / "skills" / project.skill_name
     legacy = move_manifest_to_legacy_scripts_path(project, skill_dir)
 
     status = installer.inspect_installations(repo=repo)
 
     codex_repo = [
-        item for item in status if item.agent == "codex" and item.scope == "repo"
+        item
+        for item in status
+        if item.agent == "codex" and item.scope == "dir" and item.repo_target
     ][0]
     assert legacy.exists()
     assert codex_repo.status == "installed"
@@ -1159,7 +1195,7 @@ def test_run_pip_wheel_uses_current_python_module(
     command, cwd = calls[0]
     assert command[:4] == [sys.executable, "-m", "pip", "wheel"]
     assert "--no-deps" in command
-    assert command[-2:] == ["--editable", "../client"]
+    assert command[-3:] == ["--no-build-isolation", "--editable", "../client"]
     assert cwd == tmp_path / "skill"
 
 
@@ -1590,7 +1626,7 @@ def test_uninstall_preserves_existing_hook_content(tmp_path: Path) -> None:
     hook = repo / "AGENTS.md"
     hook.write_text("# Existing Instructions\n\nKeep this.\n")
 
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "dir", repo_target=True, repo=repo)
     Installer(project).uninstall(["codex"], "repo", repo=repo)
 
     assert hook.read_text() == "# Existing Instructions\n\nKeep this.\n"
@@ -1683,7 +1719,8 @@ def test_generic_uninstall_uses_manifest_hook_markers(tmp_path: Path) -> None:
             skill_name=project.skill_name,
             package_name=project.package_name,
             agent="codex",
-            scope="repo",
+            scope="dir",
+            repo_target=True,
             repo=repo,
             home=None,
             codex_home=None,
@@ -1780,10 +1817,11 @@ def test_cli_install_help_uses_target_dir_path_metavar(
     assert error.value.code == 0
     assert "--target-dir PATH" in output.out
     assert "--target-dir REPO" not in output.out
-    assert "--repo" not in output.out
+    assert "--target-type" not in output.out
+    assert "--repo" in output.out
 
 
-def test_cli_no_ui_repo_alias_still_targets_directory(tmp_path: Path, capsys) -> None:
+def test_cli_no_ui_repo_flag_targets_repository_directory(tmp_path: Path, capsys) -> None:
     project = make_project(tmp_path)
     repo = make_repo(tmp_path / "repo")
 
@@ -1794,8 +1832,9 @@ def test_cli_no_ui_repo_alias_still_targets_directory(tmp_path: Path, capsys) ->
             "--agent",
             "codex",
             "--scope",
-            "repo",
+            "dir",
             "--repo",
+            "--target-dir",
             str(repo),
         ],
         project=project,
@@ -1804,6 +1843,34 @@ def test_cli_no_ui_repo_alias_still_targets_directory(tmp_path: Path, capsys) ->
 
     assert exit_code == 0
     assert "Installed example-agent-skill 1.2.3 to Codex repo:" in output.out
+
+
+def test_cli_no_ui_dir_scope_installs_plain_directory(tmp_path: Path, capsys) -> None:
+    project = make_project(tmp_path)
+    target = tmp_path / "plain-directory"
+    target.mkdir()
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--agent",
+            "codex",
+            "--scope",
+            "dir",
+            "--target-dir",
+            str(target),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "Installed example-agent-skill 1.2.3 "
+        "to Codex directory (plain-directory):"
+    ) in output.out
+    assert (target / ".codex" / "skills" / project.skill_name / "SKILL.md").exists()
 
 
 def test_cli_no_ui_verbose_lists_paths(tmp_path: Path, capsys) -> None:
@@ -2154,7 +2221,8 @@ def test_cli_no_ui_command_preview_includes_github_source(tmp_path: Path) -> Non
         project,
         "install",
         agent="codex",
-        scope="repo",
+        scope="dir",
+        repo_target=True,
         repo=tmp_path / "repo",
         github_url="https://github.com/example/demo",
         github_ref="v1",
@@ -2162,7 +2230,7 @@ def test_cli_no_ui_command_preview_includes_github_source(tmp_path: Path) -> Non
     ) == (
         "example-agent-skill --no-ui install "
         "--github-url https://github.com/example/demo --github-ref v1 "
-        "--github-path skill --agent codex --scope repo --target-dir "
+        "--github-path skill --agent codex --scope dir --repo --target-dir "
         f"{shlex.quote(str(tmp_path / 'repo'))}"
     )
 
@@ -2401,7 +2469,7 @@ def test_textual_checkbox_all_mode_and_empty_selection() -> None:
         selected_values = list(selected) if isinstance(selected, list) else []
         if not selected_values:
             return None
-        return "example-agent-skill --no-ui uninstall --agent all --scope repo"
+        return "example-agent-skill --no-ui uninstall --agent all --scope dir --repo"
 
     app = make_textual_checkbox_app(
         "Select target agents",
@@ -2494,7 +2562,7 @@ def test_textual_pypi_version_input_suggests_versions_and_updates_preview() -> N
     def preview(version: object) -> str:
         return (
             "example-agent-skill --no-ui install "
-            f"--pypi-version {version} --agent all --scope repo"
+            f"--pypi-version {version} --agent all --scope dir --repo"
         )
 
     app = make_textual_version_app(
@@ -2781,10 +2849,10 @@ def test_installation_option_choices_offer_install_locations(tmp_path: Path) -> 
 
     assert choices == [
         {
-            "name": "Global",
+            "name": "Agent config directory",
             "description": "\n".join(
                 [
-                    "Install in agent home directory",
+                    "Install in agent config directory",
                     str(home / ".codex"),
                     str(home / ".claude"),
                 ]
@@ -2799,8 +2867,11 @@ def test_installation_option_choices_offer_install_locations(tmp_path: Path) -> 
             "kind": "scope",
         },
         {
-            "name": "Choose directory",
-            "description": "Prompt for a directory",
+            "name": "Directory",
+            "description": (
+                "Install files into an explicit directory; automatic discovery "
+                "is not implied"
+            ),
             "value": "specific",
             "kind": "scope",
         },
@@ -2828,15 +2899,15 @@ def test_installation_summary_text_reports_repo_and_global_versions(
 
 def test_command_preview_classes_follow_exact_subcommand() -> None:
     assert (
-        command_preview_classes(
-            "example-agent-skill --no-ui install --agent all --scope repo"
-        )
+            command_preview_classes(
+            "example-agent-skill --no-ui install --agent all --scope dir --repo"
+            )
         == "install-preview"
     )
     assert (
-        command_preview_classes(
-            "example-agent-skill --no-ui uninstall --agent all --scope repo"
-        )
+            command_preview_classes(
+            "example-agent-skill --no-ui uninstall --agent all --scope dir --repo"
+            )
         == "uninstall-preview"
     )
 
@@ -2885,12 +2956,12 @@ def test_update_command_preview_display_changes_mode_class() -> None:
 
     update_command_preview_display(
         app,
-        "example-agent-skill --no-ui uninstall --agent all --scope repo",
+        "example-agent-skill --no-ui uninstall --agent all --scope dir --repo",
         object,
     )
 
     assert app.command.text == (
-        "example-agent-skill --no-ui uninstall --agent all --scope repo"
+        "example-agent-skill --no-ui uninstall --agent all --scope dir --repo"
     )
     assert app.panel.classes == {"uninstall-preview"}
 
@@ -2951,7 +3022,7 @@ def test_build_no_ui_command_for_mixed_scope_targets(tmp_path: Path) -> None:
     command = build_no_ui_command(
         project,
         args,
-        targets=[("codex", "global"), ("codex", "repo")],
+        targets=[("codex", "global", False), ("codex", "dir", True)],
         repo=repo,
         codex_home=codex_home,
     )
@@ -2959,7 +3030,39 @@ def test_build_no_ui_command_for_mixed_scope_targets(tmp_path: Path) -> None:
     assert command == (
         "example-agent-skill --no-ui install --agent codex --scope global "
         f"--codex-home {shlex.quote(str(codex_home))}\n"
-        "example-agent-skill --no-ui install --agent codex --scope repo --target-dir "
+        "example-agent-skill --no-ui install --agent codex --scope dir --repo --target-dir "
+        f"{shlex.quote(str(repo))}"
+    )
+
+
+def test_build_no_ui_command_for_mixed_dir_repo_target_targets(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    args = Namespace(
+        command="install",
+        editable=False,
+        pypi_version=None,
+        force=False,
+        agent=None,
+        scope=None,
+        repo=None,
+        codex_home=None,
+        claude_home=None,
+    )
+    repo = tmp_path / "repo"
+
+    command = build_no_ui_command(
+        project,
+        args,
+        targets=[("codex", "dir", True), ("codex", "dir", False)],
+        repo=repo,
+    )
+
+    assert command == (
+        "example-agent-skill --no-ui install --agent codex --scope dir --repo --target-dir "
+        f"{shlex.quote(str(repo))}\n"
+        "example-agent-skill --no-ui install --agent codex --scope dir --target-dir "
         f"{shlex.quote(str(repo))}"
     )
 
@@ -2980,7 +3083,7 @@ def test_complete_with_ui_selects_specific_targets(tmp_path: Path) -> None:
     complete_with_ui(project, args, prompter)
 
     assert args.command == "install"
-    assert args.targets == [("codex", "global")]
+    assert args.targets == [("codex", "global", False)]
     assert prompter.calls == [
         ("select", "What would you like to do with example-agent-skill?"),
         ("checkbox", "Select agents for example-agent-skill"),
@@ -3012,7 +3115,8 @@ def test_complete_with_ui_selects_specific_directory(tmp_path: Path) -> None:
     complete_with_ui(project, args, prompter)
 
     assert args.command == "install"
-    assert args.targets == [("codex", "repo")]
+    assert args.targets == [("codex", "dir", False)]
+    assert args.repo_target is False
     assert args.repo == repo
     assert prompter.calls == [
         ("select", "What would you like to do with example-agent-skill?"),
@@ -3024,7 +3128,7 @@ def test_complete_with_ui_selects_specific_directory(tmp_path: Path) -> None:
         "example-agent-skill --no-ui install --agent all --scope global",
         "example-agent-skill --no-ui install --agent codex --scope global",
         None,
-        "example-agent-skill --no-ui install --agent codex --scope repo --target-dir "
+        "example-agent-skill --no-ui install --agent codex --scope dir --target-dir "
         f"{shlex.quote(str(repo))}",
     ]
     assert prompter.summaries[3] == f"Directory: {repo} (repository: {repo})"
@@ -3067,14 +3171,14 @@ def test_complete_with_ui_selects_pypi_source(
     assert args.editable is False
     assert args.pypi is True
     assert args.pypi_version is None
-    assert args.targets == [("codex", "repo")]
+    assert args.targets == [("codex", "dir", True)]
     assert args.repo == repo
     assert prompter.previews == [
         "example-agent-skill --no-ui install --agent all --scope global",
         "example-agent-skill --no-ui install --pypi --agent all --scope global",
         "example-agent-skill --no-ui install --pypi --agent codex --scope global",
         "example-agent-skill --no-ui install --pypi "
-        f"--agent codex --scope repo --target-dir {shlex.quote(str(repo))}",
+        f"--agent codex --scope dir --repo --target-dir {shlex.quote(str(repo))}",
     ]
 
 
@@ -3114,7 +3218,7 @@ def test_complete_with_ui_selects_github_source(
     assert args.editable is False
     assert args.pypi_version is None
     assert args.github_url == "https://github.com/example/demo"
-    assert args.targets == [("codex", "repo")]
+    assert args.targets == [("codex", "dir", True)]
     assert args.repo == repo
     assert prompter.calls == [
         ("select", "What would you like to do with example-agent-skill?"),
@@ -3133,7 +3237,7 @@ def test_complete_with_ui_selects_github_source(
         "example-agent-skill --no-ui install "
         "--github-url https://github.com/example/demo --agent codex --scope global",
         "example-agent-skill --no-ui install "
-        "--github-url https://github.com/example/demo --agent codex --scope repo --target-dir "
+        "--github-url https://github.com/example/demo --agent codex --scope dir --repo --target-dir "
         f"{shlex.quote(str(repo))}",
     ]
 
@@ -3181,7 +3285,7 @@ def test_complete_with_ui_escape_goes_back_one_screen(
     complete_with_ui(project, args, prompter)
 
     assert args.command == "uninstall"
-    assert args.targets == [("codex", "global")]
+    assert args.targets == [("codex", "global", False)]
     assert prompter.calls == [
         ("select", "What would you like to do with example-agent-skill?"),
         ("checkbox", "Select agents for example-agent-skill"),
@@ -3226,7 +3330,8 @@ def test_python_module_entry_point_shows_generic_help() -> None:
     assert install_help.returncode == 0
     assert "--target-dir PATH" in install_help.stdout
     assert "--target-dir REPO" not in install_help.stdout
-    assert "--repo" not in install_help.stdout
+    assert "--target-type" not in install_help.stdout
+    assert "--repo" in install_help.stdout
 
 
 def test_generic_console_bare_command_uses_interactive_ui(
@@ -3242,7 +3347,8 @@ def test_generic_console_bare_command_uses_interactive_ui(
         args.skill_path = source
         args.skill_name = "example-agent-skill"
         args.agent = "codex"
-        args.scope = "repo"
+        args.scope = "dir"
+        args.repo_target = True
         args.repo = repo
 
     monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: True)
@@ -3364,7 +3470,8 @@ def test_generic_complete_with_ui_selects_local_install_source(
     assert args.skill_path == source
     assert args.editable is True
     assert args.agent == "codex"
-    assert args.scope == "repo"
+    assert args.scope == "dir"
+    assert args.repo_target is True
     assert args.repo == repo
     assert prompter.calls == [
         ("select", "What would you like to do?"),
@@ -3470,7 +3577,8 @@ def test_generic_complete_with_ui_selects_specific_directory(
     assert args.skill_path == source
     assert args.editable is True
     assert args.agent == "codex"
-    assert args.scope == "repo"
+    assert args.scope == "dir"
+    assert args.repo_target is False
     assert args.repo == repo
     assert prompter.calls == [
         ("select", "What would you like to do?"),
@@ -3485,7 +3593,7 @@ def test_generic_complete_with_ui_selects_specific_directory(
     assert prompter.previews[6] == (
         "agent-skill-installer --no-ui install "
         f"--skill-path {shlex.quote(str(source))} --editable --agent codex "
-        f"--scope repo --target-dir {shlex.quote(str(repo))}"
+        f"--scope dir --target-dir {shlex.quote(str(repo))}"
     )
     assert prompter.summaries[6] == f"Directory: {repo} (repository: {repo})"
     assert prompter.submit_labels[-2:] == ["Install", "Install"]
@@ -3733,7 +3841,8 @@ def test_generic_complete_with_ui_selects_wheel_file(
     assert args.command == "install"
     assert args.wheel_file == wheel
     assert args.agent == "codex"
-    assert args.scope == "repo"
+    assert args.scope == "dir"
+    assert args.repo_target is True
     assert getattr(args, "_validated_wheel_project").skill_name == project.skill_name
     assert prompter.calls == [
         ("select", "What would you like to do?"),
@@ -4226,8 +4335,9 @@ def test_generic_console_repo_alias_still_targets_directory(
             "--agent",
             "codex",
             "--scope",
-            "repo",
+            "dir",
             "--repo",
+            "--target-dir",
             str(repo),
         ]
     )
@@ -4238,6 +4348,39 @@ def test_generic_console_repo_alias_still_targets_directory(
         "Installed example-agent-skill local (editable) to Codex repo:"
         in output.out
     )
+
+
+def test_generic_console_dir_scope_installs_plain_directory(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    target = tmp_path / "plain-directory"
+    target.mkdir()
+
+    install_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--skill-name",
+            "example-agent-skill",
+            "--agent",
+            "codex",
+            "--scope",
+            "dir",
+            "--target-dir",
+            str(target),
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert install_code == 0
+    assert (
+        "Installed example-agent-skill local (editable) "
+        "to Codex directory (plain-directory):"
+    ) in output.out
+    assert (target / ".codex" / "skills" / "example-agent-skill").is_symlink()
 
 
 def test_generic_console_can_copy_local_skill(
@@ -4829,7 +4972,8 @@ def test_generic_complete_with_ui_prompts_for_source_skills(
         skill_path=source,
         editable=False,
         agent="codex",
-        scope="repo",
+        scope="dir",
+        repo_target=True,
         repo=repo,
         codex_home=None,
         claude_home=None,
@@ -4891,7 +5035,8 @@ def test_generic_multi_skill_install_does_not_commit_on_staging_failure(
         skill_path=source,
         editable=False,
         agent="codex",
-        scope="repo",
+        scope="dir",
+        repo_target=True,
         repo=repo,
         codex_home=None,
         claude_home=None,
@@ -4950,7 +5095,8 @@ def test_generic_multi_skill_install_reports_all_rollback_cleanup_failures(
         skill_path=source,
         editable=False,
         agent="codex",
-        scope="repo",
+        scope="dir",
+        repo_target=True,
         repo=repo,
         codex_home=None,
         claude_home=None,

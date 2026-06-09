@@ -113,6 +113,7 @@ INSTALL_SOURCE_FIELDS = [
 TARGET_FIELDS = [
     "agent",
     "scope",
+    "repo_target",
     "repo",
     "codex_home",
     "claude_home",
@@ -122,6 +123,7 @@ UNINSTALL_FIELDS = [
     "package_name",
     "agent",
     "scope",
+    "repo_target",
     "repo",
     "uninstall_statuses",
 ]
@@ -288,24 +290,21 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--scope",
-        choices=("repo", "global"),
-        help="Install for a repository-scoped directory or for the current user.",
+        type=parse_scope_arg,
+        help="Install location scope: global agent config home or a directory.",
     )
     parser.add_argument(
         "--target-dir",
         dest="repo",
         metavar="PATH",
         type=Path,
-        help=(
-            "Directory to use with --scope repo. Must be inside a Git or "
-            "Sapling repository. Defaults to cwd."
-        ),
+        help="Directory to use with --scope dir. Defaults to cwd.",
     )
     parser.add_argument(
         "--repo",
-        dest="repo",
-        type=Path,
-        help=argparse.SUPPRESS,
+        dest="repo_target",
+        action="store_true",
+        help="With --scope dir, resolve and require a Git/Sapling repository root.",
     )
     parser.add_argument(
         "--codex-home",
@@ -370,9 +369,9 @@ def local_install_mode_choices() -> list[dict[str, str]]:
 
 def scope_choices() -> list[dict[str, str]]:
     return [
-        {"name": "User global", "value": "global"},
-        {"name": "Current directory", "value": "repo"},
-        {"name": "Choose directory", "value": "specific"},
+        {"name": "Agent config directory", "value": "global"},
+        {"name": "Current repository directory", "value": "repo"},
+        {"name": "Directory", "value": "specific"},
     ]
 
 
@@ -380,7 +379,20 @@ def quote_command(parts: list[object]) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
+def parse_scope_arg(value: str) -> str:
+    if value in {"dir", "global", "repo"}:
+        return value
+    raise argparse.ArgumentTypeError("scope must be global or dir")
+
+
+def normalize_args_scope(args: argparse.Namespace) -> None:
+    if getattr(args, "scope", None) == "repo":
+        args.scope = "dir"
+        args.repo_target = True
+
+
 def build_no_ui_command(args: argparse.Namespace) -> str | None:
+    normalize_args_scope(args)
     command = getattr(args, "command", None)
     if command not in {"install", "uninstall"}:
         return None
@@ -437,9 +449,12 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
         parts.extend(["--description", description])
 
     agent = getattr(args, "agent", None) or TARGET_ALL
-    scope = getattr(args, "scope", None) or "global"
+    repo_target = bool(getattr(args, "repo_target", False))
+    scope = getattr(args, "scope", None) or ("dir" if repo_target else "global")
     parts.extend(["--agent", agent, "--scope", scope])
-    if scope == "repo" and getattr(args, "repo", None) is not None:
+    if scope == "dir" and repo_target:
+        parts.append("--repo")
+    if scope == "dir" and getattr(args, "repo", None) is not None:
         parts.extend(["--target-dir", args.repo])
     if scope == "global":
         if getattr(args, "codex_home", None) is not None:
@@ -468,6 +483,7 @@ def ensure_arg_defaults(args: argparse.Namespace) -> None:
         "dst_skill": None,
         "agent": None,
         "scope": None,
+        "repo_target": False,
         "repo": None,
         "codex_home": None,
         "claude_home": None,
@@ -569,6 +585,7 @@ def preview_command(
     preview_args = copy_args(args)
     for name, value in updates.items():
         setattr(preview_args, name, value)
+    normalize_args_scope(preview_args)
     return build_no_ui_command(preview_args)
 
 
@@ -838,6 +855,7 @@ def install_target_summary(
     )
     if not selected_agent or not selected_scope:
         return None
+    repo_target = bool(getattr(args, "repo_target", False))
 
     try:
         agents = normalize_agents([selected_agent])
@@ -850,6 +868,7 @@ def install_target_summary(
             agent_name,
             selected_scope,
             repo=repo,
+            repo_target=repo_target,
         )
         for agent_name in agents
     ]
@@ -862,15 +881,17 @@ def install_target_label(
     scope: str,
     *,
     repo: object | None = None,
+    repo_target: bool = False,
 ) -> str:
     label = (
         "Claude"
         if agent_name == "claude"
         else AGENT_LABELS.get(agent_name, agent_name)
     )
-    if scope == "repo":
+    if scope == "dir":
         repo_path = target_repo_path(args, repo)
-        return f"{label} {repo_path.name or 'repository'}"
+        kind = "repository" if repo_target else "directory"
+        return f"{label} {repo_path.name or kind}"
     if scope == "global":
         return f"{label} Global"
     return f"{label} {scope}"
@@ -1172,11 +1193,7 @@ def validated_github_download(
 
 def repo_root_for_ui(args: argparse.Namespace) -> Path | None:
     repo = getattr(args, "repo", None)
-    return (
-        find_repo_root(repo)
-        if repo is not None
-        else find_repo_root(default_repo_path())
-    )
+    return find_repo_root(repo) if repo is not None else find_repo_root(default_repo_path())
 
 
 def directory_repository_summary(directory: Path) -> str:
@@ -1187,7 +1204,7 @@ def directory_repository_summary(directory: Path) -> str:
 
 
 def repo_from_status(status: InstallationStatus) -> Path | None:
-    if status.scope != "repo":
+    if status.scope != "dir":
         return None
     if status.hook_path is not None:
         return status.hook_path.parent
@@ -1479,7 +1496,8 @@ def apply_uninstall_status(
     args.package_name = status.package_name or skill_name
     args.agent = status.agent
     args.scope = status.scope
-    if status.scope == "repo":
+    args.repo_target = status.repo_target
+    if status.scope == "dir":
         args.repo = repo_from_status(status) or getattr(args, "repo", None)
 
 
@@ -1824,28 +1842,29 @@ def complete_install_targets_with_ui(
 
     if args.scope is None:
         def scope_preview(scope: object) -> str | None:
-            selected_scope = str(scope)
-            if selected_scope == "specific":
+            selected = str(scope)
+            if selected == "specific":
                 return None
-            repo = repo_root_for_ui(args) if selected_scope == "repo" else None
+            repo = repo_root_for_ui(args) if selected == "repo" else None
             return preview_command(
                 args,
-                scope=selected_scope,
+                scope="dir" if selected == "repo" else selected,
+                repo_target=selected == "repo",
                 repo=repo,
             )
 
         def scope_summary(scope: object) -> str | None:
-            selected_scope = str(scope)
-            if selected_scope == "specific":
+            selected = str(scope)
+            if selected == "specific":
                 return install_decision_summary(args, command="install")
-            repo = repo_root_for_ui(args) if selected_scope == "repo" else None
+            repo = repo_root_for_ui(args) if selected == "repo" else None
             summary = install_decision_summary(
                 args,
                 command="install",
-                scope=selected_scope,
+                scope="dir" if selected == "repo" else selected,
                 repo=repo,
             )
-            if selected_scope == "repo" and repo is not None:
+            if selected == "repo" and repo is not None:
                 repo_summary = directory_repository_summary(repo)
                 return "\n".join(
                     part for part in (summary, repo_summary) if part
@@ -1853,7 +1872,7 @@ def complete_install_targets_with_ui(
             return summary
 
         scope_result = run_prompt(
-            ["scope", "repo"],
+            ["scope", "repo_target", "repo"],
             lambda: prompter.select(
                 "Install location",
                 scope_choices(),
@@ -1867,13 +1886,14 @@ def complete_install_targets_with_ui(
         selected_scope = str(scope_result)
         if selected_scope == "specific":
             repo_result = run_prompt(
-                ["scope", "repo"],
+                ["scope", "repo_target", "repo"],
                 lambda: prompter.path(
                     "Directory path",
                     default_repo_path(),
                     command_preview_builder=lambda value: preview_command(
                         args,
-                        scope="repo",
+                        scope="dir",
+                        repo_target=False,
                         repo=Path(str(value)),
                     ),
                     summary_builder=lambda value: directory_repository_summary(
@@ -1884,24 +1904,31 @@ def complete_install_targets_with_ui(
             )
             if repo_result == PROMPT_BACK:
                 return PROMPT_BACK
-            args.scope = "repo"
+            args.scope = "dir"
+            args.repo_target = False
             args.repo = repo_result
+        elif selected_scope == "repo":
+            args.scope = "dir"
+            args.repo_target = True
+            args.repo = repo_root_for_ui(args) or args.repo
         else:
             args.scope = selected_scope
+            args.repo_target = False
 
-    if args.scope == "repo" and args.repo is None:
+    if args.scope == "dir" and args.repo_target and args.repo is None:
         repo = repo_root_for_ui(args)
         if repo is not None:
             args.repo = repo
         else:
             repo_result = run_prompt(
-                ["repo"],
+                ["repo_target", "repo"],
                 lambda: prompter.path(
-                    "Directory path",
+                    "Repository directory path",
                     default_repo_path(),
                     command_preview_builder=lambda value: preview_command(
                         args,
-                        scope="repo",
+                        scope="dir",
+                        repo_target=True,
                         repo=Path(str(value)),
                     ),
                     summary_builder=lambda value: directory_repository_summary(
@@ -2153,6 +2180,7 @@ def install_source_skill_selection_needs_ui(args: argparse.Namespace) -> bool:
 
 def require_noninteractive_args(args: argparse.Namespace) -> None:
     ensure_arg_defaults(args)
+    normalize_args_scope(args)
     if args.command is None:
         raise UsageError("choose install or uninstall")
     if args.command not in {"install", "uninstall"}:
@@ -2161,7 +2189,12 @@ def require_noninteractive_args(args: argparse.Namespace) -> None:
         raise UsageError("--agent is required when the text UI is disabled")
     normalize_agents([args.agent])
     if args.scope is None:
-        raise UsageError("--scope is required when the text UI is disabled")
+        if args.repo_target:
+            args.scope = "dir"
+        else:
+            raise UsageError("--scope is required when the text UI is disabled")
+    if args.scope == "global" and args.repo_target:
+        raise UsageError("--repo can only be used with --scope dir")
 
     if args.command == "install":
         selected_sources = [
@@ -2931,7 +2964,7 @@ def stage_project_for_targets(
         wheel_path=pypi_wheel_path if pypi_version is None else None,
         github_source=github_source,
     )
-    repo = args.repo if args.scope == "repo" else None
+    repo = args.repo if args.scope == "dir" else None
     return [
         stage_install_target(
             project,
@@ -2939,6 +2972,7 @@ def stage_project_for_targets(
                 project,
                 agent,
                 args.scope,
+                repo_target=args.repo_target,
                 repo=repo,
                 home=args.home,
                 codex_home=args.codex_home,
@@ -2968,7 +3002,8 @@ def validate_install_plan(
                 project,
                 agent,
                 args.scope,
-                repo=args.repo if args.scope == "repo" else None,
+                repo_target=args.repo_target,
+                repo=args.repo if args.scope == "dir" else None,
                 home=args.home,
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
@@ -2996,7 +3031,8 @@ def transaction_created_dirs(
                 project,
                 agent,
                 args.scope,
-                repo=args.repo if args.scope == "repo" else None,
+                repo_target=args.repo_target,
+                repo=args.repo if args.scope == "dir" else None,
                 home=args.home,
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
@@ -3057,6 +3093,7 @@ def install_projects_for_targets(
     pypi_version: str | None = None,
     pypi_wheel_path: Path | None = None,
 ) -> list[InstallResult]:
+    normalize_args_scope(args)
     validate_install_plan(projects, args)
     created_dirs = transaction_created_dirs(projects, args)
     staged_installs: list[StagedInstall] = []
@@ -3216,7 +3253,8 @@ def run_uninstall(args: argparse.Namespace) -> list[InstallResult]:
     return Installer(project).uninstall(
         [args.agent],
         args.scope,
-        repo=args.repo if args.scope == "repo" else None,
+        repo_target=args.repo_target,
+        repo=args.repo if args.scope == "dir" else None,
         home=args.home,
         codex_home=args.codex_home,
         claude_home=args.claude_home,
@@ -3224,6 +3262,7 @@ def run_uninstall(args: argparse.Namespace) -> list[InstallResult]:
 
 
 def run(args: argparse.Namespace) -> list[InstallResult]:
+    normalize_args_scope(args)
     if args.command == "install":
         return run_install(args)
     if args.command == "uninstall":

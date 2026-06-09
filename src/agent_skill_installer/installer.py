@@ -37,7 +37,7 @@ PYPI_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 GITHUB_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 DEFAULT_GITHUB_REF = "main"
 AGENTS = ("codex", "claude")
-SCOPES = ("repo", "global")
+SCOPES = ("dir", "global")
 INSTALLER_METADATA_FILE_NAMES = frozenset({CONFIG_FILE_NAME})
 
 
@@ -171,6 +171,7 @@ def load_packaged_installer_config(project: SkillProject) -> InstallerConfig | N
 class TargetSpec:
     agent: str
     scope: str
+    repo_target: bool
     skill_dir: Path
     hook_path: Path
     hook_block: str
@@ -183,6 +184,7 @@ class InstallResult:
     action: str
     agent: str
     scope: str
+    repo_target: bool
     skill_dir: Path
     hook_path: Path
     status: str
@@ -278,6 +280,7 @@ class InstallationStatus:
     source_url: str | None = None
     source_ref: str | None = None
     source_path: str | None = None
+    repo_target: bool = False
     error: str | None = None
 
 
@@ -290,6 +293,7 @@ class Installer:
         agents: Iterable[str],
         scope: str,
         *,
+        repo_target: bool = False,
         repo: Path | None = None,
         home: Path | None = None,
         codex_home: Path | None = None,
@@ -306,6 +310,7 @@ class Installer:
             self.project,
             agents,
             scope,
+            repo_target=repo_target,
             repo=repo,
             home=home,
             codex_home=codex_home,
@@ -324,6 +329,7 @@ class Installer:
         agents: Iterable[str],
         scope: str,
         *,
+        repo_target: bool = False,
         repo: Path | None = None,
         home: Path | None = None,
         codex_home: Path | None = None,
@@ -333,6 +339,7 @@ class Installer:
             self.project,
             agents,
             scope,
+            repo_target=repo_target,
             repo=repo,
             home=home,
             codex_home=codex_home,
@@ -461,6 +468,32 @@ def validate_scope(scope: str) -> None:
     if scope not in SCOPES:
         joined = ", ".join(SCOPES)
         raise InstallerError(f"scope must be one of: {joined}")
+
+
+def normalize_scope_and_repo_target(scope: str, repo_target: bool) -> tuple[str, bool]:
+    if scope == "repo":
+        return "dir", True
+    validate_scope(scope)
+    return scope, repo_target
+
+
+def normalize_manifest_target(
+    scope: str,
+    *,
+    target_type: object | None,
+    repo_target: object | None,
+) -> tuple[str, bool]:
+    if scope == "repo":
+        if target_type == "free":
+            return "dir", False
+        return "dir", True
+    if scope == "dir":
+        if isinstance(repo_target, bool):
+            return scope, repo_target
+        if target_type == "repo":
+            return scope, True
+        return scope, False
+    return scope, False
 
 
 def bundled_skill_root(project: SkillProject):
@@ -863,11 +896,18 @@ def find_repo_root(start: Path | None = None) -> Path | None:
 def resolve_repo_root(repo: Path | None) -> Path:
     root = find_repo_root(repo)
     if root is None:
-        location = str((repo or Path.cwd()).resolve())
+        location = str((repo or Path.cwd()).expanduser().resolve())
         raise InstallerError(
-            f"repo scope requires a .git or .sl repository above {location}"
+            f"--repo requires a .git or .sl repository above {location}"
         )
     return root
+
+
+def resolve_target_directory(repo: Path | None) -> Path:
+    target = (repo or Path.cwd()).expanduser().resolve()
+    if target.is_file():
+        target = target.parent
+    return target
 
 
 def resolve_home(home: Path | None = None) -> Path:
@@ -890,6 +930,7 @@ def target_spec(
     agent: str,
     scope: str,
     *,
+    repo_target: bool = False,
     repo: Path | None = None,
     home: Path | None = None,
     codex_home: Path | None = None,
@@ -897,10 +938,17 @@ def target_spec(
 ) -> TargetSpec:
     if agent not in AGENTS:
         raise InstallerError(f"unknown agent target: {agent}")
-    validate_scope(scope)
+    scope, repo_target = normalize_scope_and_repo_target(scope, repo_target)
+    if scope == "global" and repo_target:
+        raise InstallerError("--repo can only be used with dir scope")
 
     home_path = resolve_home(home)
-    repo_root = resolve_repo_root(repo) if scope == "repo" else None
+    if scope == "dir" and repo_target:
+        repo_root = resolve_repo_root(repo)
+    elif scope == "dir":
+        repo_root = resolve_target_directory(repo)
+    else:
+        repo_root = None
 
     layouts: dict[str, dict[str, str]] = {
         "codex": {
@@ -933,6 +981,7 @@ def target_spec(
     return TargetSpec(
         agent=agent,
         scope=scope,
+        repo_target=repo_target,
         skill_dir=skill_dir,
         hook_path=hook_path,
         hook_block=project.hook_block(agent),
@@ -1014,7 +1063,13 @@ def status_from_manifest(
     manifest_file: Path,
 ) -> InstallationStatus:
     agent = manifest_str(manifest, "agent", manifest_file)
-    scope = manifest_str(manifest, "scope", manifest_file)
+    raw_scope = manifest_str(manifest, "scope", manifest_file)
+    target_type = manifest.get("target_type")
+    scope, repo_target = normalize_manifest_target(
+        raw_scope,
+        target_type=target_type,
+        repo_target=manifest.get("repo_target"),
+    )
     skill_dir = Path(manifest_str(manifest, "skill_dir", manifest_file))
     hook_path = Path(manifest_str(manifest, "hook_path", manifest_file))
     install_mode = manifest.get("install_mode")
@@ -1026,6 +1081,7 @@ def status_from_manifest(
     return InstallationStatus(
         agent=agent,
         scope=scope,
+        repo_target=repo_target,
         skill_dir=skill_dir,
         status="installed",
         version=manifest_package_version(manifest),
@@ -1067,7 +1123,11 @@ def discover_managed_installations_for_target(spec: TargetSpec) -> list[Installa
             status = status_from_manifest(manifest, path)
         except InstallerError:
             continue
-        if status.agent != spec.agent or status.scope != spec.scope:
+        if (
+            status.agent != spec.agent
+            or status.scope != spec.scope
+            or status.repo_target != spec.repo_target
+        ):
             continue
         statuses.append(status)
     return statuses
@@ -1085,23 +1145,26 @@ def discover_managed_installations(
     seen: set[Path] = set()
     for agent in AGENTS:
         for scope in SCOPES:
-            try:
-                spec = target_spec(
-                    project,
-                    agent,
-                    scope,
-                    repo=repo,
-                    home=home,
-                    codex_home=codex_home,
-                    claude_home=claude_home,
-                )
-            except InstallerError:
-                continue
-            for status in discover_managed_installations_for_target(spec):
-                if status.manifest_path is None or status.manifest_path in seen:
+            repo_targets = (False, True) if scope == "dir" else (False,)
+            for repo_target in repo_targets:
+                try:
+                    spec = target_spec(
+                        project,
+                        agent,
+                        scope,
+                        repo_target=repo_target,
+                        repo=repo,
+                        home=home,
+                        codex_home=codex_home,
+                        claude_home=claude_home,
+                    )
+                except InstallerError:
                     continue
-                seen.add(status.manifest_path)
-                statuses.append(status)
+                for status in discover_managed_installations_for_target(spec):
+                    if status.manifest_path is None or status.manifest_path in seen:
+                        continue
+                    seen.add(status.manifest_path)
+                    statuses.append(status)
     return statuses
 
 
@@ -1110,6 +1173,7 @@ def inspect_installation(
     agent: str,
     scope: str,
     *,
+    repo_target: bool = False,
     repo: Path | None = None,
     home: Path | None = None,
     codex_home: Path | None = None,
@@ -1120,6 +1184,7 @@ def inspect_installation(
             project,
             agent,
             scope,
+            repo_target=repo_target,
             repo=repo,
             home=home,
             codex_home=codex_home,
@@ -1129,6 +1194,7 @@ def inspect_installation(
         return InstallationStatus(
             agent=agent,
             scope=scope,
+            repo_target=repo_target,
             skill_dir=None,
             status="unavailable",
             error=str(error),
@@ -1138,6 +1204,7 @@ def inspect_installation(
         return InstallationStatus(
             agent=agent,
             scope=scope,
+            repo_target=spec.repo_target,
             skill_dir=spec.skill_dir,
             status="not-installed",
         )
@@ -1148,6 +1215,7 @@ def inspect_installation(
         return InstallationStatus(
             agent=agent,
             scope=scope,
+            repo_target=spec.repo_target,
             skill_dir=spec.skill_dir,
             status="unowned",
             error=str(error),
@@ -1157,6 +1225,7 @@ def inspect_installation(
         return InstallationStatus(
             agent=agent,
             scope=scope,
+            repo_target=spec.repo_target,
             skill_dir=spec.skill_dir,
             status="unowned",
         )
@@ -1165,6 +1234,7 @@ def inspect_installation(
     return InstallationStatus(
         agent=agent,
         scope=scope,
+        repo_target=spec.repo_target,
         skill_dir=spec.skill_dir,
         status="installed",
         version=manifest_package_version(manifest),
@@ -1185,6 +1255,7 @@ def inspect_installations(
             project,
             agent,
             scope,
+            repo_target=repo_target,
             repo=repo,
             home=home,
             codex_home=codex_home,
@@ -1192,6 +1263,7 @@ def inspect_installations(
         )
         for agent in AGENTS
         for scope in SCOPES
+        for repo_target in ((False, True) if scope == "dir" else (False,))
     ]
 
 
@@ -1341,6 +1413,7 @@ def run_pip_wheel(
         str(wheel_dir),
     ]
     if editable is not None:
+        command.append("--no-build-isolation")
         command.append("--editable")
     command.append(target)
     try:
@@ -1966,6 +2039,7 @@ def write_manifest(
         "skill_name": project.skill_name,
         "agent": spec.agent,
         "scope": spec.scope,
+        "repo_target": spec.repo_target,
         "installed_at": utc_now(),
         "skill_dir": str(spec.skill_dir),
         "hook_path": str(spec.hook_path),
@@ -2288,6 +2362,7 @@ def stage_install_target(
         action="install",
         agent=spec.agent,
         scope=spec.scope,
+        repo_target=spec.repo_target,
         skill_dir=spec.skill_dir,
         hook_path=spec.hook_path,
         status="installed",
@@ -2323,7 +2398,8 @@ def cleanup_staged_installs(staged_installs: Iterable[StagedInstall]) -> None:
 
 
 def staged_install_label(staged: StagedInstall) -> str:
-    return f"{staged.project.skill_name} ({staged.spec.agent} {staged.spec.scope})"
+    scope = "repo" if staged.spec.repo_target else staged.spec.scope
+    return f"{staged.project.skill_name} ({staged.spec.agent} {scope})"
 
 
 def cleanup_staged_install_errors(staged_installs: Iterable[StagedInstall]) -> list[str]:
@@ -2599,6 +2675,7 @@ def uninstall_target(project: SkillProject, spec: TargetSpec) -> InstallResult:
         action="uninstall",
         agent=spec.agent,
         scope=spec.scope,
+        repo_target=spec.repo_target,
         skill_dir=spec.skill_dir,
         hook_path=spec.hook_path,
         status="removed",
@@ -2611,6 +2688,7 @@ def install(
     agents: Iterable[str],
     scope: str,
     *,
+    repo_target: bool = False,
     repo: Path | None = None,
     home: Path | None = None,
     codex_home: Path | None = None,
@@ -2652,6 +2730,7 @@ def install(
                 project,
                 agent,
                 scope,
+                repo_target=repo_target,
                 repo=repo,
                 home=home,
                 codex_home=codex_home,
@@ -2669,6 +2748,7 @@ def install(
                             project,
                             agent,
                             scope,
+                            repo_target=repo_target,
                             repo=repo,
                             home=home,
                             codex_home=codex_home,
@@ -2726,6 +2806,7 @@ def uninstall(
     agents: Iterable[str],
     scope: str,
     *,
+    repo_target: bool = False,
     repo: Path | None = None,
     home: Path | None = None,
     codex_home: Path | None = None,
@@ -2738,6 +2819,7 @@ def uninstall(
                 project,
                 agent,
                 scope,
+                repo_target=repo_target,
                 repo=repo,
                 home=home,
                 codex_home=codex_home,

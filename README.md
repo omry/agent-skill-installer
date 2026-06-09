@@ -7,10 +7,11 @@
 | Docs and support | [![Zulip chat](https://img.shields.io/badge/chat-Zulip-2e77d0?logo=zulip)](https://hydra-framework.zulipchat.com/#narrow/channel/agent-skill-installer) |
 
 `agent-skill-installer` installs agent skills for Codex and Claude Code from
-local skill directories, GitHub repositories, or PyPI wheels. It supports repo
-and global install scopes, writes discoverability blocks into the agent hook
-files, and records enough install state to safely upgrade or uninstall skills it
-owns.
+local skill directories, GitHub repositories, or PyPI wheels. It supports
+directory and global install targets, can assert directory targets are Git or
+Sapling repositories with `--repo`, writes discoverability blocks into the agent
+hook files, and records enough install state to safely upgrade or uninstall
+skills it owns.
 
 Additional agent targets or installer functionality are open for discussion,
 and pull requests are welcome.
@@ -36,7 +37,8 @@ agent-skill-installer --no-ui install \
   --skill-path ./my-skill \
   --editable \
   --agent codex \
-  --scope repo
+  --scope dir \
+  --repo
 ```
 
 ## Documentation

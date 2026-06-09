@@ -12,7 +12,8 @@ python -m build --wheel --no-isolation --outdir /tmp/wheel-agent-skill-dist exam
 agent-skill-installer --no-ui install \
   --wheel-file /tmp/wheel-agent-skill-dist/wheel_agent_skill-0.1.0-py3-none-any.whl \
   --agent codex \
-  --scope repo \
+  --scope dir \
+  --repo \
   --target-dir /path/to/repo
 ```
 
