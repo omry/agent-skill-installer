@@ -68,6 +68,12 @@ from agent_skill_installer.installer import (
 )
 
 
+def assert_posix_mode(path: Path, mode: int) -> None:
+    if os.name == "nt":
+        return
+    assert path.stat().st_mode & 0o777 == mode
+
+
 def make_skill(path: Path, text: str = "example skill\n") -> Path:
     path.mkdir(parents=True, exist_ok=True)
     (path / "agents").mkdir()
@@ -698,7 +704,7 @@ installer:
     tool = skill_dir / "bin" / "arbiter"
     assert pip_requests == [("arbiter-client>=2.4,<2.5", None, None)]
     assert tool.read_text() == "#!/bin/sh\necho arbiter\n"
-    assert tool.stat().st_mode & 0o777 == 0o755
+    assert_posix_mode(tool, 0o755)
     assert not (skill_dir / "arbiter_client" / "__init__.py").exists()
     manifest = read_raw_manifest(project, skill_dir)
     assert manifest["files"] == [
@@ -1353,7 +1359,7 @@ def test_copy_github_archive_skill_extracts_root_skill(tmp_path: Path) -> None:
         "scripts/tool.py",
     ]
     assert (skill_dir / "SKILL.md").read_text() == "root github\n"
-    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
+    assert_posix_mode(skill_dir / "bin" / "arbiter", 0o755)
     assert not (skill_dir / CONFIG_FILE_NAME).exists()
 
 
@@ -1401,9 +1407,9 @@ def test_copy_pypi_wheel_skill_extracts_only_bundled_skill(tmp_path: Path) -> No
         "scripts/tool.py",
     ]
     assert (skill_dir / "SKILL.md").read_text() == "wheel skill\n"
-    assert (skill_dir / "SKILL.md").stat().st_mode & 0o777 == 0o644
+    assert_posix_mode(skill_dir / "SKILL.md", 0o644)
     assert (skill_dir / "agents" / "openai.yaml").read_text() == "agent: wheel\n"
-    assert (skill_dir / "bin" / "arbiter").stat().st_mode & 0o777 == 0o755
+    assert_posix_mode(skill_dir / "bin" / "arbiter", 0o755)
     assert not (skill_dir / CONFIG_FILE_NAME).exists()
     assert not (skill_dir / project.import_name / "__init__.py").exists()
     assert not (skill_dir / f"{project.import_name}-1.2.3.dist-info").exists()
