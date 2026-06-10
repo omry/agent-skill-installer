@@ -1,1 +1,0 @@
-Copied skill installs can now opt into payload file selection with `installer.payload.include` and `installer.payload.exclude`, while the default remains installing `SKILL.md` and adjacent payload files recursively. Local companion wheels declared with `external_wheels[].editable` are now built as normal wheels from the local source path instead of using pip editable mode.

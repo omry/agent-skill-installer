@@ -1,1 +1,0 @@
-Add platform-specific skill installation for packaged skills, allowing a platform-neutral skill package to install platform-specific companion files such as a native `arbiter-client` executable for the current platform.

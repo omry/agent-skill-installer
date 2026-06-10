@@ -1,1 +1,0 @@
-Install targets now use explicit `global` or `dir` scope. Add `--repo` to `--scope dir` when the directory must resolve to a Git or Sapling repository root; plain directory installs use the exact target directory and do not imply automatic agent discovery.
