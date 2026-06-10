@@ -1,0 +1,247 @@
+name: Release On Approval
+
+on:
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Release preparation PR number"
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  checks: read
+  contents: write
+  pull-requests: write
+  statuses: read
+
+concurrency:
+  group: release-on-approval-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Merge approved release PR and publish
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.review.state == 'approved' &&
+          startsWith(github.event.pull_request.head.ref, 'release/prepare-v') &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+      APPROVED_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - name: Validate release PR
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_json="$(gh pr view "$PR_NUMBER" \
+            --json baseRefName,headRefName,isCrossRepository,state,url)"
+          python - "$pr_json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          pr = json.loads(sys.argv[1])
+          branch = pr["headRefName"]
+          match = re.fullmatch(
+              r"release/prepare-v([0-9]+[.][0-9]+[.][0-9]+([.a-zA-Z0-9-]+)?)",
+              branch,
+          )
+          if match is None:
+              raise SystemExit(
+                  "::error::Release automation only accepts "
+                  "release/prepare-v<version> PR branches."
+              )
+          if pr["state"] != "OPEN":
+              raise SystemExit("::error::Release preparation PR must be open.")
+          if pr["baseRefName"] != "main":
+              raise SystemExit(
+                  "::error::Release preparation PR must target the main branch."
+              )
+          if pr["isCrossRepository"]:
+              raise SystemExit(
+                  "::error::Release automation only accepts same-repository PRs."
+              )
+
+          version = match.group(1)
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a") as handle:
+              print(f"version={version}", file=handle)
+              print(f"tag=v{version}", file=handle)
+              print(f"branch={branch}", file=handle)
+              print(f"url={pr['url']}", file=handle)
+          PY
+
+      - name: Wait for approval and passing checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 1800))
+          while true; do
+            pr_json="$(gh pr view "$PR_NUMBER" \
+              --json headRefOid,isDraft,mergeStateStatus,reviewDecision,state,statusCheckRollup)"
+
+            set +e
+            python - "$pr_json" <<'PY'
+          import json
+          import os
+          import sys
+
+          pr = json.loads(sys.argv[1])
+          approved_head_sha = os.environ.get("APPROVED_HEAD_SHA", "")
+          if approved_head_sha and pr["headRefOid"] != approved_head_sha:
+              print("release preparation PR changed after approval")
+              sys.exit(1)
+          if pr["state"] != "OPEN":
+              print("release preparation PR is no longer open")
+              sys.exit(1)
+          if pr["isDraft"]:
+              print("release preparation PR is still a draft")
+              sys.exit(2)
+          if pr["reviewDecision"] != "APPROVED":
+              print(f"review decision is {pr['reviewDecision']}")
+              sys.exit(2)
+
+          pending = []
+          failing = []
+          for item in pr["statusCheckRollup"]:
+              name = item.get("name") or item.get("context") or "<unnamed check>"
+              if name == "Merge approved release PR and publish":
+                  continue
+              kind = item.get("__typename")
+              if kind == "CheckRun":
+                  status = item.get("status")
+                  conclusion = item.get("conclusion")
+                  if status != "COMPLETED":
+                      pending.append(name)
+                  elif conclusion not in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+                      failing.append(f"{name}: {conclusion}")
+              elif kind == "StatusContext":
+                  state = item.get("state")
+                  if state in {"PENDING", "EXPECTED"}:
+                      pending.append(name)
+                  elif state != "SUCCESS":
+                      failing.append(f"{name}: {state}")
+
+          if failing:
+              print("failing checks: " + ", ".join(failing))
+              sys.exit(1)
+          if pending:
+              print("waiting for checks: " + ", ".join(pending))
+              sys.exit(2)
+
+          merge_state = pr["mergeStateStatus"]
+          if merge_state == "UNKNOWN":
+              print("waiting for GitHub to calculate mergeability")
+              sys.exit(2)
+          if merge_state == "DIRTY":
+              print("release preparation PR has merge conflicts")
+              sys.exit(1)
+          if merge_state in {"BEHIND", "BLOCKED", "DRAFT", "UNSTABLE"}:
+              print(f"release preparation PR is not mergeable: {merge_state}")
+              sys.exit(1)
+          if merge_state not in {"CLEAN", "HAS_HOOKS"}:
+              print(f"release preparation PR has unexpected merge state: {merge_state}")
+              sys.exit(1)
+
+          print("release preparation PR is approved and checks are passing")
+          PY
+            status=$?
+            set -e
+
+            if [[ "$status" -eq 0 ]]; then
+              break
+            fi
+
+            if [[ "$status" -ne 2 ]]; then
+              exit "$status"
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "::error::Timed out waiting for release PR approval and passing checks."
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Merge release preparation PR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh pr merge "$PR_NUMBER" --merge
+
+      - name: Prepare draft release from main
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "Prepare Release" \
+            --ref main \
+            -f "version=${VERSION}" \
+            -f "target_branch=main"
+
+          run_id=""
+          for _ in {1..30}; do
+            run_id="$(gh run list \
+              --workflow "Prepare Release" \
+              --branch main \
+              --limit 10 \
+              --json databaseId,createdAt \
+              --jq "map(select(.createdAt >= \"${started_at}\")) | .[0].databaseId // empty")"
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ -z "$run_id" ]]; then
+            echo "::error::Could not find dispatched Prepare Release run."
+            exit 1
+          fi
+          gh run watch "$run_id" --exit-status
+
+      - name: Publish release
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "Publish" --ref main -f "tag=${TAG}"
+
+          run_id=""
+          for _ in {1..30}; do
+            run_id="$(gh run list \
+              --workflow "Publish" \
+              --branch main \
+              --limit 10 \
+              --json databaseId,createdAt \
+              --jq "map(select(.createdAt >= \"${started_at}\")) | .[0].databaseId // empty")"
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ -z "$run_id" ]]; then
+            echo "::error::Could not find dispatched Publish run."
+            exit 1
+          fi
+          gh run watch "$run_id" --exit-status

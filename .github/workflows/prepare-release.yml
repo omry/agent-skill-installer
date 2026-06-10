@@ -258,8 +258,14 @@ jobs:
           cat > "$body_file" <<BODY
           Prepare ${version} release.
 
-          After this PR merges, rerun **Prepare Release** with version \`${version}\`
-          on \`${TARGET_BRANCH}\` to create or refresh draft GitHub Release \`${tag}\`.
+          When this PR is approved and checks pass, **Release On Approval**
+          merges it, reruns **Prepare Release** on \`${TARGET_BRANCH}\` to
+          create or refresh draft GitHub Release \`${tag}\`, and then runs
+          **Publish** for \`${tag}\`.
+
+          If release automation does not complete, rerun **Prepare Release**
+          with version \`${version}\` on \`${TARGET_BRANCH}\`, then run
+          **Publish** for \`${tag}\`.
           BODY
 
           git config user.name "github-actions[bot]"
@@ -272,6 +278,14 @@ jobs:
             echo "Release files are already prepared on ${TARGET_BRANCH}." >> "$GITHUB_STEP_SUMMARY"
           else
             git commit -m "$title"
+            if git ls-remote --exit-code --heads origin "$prepare_branch" >/dev/null; then
+              git fetch origin "refs/heads/${prepare_branch}:refs/remotes/origin/${prepare_branch}"
+            else
+              ls_remote_status=$?
+              if [[ "$ls_remote_status" -ne 2 ]]; then
+                exit "$ls_remote_status"
+              fi
+            fi
             git push origin "HEAD:refs/heads/${prepare_branch}" --force-with-lease
 
             pr_url="$(gh pr list \
