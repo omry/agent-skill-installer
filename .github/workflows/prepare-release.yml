@@ -16,6 +16,10 @@ on:
         required: false
         default: main
         type: string
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [closed]
 
 permissions:
   actions: write
@@ -23,20 +27,57 @@ permissions:
   pull-requests: write
 
 jobs:
-  prepare:
-    name: Prepare release commit and draft
+  merge-approved-release-pr:
+    name: Merge approved release PR
     runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'pull_request_review' &&
+        github.event.review.state == 'approved' &&
+        startsWith(github.event.pull_request.head.ref, 'release/prepare-v') &&
+        github.event.pull_request.base.ref == 'main' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      VERSION: ${{ inputs.version }}
-      RELEASE_DATE: ${{ inputs.date }}
-      TARGET_BRANCH: ${{ inputs.target_branch }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Merge when checks allow it
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh pr merge "$PR_NUMBER" --merge --auto || gh pr merge "$PR_NUMBER" --merge
+
+  prepare:
+    name: Prepare release commit and draft
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.merged == true &&
+          startsWith(github.event.pull_request.head.ref, 'release/prepare-v') &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION_INPUT: ${{ inputs.version || github.event.pull_request.head.ref }}
+      RELEASE_DATE: ${{ inputs.date || '' }}
+      TARGET_BRANCH: ${{ inputs.target_branch || github.event.pull_request.base.ref }}
     steps:
       - name: Check out target branch
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.target_branch }}
+          ref: ${{ inputs.target_branch || github.event.pull_request.base.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -49,8 +90,8 @@ jobs:
       - name: Normalize release metadata
         id: release
         env:
-          VERSION: ${{ inputs.version }}
-          RELEASE_DATE: ${{ inputs.date }}
+          VERSION_INPUT: ${{ inputs.version || github.event.pull_request.head.ref }}
+          RELEASE_DATE: ${{ inputs.date || '' }}
         run: |
           python - <<'PY'
           from datetime import date, datetime, timezone
@@ -59,7 +100,9 @@ jobs:
           from packaging.version import InvalidVersion, Version
           import re
 
-          raw_version = os.environ["VERSION"].strip()
+          raw_version = os.environ["VERSION_INPUT"].strip()
+          if raw_version.startswith("release/prepare-v"):
+              raw_version = raw_version.removeprefix("release/prepare-v")
           version_input = raw_version.removeprefix("v")
           try:
               version = str(Version(version_input))
@@ -258,8 +301,13 @@ jobs:
           cat > "$body_file" <<BODY
           Prepare ${version} release.
 
-          After this PR merges, rerun **Prepare Release** with version \`${version}\`
-          on \`${TARGET_BRANCH}\` to create or refresh draft GitHub Release \`${tag}\`.
+          When this PR is approved and checks pass, **Prepare Release** merges
+          it, creates or refreshes draft GitHub Release \`${tag}\` from
+          \`${TARGET_BRANCH}\`, and then runs **Publish** for \`${tag}\`.
+
+          If release automation does not complete, rerun **Prepare Release**
+          with version \`${version}\` on \`${TARGET_BRANCH}\`, then run
+          **Publish** for \`${tag}\`.
           BODY
 
           git config user.name "github-actions[bot]"
@@ -272,6 +320,14 @@ jobs:
             echo "Release files are already prepared on ${TARGET_BRANCH}." >> "$GITHUB_STEP_SUMMARY"
           else
             git commit -m "$title"
+            if git ls-remote --exit-code --heads origin "$prepare_branch" >/dev/null; then
+              git fetch origin "refs/heads/${prepare_branch}:refs/remotes/origin/${prepare_branch}"
+            else
+              ls_remote_status=$?
+              if [[ "$ls_remote_status" -ne 2 ]]; then
+                exit "$ls_remote_status"
+              fi
+            fi
             git push origin "HEAD:refs/heads/${prepare_branch}" --force-with-lease
 
             pr_url="$(gh pr list \
@@ -330,3 +386,28 @@ jobs:
           fi
 
           echo "Prepared draft release $tag" >> "$GITHUB_STEP_SUMMARY"
+
+  publish-merged-release:
+    name: Publish merged release
+    needs: prepare
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        startsWith(github.event.pull_request.head.ref, 'release/prepare-v') &&
+        github.event.pull_request.base.ref == 'main' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Run publish workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh workflow run "Publish" --ref main -f "tag=${TAG}"
+          echo "Dispatched Publish for ${TAG}." >> "$GITHUB_STEP_SUMMARY"

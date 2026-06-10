@@ -10,10 +10,11 @@ Releases use a protected-branch-friendly workflow:
 
 1. Run **Prepare Release**. If release files need changes, it opens or updates
    a release preparation PR.
-2. Merge the release preparation PR after required checks pass.
-3. Rerun **Prepare Release** with the same version to create or refresh the
-   draft GitHub Release from the prepared target branch.
-4. Publish the prepared draft from GitHub Actions.
+2. Approve the release preparation PR after reviewing the release notes and
+   version changes.
+3. **Prepare Release** reacts to the approval, merges the PR when required
+   checks allow it, creates or refreshes the draft GitHub Release from `main`,
+   then runs **Publish** for that tag.
 
 The draft GitHub Release is the handoff object. It is safe to edit before the
 package is public. The publish workflow builds and publishes the PyPI package
@@ -26,7 +27,9 @@ trigger so that GitHub Releases do not become public before the package is
 available on PyPI.
 
 The repository must allow GitHub Actions to create pull requests. Prepare uses
-that permission to open or update the release preparation PR.
+that permission to open or update the release preparation PR. It also needs
+permission to merge approved release preparation PRs and dispatch the publish
+workflow.
 
 ## Prepare A Release
 
@@ -55,9 +58,10 @@ The workflow:
 - writes the latest Towncrier release section into the draft body
 
 If the workflow opens or updates a release preparation PR, edit the generated
-`NEWS.md` release section in that PR if needed. Review and merge the PR after
-required checks pass. Then rerun **Prepare Release** with the same version on
-the prepared target branch.
+`NEWS.md` release section in that PR if needed. Review and approve the PR.
+After approval, **Prepare Release** merges the PR when checks allow it, creates
+or refreshes the draft GitHub Release from `main`, and runs **Publish** for the
+prepared tag.
 
 If the workflow creates or updates a draft GitHub Release, review the draft.
 Keep the release as a draft.
@@ -97,6 +101,16 @@ Then it:
 
 If PyPI publishing fails, the GitHub Release remains a draft. Fix the issue and
 rerun the publish workflow against the same draft tag.
+
+## Manual Release Recovery
+
+The approval path is the normal release path. If it fails after the PR is
+merged, rerun **Prepare Release** with the same version on `main`, then run
+**Publish** with the draft release tag, for example `v0.1.4`.
+
+If it fails before merging the PR, fix the release preparation branch or rerun
+**Prepare Release** with the same version, then approve the updated PR after
+checks pass.
 
 ## Local Checks
 
