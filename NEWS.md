@@ -2,7 +2,7 @@
 
 <!-- TOWNCRIER -->
 
-## Agent Skill Installer 0.2.0 (2026-06-10)
+## Agent Skill Installer 0.3.0 (2026-06-12)
 
 
 ### Features
@@ -20,3 +20,9 @@
 - `--target-dir PATH` is now the canonical flag for choosing the directory used by directory-scoped installs. The TUI now presents these installs as directory choices and shows when the selected directory resolves to a Git or Sapling repository. ([#19](https://github.com/omry/agent-skill-installer/issues/19))
 - Install targets now use explicit `global` or `dir` scope. Add `--repo` to `--scope dir` when the directory must resolve to a Git or Sapling repository root; plain directory installs use the exact target directory and do not imply automatic agent discovery. ([#24](https://github.com/omry/agent-skill-installer/issues/24))
 - Copied skill installs can now opt into payload file selection with `installer.payload.include` and `installer.payload.exclude`, while the default remains installing `SKILL.md` and adjacent payload files recursively. Local companion wheels declared with `external_wheels[].editable` are now built as normal wheels from the local source path instead of using pip editable mode. ([#25](https://github.com/omry/agent-skill-installer/issues/25))
+
+
+## Agent Skill Installer 0.2.0 (2026-06-10)
+
+
+This release was retracted; use Agent Skill Installer 0.3.0 instead.
