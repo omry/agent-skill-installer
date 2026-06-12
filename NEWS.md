@@ -2,6 +2,12 @@
 
 <!-- TOWNCRIER -->
 
+## Agent Skill Installer 0.2.1 (2026-06-12)
+
+
+No significant changes.
+
+
 ## Agent Skill Installer 0.2.0 (2026-06-10)
 
 
