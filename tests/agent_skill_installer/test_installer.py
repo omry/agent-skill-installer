@@ -60,6 +60,10 @@ from agent_skill_installer.installer import (
     copy_pypi_wheel_skill,
     fetch_json_url,
     install_source_metadata,
+    install_warnings,
+    skill_name_mismatch_warning,
+    trigger_mismatch_warning,
+    trigger_tokens,
     manifest_path,
     parse_github_url,
     published_pypi_versions,
@@ -6057,3 +6061,232 @@ def test_generic_console_does_not_remember_failed_pypi_install(
     assert exit_code == 1
     assert "SKILL.md" in output.err
     assert load_recent_pypi_packages(home) == []
+
+
+def make_trigger_skill(
+    path: Path,
+    *,
+    name: str,
+    claude_trigger: str,
+) -> Path:
+    make_skill(
+        path,
+        text=(
+            "---\n"
+            f"name: {name}\n"
+            "description: Example skill used for trigger lint tests.\n"
+            "---\n\n"
+            "# Example\n"
+        ),
+    )
+    (path / CONFIG_FILE_NAME).write_text(
+        "installer:\n"
+        "  version: 1\n"
+        "  agents:\n"
+        "    claude:\n"
+        "      version: 1\n"
+        "      instructions:\n"
+        "        title: Example Discoverability\n"
+        "        body: |\n"
+        f"          Use {claude_trigger} when a prompt asks for this skill.\n"
+    )
+    return path
+
+
+def install_trigger_skill(
+    source: Path,
+    repo: Path,
+    *,
+    skill_name: str | None = None,
+) -> int:
+    argv = ["install", "--skill-path", str(source)]
+    if skill_name is not None:
+        argv += ["--skill-name", skill_name]
+    argv += ["--agent", "claude", "--scope", "repo", "--target-dir", str(repo)]
+    return generic_main(argv)
+
+
+def test_trigger_tokens_reads_triggers_and_ignores_paths_and_placeholders() -> None:
+    assert trigger_tokens("Use `/awd` or /awd, not AWD.", "/") == ["awd"]
+    assert trigger_tokens("Read /home/user/notes and /tmp output.", "/") == []
+    assert trigger_tokens("Prefer and/or over 24/7.", "/") == []
+    assert trigger_tokens("Use `$my-skill`; keep $PATH and $ARGUMENTS.", "$") == [
+        "my-skill"
+    ]
+    assert trigger_tokens("${installer.shared.triggers.codex}", "$") == []
+
+
+def test_trigger_mismatch_warning_only_fires_on_authored_blocks(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+
+    assert trigger_mismatch_warning(project, "claude") is None
+
+    matching = replace(
+        project,
+        hook_blocks={"claude": "Use `/example-agent-skill` for this."},
+    )
+    assert trigger_mismatch_warning(matching, "claude") is None
+
+    mismatched = replace(
+        project,
+        hook_blocks={"claude": "Use `/other-name` for this."},
+    )
+    warning = trigger_mismatch_warning(mismatched, "claude")
+    assert warning is not None
+    assert "/other-name" in warning
+    assert "/example-agent-skill" in warning
+
+
+def test_skill_name_mismatch_warning_ignores_undeclared_frontmatter_name(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+
+    assert skill_name_mismatch_warning(project) is None
+    assert skill_name_mismatch_warning(replace(project, source_skill_name="other")) is None
+
+    warning = skill_name_mismatch_warning(
+        replace(project, declared_skill_name="declared-name")
+    )
+    assert warning is not None
+    assert "declared-name" in warning
+    assert install_warnings(
+        replace(project, declared_skill_name="example-agent-skill"), ["claude"]
+    ) == []
+
+
+def test_generic_install_warns_when_trigger_does_not_match_skill_name(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_trigger_skill(
+        tmp_path / "skill-source",
+        name="example-agent-skill",
+        claude_trigger="/short-name",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = install_trigger_skill(source, repo)
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "agent-skill-installer: warning: the claude discoverability block "
+        "advertises /short-name but the skill installs as /example-agent-skill"
+        in output.err
+    )
+    assert (repo / ".claude" / "skills" / "example-agent-skill").exists()
+
+
+def test_generic_install_does_not_warn_when_trigger_matches_skill_name(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_trigger_skill(
+        tmp_path / "skill-source",
+        name="example-agent-skill",
+        claude_trigger="/example-agent-skill",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = install_trigger_skill(source, repo)
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "warning:" not in output.err
+
+
+def test_generic_install_warns_when_skill_name_overrides_frontmatter_name(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_trigger_skill(
+        tmp_path / "skill-source",
+        name="example-agent-skill",
+        claude_trigger="/renamed-skill",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = install_trigger_skill(source, repo, skill_name="renamed-skill")
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "agent-skill-installer: warning: installing into skill directory "
+        "renamed-skill but SKILL.md frontmatter declares name: example-agent-skill"
+        in output.err
+    )
+    assert "advertises /renamed-skill" not in output.err
+
+
+def test_generic_install_does_not_warn_for_skill_without_frontmatter_name(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = install_trigger_skill(source, repo, skill_name="example-agent-skill")
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "warning:" not in output.err
+
+
+def test_wrapper_cli_install_warns_on_trigger_mismatch(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = replace(
+        make_project(tmp_path),
+        hook_blocks={"claude": "Use `/short-name` when a prompt asks for this."},
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--agent",
+            "claude",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "example-agent-skill: warning: the claude discoverability block "
+        "advertises /short-name but the skill installs as /example-agent-skill"
+        in output.err
+    )
+
+
+def test_trigger_tokens_ignore_lowercase_shell_variables() -> None:
+    assert trigger_tokens("Run the command and inspect $output", "$") == []
+    assert trigger_tokens("The $result value is printed to stderr.", "$") == []
+    assert trigger_tokens("Use $awd / AWD when the task has structure", "$") == ["awd"]
+    assert trigger_tokens("Use `$my-skill` when a prompt asks.", "$") == ["my-skill"]
+    assert trigger_tokens("$awd interprets operator plans", "$") == ["awd"]
+
+
+def test_trigger_tokens_ignore_relative_and_dotted_paths() -> None:
+    assert trigger_tokens("Edit the file at ./config.toml first.", "/") == []
+    assert trigger_tokens("Copy it to ~/notes.md for later.", "/") == []
+    assert trigger_tokens("See /config.toml for details.", "/") == []
+    assert trigger_tokens("Use /awd when the user writes shorthand.", "/") == ["awd"]
+
+
+def test_trigger_tokens_ignore_links_bare_paths_and_markup() -> None:
+    assert trigger_tokens("See [the guide](/guide) before starting.", "/") == []
+    assert trigger_tokens("Files live under /workspace for now.", "/") == []
+    assert trigger_tokens("Details block: </details> ends it.", "/") == []
+    assert trigger_tokens("Use /tmp for scratch files.", "/") == []
+    assert trigger_tokens("Use /awd when the user writes shorthand.", "/") == ["awd"]
+    assert trigger_tokens("/awd interprets operator plans.", "/") == ["awd"]
