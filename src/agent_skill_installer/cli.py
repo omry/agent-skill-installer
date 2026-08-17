@@ -16,8 +16,10 @@ from .installer import (
     SkillProject,
     default_repo_path,
     describe_target,
+    emit_warnings,
     find_repo_root,
     install_source_metadata,
+    install_warnings,
     inspect_installations,
     running_on_tty,
 )
@@ -3433,6 +3435,8 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
     normalize_args_scope(args)
     installer = Installer(project)
     targets = getattr(args, "targets", None)
+    if args.command == "install":
+        emit_warnings(install_warnings(project), prefix=project.command_name)
     if targets is None:
         agents = selected_agents_for_command(args.agent)
         repo = args.repo if args.scope == "dir" else None
