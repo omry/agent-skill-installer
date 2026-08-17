@@ -65,6 +65,7 @@ class SkillProject:
     marker_slug_override: str | None = None
     source_skill_name: str | None = None
     source_skill_path: str | None = None
+    declared_skill_name: str | None = None
 
     @property
     def marker_slug(self) -> str:
@@ -167,6 +168,28 @@ def load_packaged_installer_config(project: SkillProject) -> InstallerConfig | N
         source=f"{project.import_name}/{bundled_skill_path}/{CONFIG_FILE_NAME}",
         package_version=project.version,
     )
+
+
+def skill_name_mismatch_warning(project: SkillProject) -> str | None:
+    declared = (project.declared_skill_name or "").strip()
+    if not declared or declared == project.skill_name:
+        return None
+    return (
+        f"installing into skill directory {project.skill_name} but SKILL.md "
+        f"frontmatter declares name: {declared}; the installer copies frontmatter "
+        f"as-is, so the installed skill keeps the declared name"
+    )
+
+
+def install_warnings(project: SkillProject) -> list[str]:
+    name_warning = skill_name_mismatch_warning(project)
+    return [] if name_warning is None else [name_warning]
+
+
+def emit_warnings(messages: Iterable[str], *, prefix: str, stream=None) -> None:
+    output = sys.stderr if stream is None else stream
+    for message in messages:
+        print(f"{prefix}: warning: {message}", file=output)
 
 
 @dataclass(frozen=True)

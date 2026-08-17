@@ -60,6 +60,8 @@ from agent_skill_installer.installer import (
     copy_pypi_wheel_skill,
     fetch_json_url,
     install_source_metadata,
+    install_warnings,
+    skill_name_mismatch_warning,
     manifest_path,
     parse_github_url,
     published_pypi_versions,
@@ -6057,3 +6059,79 @@ def test_generic_console_does_not_remember_failed_pypi_install(
     assert exit_code == 1
     assert "SKILL.md" in output.err
     assert load_recent_pypi_packages(home) == []
+
+
+def make_named_skill(path: Path, *, name: str) -> Path:
+    return make_skill(
+        path,
+        text=(
+            "---\n"
+            f"name: {name}\n"
+            "description: Example skill used for install warning tests.\n"
+            "---\n\n"
+            "# Example\n"
+        ),
+    )
+
+
+def install_named_skill(
+    source: Path,
+    repo: Path,
+    *,
+    skill_name: str | None = None,
+) -> int:
+    argv = ["install", "--skill-path", str(source)]
+    if skill_name is not None:
+        argv += ["--skill-name", skill_name]
+    argv += ["--agent", "claude", "--scope", "repo", "--target-dir", str(repo)]
+    return generic_main(argv)
+
+
+def test_skill_name_mismatch_warning_ignores_undeclared_frontmatter_name(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+
+    assert skill_name_mismatch_warning(project) is None
+    assert skill_name_mismatch_warning(replace(project, source_skill_name="other")) is None
+
+    warning = skill_name_mismatch_warning(
+        replace(project, declared_skill_name="declared-name")
+    )
+    assert warning is not None
+    assert "declared-name" in warning
+    assert install_warnings(
+        replace(project, declared_skill_name="example-agent-skill")
+    ) == []
+
+
+def test_generic_install_warns_when_skill_name_overrides_frontmatter_name(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_named_skill(tmp_path / "skill-source", name="example-agent-skill")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = install_named_skill(source, repo, skill_name="renamed-skill")
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (
+        "agent-skill-installer: warning: installing into skill directory "
+        "renamed-skill but SKILL.md frontmatter declares name: example-agent-skill"
+        in output.err
+    )
+
+
+def test_generic_install_does_not_warn_for_skill_without_frontmatter_name(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = install_named_skill(source, repo, skill_name="example-agent-skill")
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "warning:" not in output.err
