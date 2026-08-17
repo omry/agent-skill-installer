@@ -90,6 +90,33 @@ When this file is omitted, the installer writes a default discoverability block
 using the skill name and description. The default trigger text is `$<skill_name>`
 for Codex and `/<skill_name>` for Claude Code.
 
+### Trigger Names
+
+A skill answers to exactly one trigger, derived from its name: `$<skill_name>`
+for Codex and `/<skill_name>` for Claude Code. There is no alias field, so
+writing a different trigger into an `instructions` body does not register it.
+
+Because an authored body is copied verbatim, the installer warns when the body
+advertises a trigger that is not the installed skill name:
+
+```
+agent-skill-installer: warning: the claude discoverability block advertises
+/short-name but the skill installs as /example-skill; a trigger only works when
+it matches the installed skill name
+```
+
+The check is per agent and uses that agent's sigil, so a Codex body is scanned
+for `$name` and a Claude body for `/name`. It stays quiet when the body also
+mentions the installed skill's own trigger, which keeps bodies that reference
+other skills from warning.
+
+Prose that only looks like a trigger is ignored: shell variables such as
+`$PATH` or `$output`, `${...}` interpolation, and file paths such as `/tmp/out`,
+`./config.toml`, or `~/notes.md`. Because Codex bodies use `$` for shell
+variables as well as triggers, a `$name` counts only when it opens a line or
+follows a cue word such as "use" or "run". It is a warning rather than an error: the install
+still proceeds. To resolve it, rename the skill or fix the advertised trigger.
+
 ### Payload File Selection
 
 Copied installs include every file under the directory containing `SKILL.md` by
