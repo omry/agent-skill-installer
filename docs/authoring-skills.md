@@ -90,6 +90,14 @@ When this file is omitted, the installer writes a default discoverability block
 using the skill name and description. The default trigger text is `$<skill_name>`
 for Codex and `/<skill_name>` for Claude Code.
 
+### Trigger Names
+
+A skill answers to exactly one trigger, derived from its name: `$<skill_name>`
+for Codex and `/<skill_name>` for Claude Code. There is no alias field, so
+writing a different trigger into an `instructions` body does not register it.
+An authored body is copied verbatim, so keep any trigger it mentions in sync
+with the skill name by hand.
+
 ### Payload File Selection
 
 Copied installs include every file under the directory containing `SKILL.md` by
