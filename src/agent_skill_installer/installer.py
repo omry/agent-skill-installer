@@ -65,6 +65,7 @@ class SkillProject:
     marker_slug_override: str | None = None
     source_skill_name: str | None = None
     source_skill_path: str | None = None
+    declared_skill_name: str | None = None
 
     @property
     def marker_slug(self) -> str:
@@ -167,6 +168,92 @@ def load_packaged_installer_config(project: SkillProject) -> InstallerConfig | N
         source=f"{project.import_name}/{bundled_skill_path}/{CONFIG_FILE_NAME}",
         package_version=project.version,
     )
+
+
+def declared_skill_name(skill_text: str) -> str | None:
+    """The frontmatter ``name`` as YAML parses it, or None.
+
+    The line-oriented metadata reader keeps trailing inline comments, so
+    ``name: my-skill # public`` would otherwise read as a different name than
+    the one the agent sees.
+    """
+    try:
+        frontmatter = skill_frontmatter(skill_text, "SKILL.md")
+    except InstallerError:
+        return None
+    if frontmatter is None:
+        return None
+    try:
+        parsed = OmegaConf.to_container(OmegaConf.create(frontmatter), resolve=False)
+    except (OmegaConfBaseException, YAMLError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("name")
+    if not isinstance(name, str):
+        return None
+    return name.strip() or None
+
+
+def bundled_declared_skill_name(project: SkillProject) -> str | None:
+    """The declared name read from the bundled SKILL.md, or None.
+
+    Wrapper CLIs build their own SkillProject and do not fill in
+    ``declared_skill_name``, so read it from the payload rather than making
+    every wrapper author set a field by hand.
+    """
+    try:
+        root = bundled_skill_root(project)
+        return declared_skill_name(root.joinpath("SKILL.md").read_text())
+    except (InstallerError, OSError, ImportError, TypeError, ValueError):
+        # Reading the payload is best effort; a warning must never break an
+        # install that would otherwise succeed.
+        return None
+
+
+def checkout_declared_skill_name(project: SkillProject) -> str | None:
+    """The declared name read from the checkout an editable install links to."""
+    try:
+        root = local_checkout_skill_root(project)
+        return declared_skill_name(root.joinpath("SKILL.md").read_text())
+    except (InstallerError, OSError, TypeError, ValueError):
+        return None
+
+
+def skill_name_mismatch_warning(
+    project: SkillProject,
+    *,
+    editable: bool = False,
+) -> str | None:
+    # An editable install links the checkout, not the bundled artifact.
+    declared = (
+        checkout_declared_skill_name(project)
+        if editable
+        else project.declared_skill_name or bundled_declared_skill_name(project)
+    ) or ""
+    declared = declared.strip()
+    if not declared or declared == project.skill_name:
+        return None
+    return (
+        f"installing into skill directory {project.skill_name} but SKILL.md "
+        f"frontmatter declares name: {declared}; the installer copies frontmatter "
+        f"as-is, so the installed skill keeps the declared name"
+    )
+
+
+def install_warnings(
+    project: SkillProject,
+    *,
+    editable: bool = False,
+) -> list[str]:
+    name_warning = skill_name_mismatch_warning(project, editable=editable)
+    return [] if name_warning is None else [name_warning]
+
+
+def emit_warnings(messages: Iterable[str], *, prefix: str, stream=None) -> None:
+    output = sys.stderr if stream is None else stream
+    for message in messages:
+        print(f"{prefix}: warning: {message}", file=output)
 
 
 @dataclass(frozen=True)

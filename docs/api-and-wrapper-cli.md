@@ -85,6 +85,7 @@ Important `SkillProject` fields:
 | `pypi_project_name` | Optional PyPI project name when it differs from `package_name`. |
 | `hook_blocks` | Optional per-agent custom discoverability blocks keyed by `codex` or `claude`. |
 | `manifest_package_aliases` | Optional old package names accepted when migrating existing installs. |
+| `declared_skill_name` | Optional name declared in `SKILL.md` frontmatter. Leave unset; the installer reads it from the bundled payload and warns when it disagrees with `skill_name`. |
 | `marker_slug_override` | Optional discoverability marker slug for preserving hook markers during renames. |
 
 ## Python API
