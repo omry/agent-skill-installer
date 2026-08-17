@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,7 @@ GITHUB_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 DEFAULT_GITHUB_REF = "main"
 AGENTS = ("codex", "claude")
 SCOPES = ("dir", "global")
+TRIGGER_SIGILS = {"codex": "$", "claude": "/"}
 INSTALLER_METADATA_FILE_NAMES = frozenset({CONFIG_FILE_NAME})
 
 
@@ -65,6 +67,7 @@ class SkillProject:
     marker_slug_override: str | None = None
     source_skill_name: str | None = None
     source_skill_path: str | None = None
+    declared_skill_name: str | None = None
 
     @property
     def marker_slug(self) -> str:
@@ -167,6 +170,126 @@ def load_packaged_installer_config(project: SkillProject) -> InstallerConfig | N
         source=f"{project.import_name}/{bundled_skill_path}/{CONFIG_FILE_NAME}",
         package_version=project.version,
     )
+
+
+_TRIGGER_TOKEN_PATTERNS = {
+    sigil: re.compile(
+        rf"(?<![\w/.~<]){re.escape(sigil)}"
+        r"([A-Za-z0-9][A-Za-z0-9_.-]*)(?![A-Za-z0-9_.\-/])"
+    )
+    for sigil in TRIGGER_SIGILS.values()
+}
+# Words that introduce a trigger, used to tell `$awd` apart from `$output`.
+_TRIGGER_CUES = frozenset(
+    {
+        "call",
+        "calling",
+        "invoke",
+        "invoking",
+        "prefix",
+        "run",
+        "running",
+        "trigger",
+        "triggers",
+        "type",
+        "typing",
+        "use",
+        "uses",
+        "using",
+        "via",
+        "with",
+    }
+)
+_PRECEDING_WORD = re.compile(r"([A-Za-z]+)[^A-Za-z]*$")
+# Shell placeholders such as $PATH are not skill triggers.
+_PLACEHOLDER_TOKEN = re.compile(r"[A-Z0-9_]+")
+
+
+def is_advertised_trigger(text: str, start: int) -> bool:
+    """Whether the sigil at ``start`` reads as advertising a trigger.
+
+    Prose is full of sigil lookalikes: shell variables, markdown links such as
+    ``[guide](/guide)``, and bare paths such as ``/workspace``. Rather than
+    enumerating those shapes, a token counts only when it opens a line or
+    follows a cue word such as "use".
+    """
+    before = text[:start].rstrip(" \t`\"'([")
+    # Markdown list, heading, quote, and table prefixes still open a line.
+    if not before or before.endswith(("\n", ".", ":", ";", "-", ">", "*", "+", "#", "|")):
+        return True
+    word = _PRECEDING_WORD.search(before)
+    return word is not None and word.group(1).lower() in _TRIGGER_CUES
+
+
+def trigger_tokens(text: str, sigil: str) -> list[str]:
+    pattern = _TRIGGER_TOKEN_PATTERNS.get(sigil)
+    if pattern is None:
+        return []
+    tokens: list[str] = []
+    for match in pattern.finditer(text):
+        token = match.group(1).rstrip("._-")
+        if not token or token in tokens:
+            continue
+        if sigil == "$" and _PLACEHOLDER_TOKEN.fullmatch(token):
+            continue
+        if not is_advertised_trigger(text, match.start()):
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def authored_instructions_text(project: SkillProject, agent: str) -> str | None:
+    instructions = project.config_instructions(agent)
+    if instructions is not None:
+        return instructions.body
+    return project.hook_blocks.get(agent)
+
+
+def trigger_mismatch_warning(project: SkillProject, agent: str) -> str | None:
+    sigil = TRIGGER_SIGILS.get(agent)
+    if sigil is None:
+        return None
+    text = authored_instructions_text(project, agent)
+    if text is None:
+        return None
+    tokens = trigger_tokens(text, sigil)
+    if not tokens or project.skill_name in tokens:
+        return None
+    advertised = ", ".join(f"{sigil}{token}" for token in tokens)
+    return (
+        f"the {agent} discoverability block advertises {advertised} but the skill "
+        f"installs as {sigil}{project.skill_name}; a trigger only works when it "
+        f"matches the installed skill name"
+    )
+
+
+def skill_name_mismatch_warning(project: SkillProject) -> str | None:
+    declared = (project.declared_skill_name or "").strip()
+    if not declared or declared == project.skill_name:
+        return None
+    return (
+        f"installing into skill directory {project.skill_name} but SKILL.md "
+        f"frontmatter declares name: {declared}; the installer copies frontmatter "
+        f"as-is, so the installed skill keeps the declared name"
+    )
+
+
+def install_warnings(project: SkillProject, agents: Iterable[str]) -> list[str]:
+    messages: list[str] = []
+    name_warning = skill_name_mismatch_warning(project)
+    if name_warning is not None:
+        messages.append(name_warning)
+    for agent in normalize_agents(agents):
+        trigger_warning = trigger_mismatch_warning(project, agent)
+        if trigger_warning is not None:
+            messages.append(trigger_warning)
+    return messages
+
+
+def emit_warnings(messages: Iterable[str], *, prefix: str, stream=None) -> None:
+    output = sys.stderr if stream is None else stream
+    for message in messages:
+        print(f"{prefix}: warning: {message}", file=output)
 
 
 @dataclass(frozen=True)
