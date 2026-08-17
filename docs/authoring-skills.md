@@ -90,6 +90,40 @@ When this file is omitted, the installer writes a default discoverability block
 using the skill name and description. The default trigger text is `$<skill_name>`
 for Codex and `/<skill_name>` for Claude Code.
 
+### Trigger Names
+
+A skill answers to exactly one trigger, derived from its name: `$<skill_name>`
+for Codex and `/<skill_name>` for Claude Code. There is no alias field, so
+writing a different trigger into an `instructions` body does not register it.
+
+Because an authored body is copied verbatim, the installer warns when the body
+advertises a trigger that is not the installed skill name:
+
+```
+agent-skill-installer: warning: the claude discoverability block advertises
+/short-name but the skill installs as /example-skill; a trigger only works when
+it matches the installed skill name
+```
+
+The check is per agent and uses that agent's sigil, so a Codex body is scanned
+for `$name` and a Claude body for `/name`. It stays quiet when the body also
+mentions the installed skill's own trigger, which keeps bodies that reference
+other skills from warning.
+
+Prose is full of trigger lookalikes: shell variables such as `$PATH` or
+`$output`, `${...}` interpolation, paths such as `/tmp/out`, `./config.toml`, or
+`~/notes.md`, markdown links such as `[the guide](/guide)`, and markup such as
+`</details>`. Rather than excluding those by shape, a token counts as an
+advertised trigger only when it opens a line or follows a cue word such as
+"use", "run", or "invoke". Shape is deliberately not used, because skill names
+may themselves look like paths — `/run` and `/other.name` are valid names, and
+excluding them would miss the very mismatch this check exists to find.
+
+A path that follows a cue word, as in `Use /tmp for scratch`, is therefore still
+read as a trigger. Naming the skill's own trigger somewhere in the body
+suppresses the warning, which is what a well-formed block does anyway. It is a warning rather than an error: the install
+still proceeds. To resolve it, rename the skill or fix the advertised trigger.
+
 ### Payload File Selection
 
 Copied installs include every file under the directory containing `SKILL.md` by
