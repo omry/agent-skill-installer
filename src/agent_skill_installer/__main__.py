@@ -47,11 +47,14 @@ from .installer import (
     cleanup_staged_installs,
     commit_staged_installs,
     build_pypi_wheel,
+    declared_skill_name,
     default_repo_path,
     discover_managed_installations,
     download_github_archive,
+    emit_warnings,
     find_repo_root,
     github_archive_relative_path,
+    install_warnings,
     local_skill_source_for_candidate,
     missing_parent_dirs,
     normalize_agents,
@@ -2398,6 +2401,7 @@ def project_from_skill_text(
         pypi_project_name=pypi_project_name,
         source_skill_name=source_skill_name,
         source_skill_path=source_skill_path,
+        declared_skill_name=declared_skill_name(skill_text),
     )
 
 
@@ -2798,6 +2802,7 @@ def read_pypi_projects(
                 pypi_project_name=package_name,
                 source_skill_name=source_name,
                 source_skill_path=prefix.as_posix() if prefix.parts else None,
+                declared_skill_name=declared_skill_name(skill_text),
             )
         )
     return projects
@@ -3020,6 +3025,18 @@ def validate_install_plan(
                     )
 
 
+def emit_install_plan_warnings(
+    projects: Sequence[SkillProject],
+    args: argparse.Namespace,
+) -> None:
+    messages: list[str] = []
+    for project in projects:
+        for message in install_warnings(project):
+            if message not in messages:
+                messages.append(message)
+    emit_warnings(messages, prefix="agent-skill-installer")
+
+
 def transaction_created_dirs(
     projects: Sequence[SkillProject],
     args: argparse.Namespace,
@@ -3095,6 +3112,7 @@ def install_projects_for_targets(
 ) -> list[InstallResult]:
     normalize_args_scope(args)
     validate_install_plan(projects, args)
+    emit_install_plan_warnings(projects, args)
     created_dirs = transaction_created_dirs(projects, args)
     staged_installs: list[StagedInstall] = []
     commit_started = False

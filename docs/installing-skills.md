@@ -147,6 +147,16 @@ select and rename a source skill, or `--src-skill SRC --dst-skill DST` to rename
 one explicitly selected source skill. The older `--skill-name` option remains a
 compatibility alias for single-skill installs.
 
+Renaming changes the installed directory only. `SKILL.md` frontmatter is copied
+as-is, so a rename leaves the skill declaring its original name, and the
+installer warns when the two disagree:
+
+```
+agent-skill-installer: warning: installing into skill directory renamed-skill
+but SKILL.md frontmatter declares name: example-skill; the installer copies
+frontmatter as-is, so the installed skill keeps the declared name
+```
+
 Use `--description` to override the default discoverability text when the skill
 does not provide its own installer config.
 
