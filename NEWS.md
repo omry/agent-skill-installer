@@ -2,6 +2,18 @@
 
 <!-- TOWNCRIER -->
 
+## Agent Skill Installer 0.4.0 (2026-09-01)
+
+
+### Features
+
+- Renaming a skill at install time now warns when the install directory name
+  disagrees with the name declared in `SKILL.md` frontmatter, since the installer
+  copies frontmatter as-is and the installed skill keeps its declared name. ([#32](https://github.com/omry/agent-skill-installer/issues/32))
+
+### API changes and deprecations
+
+- Installing a skill from a local wheel now resolves its declared companion wheels from the directory holding that skill wheel, with no index lookup and no source builds, so an unpublished release can ship both artifacts in one wheelhouse. A companion that is missing, mis-versioned, or incompatible with the current Python and platform now fails the install instead of resolving from PyPI. Other install sources are unchanged. Companion specs resolved this way must be ordinary distribution name and version requirements, and resolution is isolated from everything outside that directory: direct references, wheel paths, and bare wheel filenames are rejected, ambient pip environment variables and global, user, and site pip configuration are ignored, and pip runs from an empty directory so no local file can be reinterpreted as the target. ([#36](https://github.com/omry/agent-skill-installer/issues/36))
 ## Agent Skill Installer 0.3.0 (2026-06-12)
 
 
