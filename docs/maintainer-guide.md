@@ -35,6 +35,19 @@ workflow.
 
 Run the **Prepare Release** workflow from GitHub Actions.
 
+To dispatch it from a shell, specify the repository explicitly because a
+Sapling checkout may not have `.git` metadata for `gh` to infer it from:
+
+```bash
+gh workflow run "Prepare Release" \
+  --repo omry/agent-skill-installer \
+  --ref main \
+  -f version=0.4.0 \
+  -f target_branch=main
+```
+
+Replace `0.4.0` with the version being prepared.
+
 Inputs:
 
 - `version`: release version without a leading `v`, for example `0.1.4`.
