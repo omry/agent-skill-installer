@@ -14,6 +14,11 @@
 ### API changes and deprecations
 
 - Installing a skill from a local wheel now resolves its declared companion wheels from the directory holding that skill wheel, with no index lookup and no source builds, so an unpublished release can ship both artifacts in one wheelhouse. A companion that is missing, mis-versioned, or incompatible with the current Python and platform now fails the install instead of resolving from PyPI. Other install sources are unchanged. Companion specs resolved this way must be ordinary distribution name and version requirements, and resolution is isolated from everything outside that directory: direct references, wheel paths, and bare wheel filenames are rejected, ambient pip environment variables and global, user, and site pip configuration are ignored, and pip runs from an empty directory so no local file can be reinterpreted as the target. ([#36](https://github.com/omry/agent-skill-installer/issues/36))
+- The maintainer release command now suppresses successful subprocess output by
+  default; pass `verbose=true` for live command output. Publication prints the
+  exact GitHub Actions run when available and otherwise links to the Publish
+  workflow without treating a missing run URL as a failed dispatch. ([#40](https://github.com/omry/agent-skill-installer/issues/40))
+
 ## Agent Skill Installer 0.3.0 (2026-06-12)
 
 
