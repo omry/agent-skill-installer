@@ -28,6 +28,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  publication_status:
+    name: Check publication status
+    runs-on: ubuntu-latest
+    outputs:
+      already_published: ${{ steps.pypi.outputs.already_published }}
+    steps:
+      - name: Check PyPI
+        id: pypi
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pypi_url="https://pypi.org/pypi/agent-skill-installer/$VERSION/json"
+          pypi_status="$(curl \
+            --silent \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "$pypi_url" || true)"
+          case "$pypi_status" in
+            200) already_published=true ;;
+            404) already_published=false ;;
+            *)
+              echo "::error::could not verify PyPI status for $VERSION (HTTP $pypi_status)"
+              exit 1
+              ;;
+          esac
+          echo "already_published=$already_published" >> "$GITHUB_OUTPUT"
+
   validate:
     name: Validate release plan
     runs-on: ubuntu-latest
@@ -292,17 +321,59 @@ jobs:
           path: dist/
           retention-days: 7
 
-  publish:
-    name: Publish to PyPI
+  cancel_failed_publication:
+    name: Cancel failed publication
     needs:
+      - publication_status
       - validate
+      - tests
       - build
     if: >-
       ${{
+        always() &&
         inputs.publish &&
-        needs.validate.outputs.already_published != 'true'
+        needs.publication_status.result == 'success' &&
+        needs.publication_status.outputs.already_published != 'true' &&
+        (
+          needs.validate.result != 'success' ||
+          needs.tests.result != 'success' ||
+          needs.build.result != 'success'
+        )
       }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Cancel failed release run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_api="repos/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api --method POST "$run_api/cancel"
+
+          for _ in {1..6}; do
+            if [[ "$(gh api "$run_api" --jq .status)" == "completed" ]]; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          # An always() job can keep a normal cancellation in progress.
+          gh api --method POST "$run_api/force-cancel"
+
+  publish:
+    name: Approve and publish to PyPI
+    needs: publication_status
+    if: >-
+      ${{
+        inputs.publish &&
+        needs.publication_status.outputs.already_published != 'true'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
     environment:
       name: pypi
       url: https://pypi.org/project/agent-skill-installer/
@@ -327,13 +398,79 @@ jobs:
             exit 1
           fi
 
+      - name: Wait for release validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Leave ten minutes for a clear failure before the six-hour job limit.
+          deadline=$((SECONDS + 21000))
+          while (( SECONDS < deadline )); do
+            result="$(gh api \
+              --method GET \
+              "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+              -f filter=all \
+              -f per_page=100 \
+              --jq '
+                [.jobs[] |
+                  select(.name == "Build and verify distributions")] |
+                if any(.[];
+                  .status == "completed" and .conclusion == "success") then
+                  "completed:success"
+                elif length == 0 or any(.[]; .status != "completed") then
+                  "pending:"
+                else
+                  .[-1] | "\(.status):\(.conclusion // "")"
+                end')"
+            case "$result" in
+              completed:success)
+                exit 0
+                ;;
+              completed:*)
+                echo "::error::release validation did not pass ($result)"
+                exit 1
+                ;;
+              *)
+                sleep 15
+                ;;
+            esac
+          done
+          echo "::error::timed out waiting for release validation"
+          exit 1
+
+      - name: Check PyPI publication status
+        id: publication
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pypi_url="https://pypi.org/pypi/agent-skill-installer/$VERSION/json"
+          pypi_status="$(curl \
+            --silent \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "$pypi_url" || true)"
+          case "$pypi_status" in
+            200) already_published=true ;;
+            404) already_published=false ;;
+            *)
+              echo "::error::could not verify PyPI status for $VERSION (HTTP $pypi_status)"
+              exit 1
+              ;;
+          esac
+          echo "already_published=$already_published" >> "$GITHUB_OUTPUT"
+
       - name: Download distributions
+        if: steps.publication.outputs.already_published != 'true'
         uses: actions/download-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
 
       - name: Publish distributions to PyPI
+        if: steps.publication.outputs.already_published != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
 
   release:
