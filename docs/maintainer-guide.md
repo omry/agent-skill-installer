@@ -60,6 +60,14 @@ The dry run:
 - smoke-installs the wheel without dependencies and verifies its metadata
 - prints the exact GitHub Release notes
 
+Successful subprocess output is hidden by default so the command reports only
+its progress, release notes, and result. Pass `verbose=true` to print every
+command and its detailed output; failures always print their captured output:
+
+```bash
+python tools/release.py version=0.4.0 verbose=true
+```
+
 It does not modify the checkout, commit, push, dispatch a workflow, create a
 tag, publish to PyPI, or create a GitHub Release.
 
@@ -80,6 +88,8 @@ python tools/release.py version=0.4.0 publish=true
 
 The command repeats the dry-run checks before changing anything. It then:
 
+- verifies that the `pypi` environment has a required reviewer and links its
+  settings page when the approval gate is missing
 - updates `pyproject.toml`
 - updates `src/agent_skill_installer/__init__.py`
 - consumes the news fragments into `NEWS.md`
@@ -87,6 +97,11 @@ The command repeats the dry-run checks before changing anything. It then:
 - pushes the release commit directly to `main` using the maintainer's identity
 - dispatches **Publish** with the exact 40-character commit SHA and
   `publish=true`
+
+After dispatch, the command prints the exact workflow-run URL and labels it as
+the place to approve the release once validation passes. If GitHub CLI confirms
+the dispatch but does not return the run URL, the command preserves that
+success and links the Publish workflow runs page instead.
 
 The remote workflow verifies that the commit is on `main`, that both version
 declarations and the Towncrier section match, and that no unconsumed news
