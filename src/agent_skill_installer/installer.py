@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from uuid import uuid4
 
 from omegaconf import OmegaConf
 from omegaconf.errors import OmegaConfBaseException
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from yaml import YAMLError
 
@@ -311,6 +313,7 @@ class WheelFileCopyRecord:
 class ExternalWheelInstallRecord:
     package: str
     editable: str | None
+    wheelhouse: str | None
     distribution: str
     version: str
     filename: str
@@ -326,6 +329,7 @@ class PreparedExternalWheel:
     distribution: str
     version: str
     editable: str | None
+    wheelhouse: str | None
 
 
 @dataclass
@@ -1519,12 +1523,40 @@ def wheel_distribution_version(wheel_path: Path) -> tuple[str, str]:
     return str(distribution), str(version)
 
 
+def require_wheelhouse_requirement(package: str, find_links: Path) -> None:
+    try:
+        requirement = Requirement(package)
+    except InvalidRequirement as error:
+        raise InstallerError(
+            "external wheel package must be a name and version requirement "
+            f"to resolve from {find_links}: {package}"
+        ) from error
+    if requirement.url is not None:
+        raise InstallerError(
+            "external wheel package must not use a direct reference "
+            f"to resolve from {find_links}: {package}"
+        )
+    if PurePosixPath(requirement.name.lower()).suffix in DISTRIBUTION_SUFFIXES:
+        raise InstallerError(
+            "external wheel package must be a distribution name, not a filename, "
+            f"to resolve from {find_links}: {package}"
+        )
+
+
+DISTRIBUTION_SUFFIXES = frozenset({".whl", ".zip", ".gz", ".bz2", ".xz", ".tgz"})
+
+
+def wheelhouse_pip_environment() -> dict[str, str]:
+    return {**os.environ, "PIP_CONFIG_FILE": os.devnull}
+
+
 def run_pip_wheel(
     *,
     package: str,
     wheel_dir: Path,
     editable: str | None = None,
     cwd: Path | None = None,
+    find_links: Path | None = None,
 ) -> Path:
     target = editable if editable is not None else package
     if target is None or not target.strip():
@@ -1542,20 +1574,48 @@ def run_pip_wheel(
         "--wheel-dir",
         str(wheel_dir),
     ]
+    if find_links is not None:
+        require_wheelhouse_requirement(package, find_links)
+        command.extend(
+            [
+                "--isolated",
+                "--no-index",
+                "--only-binary=:all:",
+                "--find-links",
+                str(find_links),
+            ]
+        )
     command.append(target)
     try:
-        completed = subprocess.run(
-            command,
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        if find_links is None:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        else:
+            with tempfile.TemporaryDirectory(
+                prefix="agent-skill-installer-pip-cwd-"
+            ) as isolated_cwd:
+                completed = subprocess.run(
+                    command,
+                    cwd=isolated_cwd,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=wheelhouse_pip_environment(),
+                )
     except OSError as error:
         raise InstallerError(f"failed to run pip wheel for {package}: {error}") from error
     if completed.returncode != 0:
         output = (completed.stderr or completed.stdout).strip()
         detail = f": {output}" if output else ""
+        if find_links is not None:
+            raise InstallerError(
+                f"pip wheel failed for {package} resolving from {find_links}{detail}"
+            )
         raise InstallerError(f"pip wheel failed for {package}{detail}")
     wheels = sorted(set(wheel_dir.glob("*.whl")) - before)
     if len(wheels) != 1:
@@ -1596,12 +1656,14 @@ def build_external_wheel(
     wheel_dir: Path,
     editable: str | None = None,
     cwd: Path | None = None,
+    find_links: Path | None = None,
 ) -> tuple[Path, str, str, str]:
     wheel_path = run_pip_wheel(
         package=package,
         wheel_dir=wheel_dir,
         editable=editable,
         cwd=cwd,
+        find_links=find_links,
     )
     distribution, version = wheel_distribution_version(wheel_path)
     return wheel_path, file_sha256(wheel_path), distribution, version
@@ -1861,6 +1923,7 @@ def prepare_external_wheels(
     download_dir: Path,
     *,
     source_dir: Path | None = None,
+    wheelhouse: Path | None = None,
 ) -> list[PreparedExternalWheel]:
     external_wheels = external_wheel_sources(project)
     if not external_wheels:
@@ -1880,11 +1943,13 @@ def prepare_external_wheels(
             raise InstallerError(
                 f"external wheel editable path must not be empty for {package}"
             )
+        find_links = None if editable is not None else wheelhouse
         wheel_path, digest, distribution, version = build_external_wheel(
             package=package,
             wheel_dir=download_dir,
             editable=editable,
             cwd=source_dir,
+            find_links=find_links,
         )
         validate_external_wheel_files(project, wheel_path, external_wheel.copies)
         prepared.append(
@@ -1895,6 +1960,7 @@ def prepare_external_wheels(
                 distribution=distribution,
                 version=version,
                 editable=editable,
+                wheelhouse=None if find_links is None else str(find_links),
             )
         )
     return prepared
@@ -1925,6 +1991,7 @@ def copy_prepared_external_wheels(
             ExternalWheelInstallRecord(
                 package=external_wheel.package.strip(),
                 editable=prepared.editable,
+                wheelhouse=prepared.wheelhouse,
                 distribution=prepared.distribution,
                 version=prepared.version,
                 filename=prepared.wheel_path.name,
@@ -2213,12 +2280,23 @@ def write_manifest(
     if external_wheels:
         data["external_wheels"] = [
             {
-                "source_type": "pip_wheel",
+                "source_type": (
+                    "pip_wheel" if wheel.wheelhouse is None else "local_wheelhouse"
+                ),
                 "package": wheel.package,
                 **({"editable": wheel.editable} if wheel.editable is not None else {}),
+                **(
+                    {"wheelhouse": wheel.wheelhouse}
+                    if wheel.wheelhouse is not None
+                    else {}
+                ),
                 "distribution": wheel.distribution,
                 "version": wheel.version,
-                "resolution": "python -m pip wheel",
+                "resolution": (
+                    "python -m pip wheel"
+                    if wheel.wheelhouse is None
+                    else "python -m pip wheel --no-index --only-binary=:all: --find-links"
+                ),
                 "wheel": {
                     "filename": wheel.filename,
                     "sha256": wheel.sha256,
@@ -2424,6 +2502,11 @@ def stage_install_target(
     )
     try:
         installed_is_symlink = source_dir is not None
+        external_wheelhouse = (
+            pypi_wheel_path.parent
+            if install_mode == "wheel" and pypi_wheel_path is not None
+            else None
+        )
         prepared_external_wheels = (
             []
             if installed_is_symlink
@@ -2431,6 +2514,7 @@ def stage_install_target(
                 project,
                 Path(external_wheels_temp_dir.name),
                 source_dir=external_wheel_source_dir,
+                wheelhouse=external_wheelhouse,
             )
         )
 

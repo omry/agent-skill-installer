@@ -73,6 +73,43 @@ Local wheel installs read the bundled `SKILL.md` from the wheel file without
 installing the Python package into the current environment. This is useful for
 testing the exact artifact you plan to publish.
 
+If the skill metadata declares external wheels, a local wheel install resolves
+each declared companion from the directory holding the skill wheel, and only
+from that directory. ASI runs
+`python -m pip wheel --no-deps --isolated --no-index --only-binary=:all: --find-links <dir>`
+for the declared spec with `PIP_CONFIG_FILE` pointed at the null device, so no
+index is consulted, no source distribution is built, and neither ambient pip
+environment variables such as `PIP_FIND_LINKS` nor global, user, or site pip
+configuration can add another location. Place both artifacts in one directory:
+
+```
+wheelhouse/your_skill_package-1.2.3-py3-none-any.whl
+wheelhouse/your_companion_package-1.2.3-py3-none-manylinux_2_17_x86_64.whl
+```
+
+A companion that is missing from that directory, carries the wrong version for
+the declared spec, or has no wheel compatible with the current Python and
+platform fails the install instead of falling back to an index. The declared
+package spec, including `${package.version}`, stays authoritative.
+
+To keep that boundary meaningful, a companion spec resolved this way must be an
+ordinary distribution name and version requirement. A direct reference such as
+`companion @ https://example.com/companion.whl`, a path to a wheel, or a bare
+wheel filename is rejected, because pip treats those as explicit targets that
+`--no-index` does not restrict. ASI also runs pip from an empty directory it
+creates for the purpose, so a target string cannot be reinterpreted as a file
+that happens to sit in the caller's working directory. Index installs are
+unaffected and still accept direct references.
+
+This makes the directory a trust boundary: any wheel in it matching the declared
+distribution and version is used. Install from a directory you control, and do
+not point `--wheel-file` at a shared download directory when the skill declares
+companions.
+
+Other install sources are unaffected. `--pypi-package` and `--github-url`
+installs still resolve companions through the configured index, and local
+`--skill-path` installs are unchanged.
+
 Install from GitHub:
 
 ```bash
