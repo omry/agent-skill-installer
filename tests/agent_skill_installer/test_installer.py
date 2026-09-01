@@ -196,7 +196,13 @@ def patch_generic_pypi_build(
     )
 
 
-def make_external_wheel(path: Path, *, data: str = "#!/bin/sh\n") -> Path:
+def make_external_wheel(
+    path: Path,
+    *,
+    data: str = "#!/bin/sh\n",
+    version: str = "2.0.0",
+    tag: str = "py3-none-any",
+) -> Path:
     with zipfile.ZipFile(path, "w") as wheel:
         write_zip_file(
             wheel,
@@ -206,8 +212,15 @@ def make_external_wheel(path: Path, *, data: str = "#!/bin/sh\n") -> Path:
         )
         wheel.writestr("arbiter_client/__init__.py", "")
         wheel.writestr(
-            "arbiter_client-2.0.0.dist-info/METADATA",
-            "Metadata-Version: 2.1\nName: arbiter-client\nVersion: 2.0.0\n",
+            f"arbiter_client-{version}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: arbiter-client\nVersion: {version}\n",
+        )
+        wheel.writestr(
+            f"arbiter_client-{version}.dist-info/WHEEL",
+            "Wheel-Version: 1.0\n"
+            "Generator: agent-skill-installer-tests\n"
+            "Root-Is-Purelib: true\n"
+            f"Tag: {tag}\n",
         )
     return path
 
@@ -610,7 +623,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         pip_requests.append((package, editable, cwd))
         raise AssertionError("editable skill installs should not resolve external wheels")
 
@@ -849,7 +864,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         pip_requests.append((package, editable, cwd))
         target = wheel_dir / external_wheel.name
         shutil.copy2(external_wheel, target)
@@ -939,7 +956,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         target = wheel_dir / external_wheel.name
         shutil.copy2(external_wheel, target)
         return target, hashlib.sha256(target.read_bytes()).hexdigest(), "arbiter-client", "2.4.7"
@@ -999,7 +1018,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         target = wheel_dir / external_wheel.name
         shutil.copy2(external_wheel, target)
         return (
@@ -1066,7 +1087,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         target = wheel_dir / external_wheel.name
         shutil.copy2(external_wheel, target)
         return (
@@ -1145,7 +1168,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         target = wheel_dir / external_wheel.name
         shutil.copy2(external_wheel, target)
         return (
@@ -1227,7 +1252,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         target = wheel_dir / external_wheel.name
         shutil.copy2(external_wheel, target)
         return (
@@ -1336,12 +1363,10 @@ def test_install_reports_live_skill_when_staging_cleanup_fails(
     assert (skill_dir / "SKILL.md").read_text() == "example skill\n"
 
 
-def test_run_pip_wheel_uses_current_python_module(
-    tmp_path: Path,
+def patch_pip_wheel_run(
     monkeypatch,
+    calls: list[tuple[list[str], Path | None]],
 ) -> None:
-    calls: list[tuple[list[str], Path | None]] = []
-
     def fake_run(
         command: list[str],
         *,
@@ -1356,6 +1381,14 @@ def test_run_pip_wheel_uses_current_python_module(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("agent_skill_installer.installer.subprocess.run", fake_run)
+
+
+def test_run_pip_wheel_uses_current_python_module(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], Path | None]] = []
+    patch_pip_wheel_run(monkeypatch, calls)
 
     wheel = run_pip_wheel(
         package="arbiter-client>=2.4,<2.5",
@@ -1372,6 +1405,104 @@ def test_run_pip_wheel_uses_current_python_module(
     assert "--editable" not in command
     assert "--no-build-isolation" not in command
     assert cwd == tmp_path / "skill"
+
+
+def test_run_pip_wheel_resolves_hermetically_from_find_links(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], Path | None]] = []
+    patch_pip_wheel_run(monkeypatch, calls)
+    wheelhouse = tmp_path / "wheelhouse"
+
+    run_pip_wheel(
+        package="arbiter-client==1.2.3",
+        wheel_dir=tmp_path / "wheels",
+        find_links=wheelhouse,
+    )
+
+    command, _cwd = calls[0]
+    assert "--no-index" in command
+    assert "--only-binary=:all:" in command
+    assert command[command.index("--find-links") + 1] == str(wheelhouse)
+
+
+def test_run_pip_wheel_isolates_pip_from_ambient_configuration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], Path | None]] = []
+    patch_pip_wheel_run(monkeypatch, calls)
+
+    run_pip_wheel(
+        package="arbiter-client==1.2.3",
+        wheel_dir=tmp_path / "wheels",
+        find_links=tmp_path / "wheelhouse",
+    )
+
+    command, _cwd = calls[0]
+    assert "--isolated" in command
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        "arbiter-client @ file:///tmp/arbiter_client-1.2.3-py3-none-any.whl",
+        "arbiter-client @ https://example.invalid/arbiter_client-1.2.3.whl",
+        "/tmp/arbiter_client-1.2.3-py3-none-any.whl",
+        "./arbiter-client",
+    ],
+)
+def test_run_pip_wheel_rejects_packages_that_escape_the_wheelhouse(
+    tmp_path: Path,
+    monkeypatch,
+    package: str,
+) -> None:
+    calls: list[tuple[list[str], Path | None]] = []
+    patch_pip_wheel_run(monkeypatch, calls)
+
+    with pytest.raises(InstallerError) as error:
+        run_pip_wheel(
+            package=package,
+            wheel_dir=tmp_path / "wheels",
+            find_links=tmp_path / "wheelhouse",
+        )
+
+    assert str(tmp_path / "wheelhouse") in str(error.value)
+    assert calls == []
+
+
+def test_run_pip_wheel_allows_direct_reference_without_a_wheelhouse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], Path | None]] = []
+    patch_pip_wheel_run(monkeypatch, calls)
+
+    run_pip_wheel(
+        package="arbiter-client @ https://example.invalid/arbiter_client-1.2.3.whl",
+        wheel_dir=tmp_path / "wheels",
+    )
+
+    assert len(calls) == 1
+
+
+def test_run_pip_wheel_keeps_index_resolution_without_find_links(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], Path | None]] = []
+    patch_pip_wheel_run(monkeypatch, calls)
+
+    run_pip_wheel(
+        package="arbiter-client==1.2.3",
+        wheel_dir=tmp_path / "wheels",
+    )
+
+    command, _cwd = calls[0]
+    assert "--no-index" not in command
+    assert "--only-binary=:all:" not in command
+    assert "--find-links" not in command
 
 
 def test_pypi_wheel_install_rejects_invalid_skill_frontmatter(
@@ -5491,7 +5622,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         pip_requests.append((package, editable, cwd))
         target = wheel_dir / external_wheel.name
         shutil.copy2(external_wheel, target)
@@ -5947,7 +6080,9 @@ installer:
         wheel_dir: Path,
         editable: str | None = None,
         cwd: Path | None = None,
+        find_links: Path | None = None,
     ) -> tuple[Path, str, str, str]:
+        assert find_links is None
         assert package == "arbiter-client>=2.4,<2.5"
         assert editable is None
         target = wheel_dir / external_wheel.name
@@ -6026,6 +6161,161 @@ def test_generic_console_installs_local_wheel_file(
     assert manifest["install_mode"] == "wheel"
     assert manifest["source_path"] == str(wheel.resolve())
     assert load_recent_pypi_packages(home) == []
+
+
+WHEELHOUSE_CONFIG = """
+installer:
+  external_wheels:
+    - package: "arbiter-client==${package.version}"
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+          executable: true
+          replace: true
+"""
+
+
+def make_wheelhouse_skill_wheel(wheelhouse: Path, project: SkillProject) -> Path:
+    wheelhouse.mkdir(parents=True, exist_ok=True)
+    return make_skill_wheel(
+        wheelhouse / "example_agent_skill-1.2.3-py3-none-any.whl",
+        project,
+        config_text=WHEELHOUSE_CONFIG,
+        extra_skill_files={"bin/arbiter": "#!/bin/sh\necho placeholder\n"},
+    )
+
+
+def install_wheelhouse_skill(wheel: Path, repo: Path, home: Path) -> int:
+    return generic_main(
+        [
+            "install",
+            "--wheel-file",
+            str(wheel),
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+            "--home",
+            str(home),
+        ]
+    )
+
+
+def test_local_wheel_install_resolves_external_wheel_from_sibling_directory(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheelhouse = tmp_path / "wheelhouse"
+    wheel = make_wheelhouse_skill_wheel(wheelhouse, project)
+    companion = make_external_wheel(
+        wheelhouse / "arbiter_client-1.2.3-py3-none-any.whl",
+        data="#!/bin/sh\necho sibling arbiter\n",
+        version="1.2.3",
+    )
+
+    exit_code = install_wheelhouse_skill(wheel, repo, home)
+    output = capsys.readouterr()
+
+    assert exit_code == 0, output.err
+    skill_dir = repo / ".codex" / "skills" / "example-agent-skill"
+    tool = skill_dir / "bin" / "arbiter"
+    assert tool.read_text() == "#!/bin/sh\necho sibling arbiter\n"
+    assert_posix_mode(tool, 0o755)
+    manifest = read_raw_manifest(project, skill_dir)
+    record = manifest["external_wheels"][0]
+    assert Path(record.pop("wheelhouse")) == wheel.resolve().parent
+    assert manifest["external_wheels"] == [
+        {
+            "source_type": "local_wheelhouse",
+            "package": "arbiter-client==1.2.3",
+            "distribution": "arbiter-client",
+            "version": "1.2.3",
+            "resolution": (
+                "python -m pip wheel --no-index --only-binary=:all: --find-links"
+            ),
+            "wheel": {
+                "filename": companion.name,
+                "sha256": hashlib.sha256(companion.read_bytes()).hexdigest(),
+            },
+            "copies": [
+                {
+                    "wheel_path": "arbiter_client/bin/arbiter",
+                    "skill_path": "bin/arbiter",
+                    "executable": True,
+                    "replace": True,
+                }
+            ],
+        }
+    ]
+
+
+def test_local_wheel_install_rejects_missing_sibling_external_wheel(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheelhouse = tmp_path / "wheelhouse"
+    wheel = make_wheelhouse_skill_wheel(wheelhouse, project)
+
+    exit_code = install_wheelhouse_skill(wheel, repo, home)
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "pip wheel failed for arbiter-client==1.2.3 resolving from" in output.err
+    assert str(wheelhouse.resolve()) in output.err
+    assert not (repo / ".codex" / "skills" / "example-agent-skill").exists()
+
+
+def test_local_wheel_install_rejects_mismatched_sibling_external_wheel_version(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheelhouse = tmp_path / "wheelhouse"
+    wheel = make_wheelhouse_skill_wheel(wheelhouse, project)
+    make_external_wheel(
+        wheelhouse / "arbiter_client-9.9.9-py3-none-any.whl",
+        version="9.9.9",
+    )
+
+    exit_code = install_wheelhouse_skill(wheel, repo, home)
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "pip wheel failed for arbiter-client==1.2.3 resolving from" in output.err
+    assert not (repo / ".codex" / "skills" / "example-agent-skill").exists()
+
+
+def test_local_wheel_install_rejects_incompatible_sibling_external_wheel(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    wheelhouse = tmp_path / "wheelhouse"
+    wheel = make_wheelhouse_skill_wheel(wheelhouse, project)
+    make_external_wheel(
+        wheelhouse / "arbiter_client-1.2.3-py2-none-any.whl",
+        version="1.2.3",
+        tag="py2-none-any",
+    )
+
+    exit_code = install_wheelhouse_skill(wheel, repo, home)
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "pip wheel failed for arbiter-client==1.2.3 resolving from" in output.err
+    assert not (repo / ".codex" / "skills" / "example-agent-skill").exists()
 
 
 def test_generic_console_does_not_remember_failed_pypi_install(

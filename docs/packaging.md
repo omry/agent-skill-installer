@@ -152,8 +152,8 @@ about where the native or platform-specific files live:
   owns them, such as an `arbiter-client` package that provides a native client
   executable. The skill package stays platform-neutral and declares which files
   to copy from the companion package. The companion package publishes normal
-  platform-tagged wheels under one package name, and ASI lets pip choose/build
-  the right wheel.
+  platform-tagged wheels under one package name, and ASI lets pip select the
+  right wheel.
 
 Declare companion package copies in `agent-skill-installer.yaml`:
 
@@ -169,10 +169,12 @@ installer:
           replace: true
 ```
 
-`package` is the pip package spec and version contract. During a PyPI or wheel
-install, ASI runs `python -m pip wheel --no-deps --wheel-dir ...` for that spec,
-then copies only the declared `wheel_path` files into the installed skill at the
-matching `skill_path`.
+`package` is the pip package spec and version contract. ASI runs
+`python -m pip wheel --no-deps --wheel-dir ...` for that spec, then copies only
+the declared `wheel_path` files into the installed skill at the matching
+`skill_path`. Every install source resolves that spec against the configured
+index except `--wheel-file`, which resolves it from the wheel's own directory;
+see below.
 
 For companion wheels, every platform wheel for the selected package should
 contain the same declared `wheel_path`. Pip resolves which wheel file applies to
@@ -182,6 +184,11 @@ names.
 `editable` is optional and only for local copied installs from a checkout. In
 that case, ASI builds a wheel from that relative path instead of resolving
 `package` from an index.
+
+A `--wheel-file` install resolves companions from the directory holding the
+skill wheel rather than from an index, which lets an unpublished release ship
+both artifacts in one wheelhouse. See
+[Installing Skills](installing-skills.md) for the index and trust semantics.
 
 `skill_path` is always relative to the installed skill directory. Absolute
 paths, empty path parts, `.`, and `..` are rejected. Set `executable: true` when
