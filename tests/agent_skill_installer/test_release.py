@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Sequence
 
@@ -24,10 +27,16 @@ def test_parse_config_accepts_explicit_publish_and_recovery_commit() -> None:
     commit = "a" * 40
 
     config = release.parse_config(
-        ["version=0.4.0", "publish=true", f"commit={commit}"]
+        [
+            "version=0.4.0",
+            "publish=true",
+            "verbose=true",
+            f"commit={commit}",
+        ]
     )
 
     assert config.publish is True
+    assert config.verbose is True
     assert config.commit == commit
 
 
@@ -39,6 +48,7 @@ def test_parse_config_accepts_explicit_publish_and_recovery_commit() -> None:
         (["version=0.4.0foo"], "valid Python package version"),
         (["version=v0.4.0"], "leading v"),
         (["version=0.4.0", "publish=yes"], "publish must be true or false"),
+        (["version=0.4.0", "verbose=yes"], "verbose must be true or false"),
         (["version=0.4.0", "commit=abc"], "full 40-character"),
         (["version=0.4.0", "unknown=value"], "unknown release argument"),
     ],
@@ -193,6 +203,217 @@ def test_git_release_rejects_checkout_ahead_of_origin_main(
         release.Vcs("git", tmp_path).require_clean_main()
 
 
+def test_successful_commands_are_quiet_unless_verbose(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = (sys.executable, "-c", "print('subprocess chatter')")
+
+    output = release.run(command, tmp_path)
+
+    assert output == "subprocess chatter\n"
+    assert capsys.readouterr() == ("", "")
+
+    release.run(command, tmp_path, verbose=True)
+
+    captured = capsys.readouterr()
+    assert "subprocess chatter" in captured.out
+    assert "+ " in captured.out
+
+
+def test_verbose_commands_inherit_live_output_streams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_subprocess_run(
+        command: Sequence[str],
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+    release.run(("example-command",), tmp_path, verbose=True)
+
+    assert calls == [{"cwd": tmp_path, "check": True}]
+
+
+def test_failed_commands_print_captured_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = (
+        sys.executable,
+        "-c",
+        "import sys; print('useful failure'); raise SystemExit(2)",
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        release.run(command, tmp_path)
+
+    assert "useful failure" in capsys.readouterr().err
+
+
+def test_sapling_commit_tracks_consumed_fragments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(
+        command: Sequence[str],
+        cwd: Path,
+        *,
+        verbose: bool = False,
+    ) -> str:
+        assert cwd == tmp_path
+        assert verbose is True
+        commands.append(tuple(command))
+        return ""
+
+    monkeypatch.setattr(release, "run", fake_run)
+
+    release.Vcs("sl", tmp_path, verbose=True).commit("Prepare 0.4.0 release")
+
+    assert commands == [
+        (
+            "sl",
+            "addremove",
+            "pyproject.toml",
+            "src/agent_skill_installer/__init__.py",
+            "NEWS.md",
+            "news",
+        ),
+        ("sl", "commit", "-m", "Prepare 0.4.0 release"),
+    ]
+
+
+def test_dispatch_publish_returns_exact_workflow_run_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = (
+        "https://github.com/omry/agent-skill-installer/actions/runs/123456789"
+    )
+
+    monkeypatch.setattr(
+        release,
+        "capture_run",
+        lambda command, cwd, verbose=False: (
+            "Created workflow_dispatch event\n" + expected + "\n"
+        ),
+    )
+
+    actual = release.dispatch_publish(
+        tmp_path,
+        release.ReleaseConfig(version="0.4.0", publish=True),
+        "a" * 40,
+    )
+
+    assert actual == expected
+
+
+def test_dispatch_publish_falls_back_when_run_url_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        release,
+        "capture_run",
+        lambda command, cwd, verbose=False: "Created workflow_dispatch event\n",
+    )
+
+    actual = release.dispatch_publish(
+        tmp_path,
+        release.ReleaseConfig(version="0.4.0", publish=True),
+        "a" * 40,
+    )
+
+    assert actual == (
+        "https://github.com/omry/agent-skill-installer/"
+        "actions/workflows/publish.yml"
+    )
+
+
+def test_publish_approval_preflight_accepts_required_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = {
+        "id": 123,
+        "protection_rules": [
+            {"type": "required_reviewers", "reviewers": [{"id": 1}]}
+        ],
+    }
+    monkeypatch.setattr(
+        release,
+        "capture_run",
+        lambda command, cwd, verbose=False: json.dumps(environment),
+    )
+
+    release.require_publish_approval(tmp_path)
+
+
+def test_publish_approval_preflight_links_unprotected_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = {"id": 123, "protection_rules": []}
+    monkeypatch.setattr(
+        release,
+        "capture_run",
+        lambda command, cwd, verbose=False: json.dumps(environment),
+    )
+
+    with pytest.raises(release.ReleaseError, match="required reviewer") as error:
+        release.require_publish_approval(tmp_path)
+
+    assert (
+        "https://github.com/omry/agent-skill-installer/settings/"
+        "environments/123/edit" in str(error.value)
+    )
+
+
+def test_publish_result_labels_exact_approval_page(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_url = "https://github.com/omry/agent-skill-installer/actions/runs/123"
+
+    release.print_dispatch_result(
+        release.ReleaseConfig(version="0.4.0", publish=True),
+        "a" * 40,
+        run_url,
+    )
+
+    output = capsys.readouterr().out
+    assert "Approval page (available after validation passes):" in output
+    assert run_url in output
+    assert "Review deployments" in output
+
+
+def test_publish_result_labels_fallback_workflow_page(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workflow_url = (
+        "https://github.com/omry/agent-skill-installer/"
+        "actions/workflows/publish.yml"
+    )
+
+    release.print_dispatch_result(
+        release.ReleaseConfig(version="0.4.0", publish=True),
+        "a" * 40,
+        workflow_url,
+    )
+
+    output = capsys.readouterr().out
+    assert "GitHub did not return the exact run URL" in output
+    assert workflow_url in output
+    assert "Open the release run" in output
+
+
 def test_recovery_commit_dispatches_without_local_preparation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -204,11 +425,18 @@ def test_recovery_commit_dispatches_without_local_preparation(
         root: Path,
         config: release.ReleaseConfig,
         exact_commit: str,
-    ) -> None:
+    ) -> str:
         assert root == tmp_path
         dispatched.append((config, exact_commit))
+        return "https://github.com/omry/agent-skill-installer/actions/runs/1"
 
     monkeypatch.setattr(release, "dispatch_publish", fake_dispatch)
+    monkeypatch.setattr(release, "pypi_published", lambda version: False)
+    monkeypatch.setattr(
+        release,
+        "require_publish_approval",
+        lambda root, verbose: None,
+    )
     config = release.ReleaseConfig(
         version="0.4.0",
         publish=True,
@@ -261,10 +489,11 @@ def test_publish_prepares_commits_pushes_and_dispatches_exact_commit(
     )
 
     monkeypatch.setattr(release, "pypi_published", lambda version: False)
+    monkeypatch.setattr(release, "require_publish_approval", lambda root, verbose: None)
     monkeypatch.setattr(
         release.Vcs,
         "detect",
-        staticmethod(lambda root: fake_vcs),
+        staticmethod(lambda root, verbose=False: fake_vcs),
     )
     monkeypatch.setattr(release, "local_dry_run", lambda root, plan: prepared)
     monkeypatch.setattr(
@@ -277,8 +506,9 @@ def test_publish_prepares_commits_pushes_and_dispatches_exact_commit(
     monkeypatch.setattr(
         release,
         "dispatch_publish",
-        lambda root, plan, exact_commit: events.append(
-            ("dispatch", plan, exact_commit)
+        lambda root, plan, exact_commit: (
+            events.append(("dispatch", plan, exact_commit))
+            or "https://github.com/omry/agent-skill-installer/actions/runs/1"
         ),
     )
 

@@ -1,0 +1,4 @@
+The maintainer release command now suppresses successful subprocess output by
+default; pass `verbose=true` for live command output. Publication prints the
+exact GitHub Actions run when available and otherwise links to the Publish
+workflow without treating a missing run URL as a failed dispatch.
