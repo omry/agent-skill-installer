@@ -14,6 +14,15 @@ def test_conflicting_tag_is_checked_before_pypi_upload() -> None:
     assert 'if [[ "$existing_commit" != "$COMMIT" ]]' in workflow
 
 
+def test_nonempty_release_notes_are_checked_before_pypi_upload() -> None:
+    workflow = WORKFLOW.read_text()
+
+    upload = workflow.index("uses: pypa/gh-action-pypi-publish")
+    validation = workflow[:upload]
+
+    assert "match is None or not match.group(1).strip()" in validation
+
+
 def test_existing_release_is_published_when_repaired() -> None:
     workflow = WORKFLOW.read_text()
 

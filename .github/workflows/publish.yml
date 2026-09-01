@@ -183,10 +183,13 @@ jobs:
           pattern = re.compile(
               r"(?ms)^## Agent Skill Installer "
               + re.escape(expected)
-              + r" [(][^)]+[)]\n.*?(?=^## |\Z)"
+              + r" [(][^)]+[)]\n(.*?)(?=^## |\Z)"
           )
-          if pattern.search(rendered) is None:
-              raise SystemExit(f"NEWS.md has no release section for {expected}")
+          match = pattern.search(rendered)
+          if match is None or not match.group(1).strip():
+              raise SystemExit(
+                  f"NEWS.md has no non-empty release section for {expected}"
+              )
           PY
 
   tests:
