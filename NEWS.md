@@ -17,7 +17,9 @@
 - The maintainer release command now suppresses successful subprocess output by
   default; pass `verbose=true` for live command output. Publication prints the
   exact GitHub Actions run when available and otherwise links to the Publish
-  workflow without treating a missing run URL as a failed dispatch. ([#40](https://github.com/omry/agent-skill-installer/issues/40))
+  workflow without treating a missing run URL as a failed dispatch. The
+  protected PyPI approval is available as soon as the workflow starts, while
+  publication still waits for release validation to pass. ([#40](https://github.com/omry/agent-skill-installer/issues/40))
 
 ## Agent Skill Installer 0.3.0 (2026-06-12)
 

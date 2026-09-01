@@ -576,7 +576,7 @@ def print_dispatch_result(config: ReleaseConfig, commit: str, run_url: str) -> N
     print(f"\nDispatched {mode} {config.version} from {commit}.")
     if config.publish:
         if "/actions/runs/" in run_url:
-            print("Approval page (available after validation passes):")
+            print("Approval page (available immediately):")
         else:
             print(
                 "Publish workflow runs (GitHub did not return the exact run URL):"
@@ -584,7 +584,8 @@ def print_dispatch_result(config: ReleaseConfig, commit: str, run_url: str) -> N
         print(
             f"{run_url}\n"
             "Open the release run, select Review deployments, choose pypi, "
-            "then approve and deploy."
+            "then approve and deploy. Validation runs in parallel; publishing "
+            "starts only after both approval and validation succeed."
         )
     else:
         label = (
