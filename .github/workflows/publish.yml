@@ -1,74 +1,138 @@
 name: Publish
+run-name: >-
+  ${{ inputs.publish && 'Publish' || 'Validate' }}
+  agent-skill-installer ${{ inputs.version }} @ ${{ inputs.commit }}
 
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Draft GitHub Release tag to publish, such as v0.1.3"
+      version:
+        description: "Exact package version, without the leading v"
         required: true
         type: string
+      commit:
+        description: "Full commit SHA to validate and optionally publish"
+        required: true
+        type: string
+      publish:
+        description: "Publish to PyPI and create the GitHub Release"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   validate:
-    name: Validate draft release
+    name: Validate release plan
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
-      version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ inputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      commit: ${{ steps.plan.outputs.commit }}
+      tag: ${{ steps.plan.outputs.tag }}
+      already_published: ${{ steps.plan.outputs.already_published }}
     steps:
-      - name: Validate release metadata
-        id: release
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          tag="$TAG"
-          if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([.a-zA-Z0-9-]+)?$ ]]; then
-            echo "::error::tag must look like v1.2.3"
-            exit 1
-          fi
-
-          draft="$(gh api --paginate "repos/{owner}/{repo}/releases" \
-            --jq ".[] | select(.tag_name == \"$tag\") | .draft")"
-          if [[ "$draft" != "true" ]]; then
-            echo "::error::Release $tag must exist and still be a draft."
-            exit 1
-          fi
-
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-
-  build:
-    name: Build distribution
-    needs:
-      - validate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
+      - name: Check out exact release commit
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.10"
 
-      - name: Install build tools
-        run: python -m pip install --upgrade pip build twine
+      - name: Install release-plan dependencies
+        run: python -m pip install packaging
 
-      - name: Verify release version
+      - name: Validate release plan
+        id: plan
         env:
-          VERSION: ${{ needs.validate.outputs.version }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+([.a-zA-Z0-9-]+)?$ ]]; then
+            echo "::error::version must look like 1.2.3 without a leading v"
+            exit 1
+          fi
+          python - <<'PY'
+          from packaging.version import InvalidVersion, Version
+          import os
+
+          raw = os.environ["VERSION"]
+          try:
+              parsed = Version(raw)
+          except InvalidVersion as exc:
+              raise SystemExit(f"invalid Python package version: {raw!r}") from exc
+          if (
+              parsed.epoch != 0
+              or parsed.local is not None
+              or len(parsed.release) != 3
+              or str(parsed) != raw
+          ):
+              raise SystemExit(
+                  "version must use canonical 1.2.3 form without epochs "
+                  "or local labels"
+              )
+          PY
+          if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit must be a full 40-character lowercase SHA"
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$COMMIT" ]]; then
+            echo "::error::checkout does not match requested commit $COMMIT"
+            exit 1
+          fi
+
+          git fetch origin main --no-tags
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "::error::release commit $COMMIT is not on main"
+            exit 1
+          fi
+
+          pypi_url="https://pypi.org/pypi/agent-skill-installer/$VERSION/json"
+          pypi_status="$(curl \
+            --silent \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "$pypi_url" || true)"
+          case "$pypi_status" in
+            200) already_published=true ;;
+            404) already_published=false ;;
+            *)
+              echo "::error::could not verify PyPI status for $VERSION (HTTP $pypi_status)"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "version=$VERSION"
+            echo "commit=$COMMIT"
+            echo "tag=v$VERSION"
+            echo "already_published=$already_published"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Release plan"
+            echo
+            echo "- Version: \`$VERSION\`"
+            echo "- Commit: \`$COMMIT\`"
+            echo "- Publish requested: \`${{ inputs.publish }}\`"
+            echo "- Already on PyPI: \`$already_published\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify prepared release metadata
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -79,24 +143,19 @@ jobs:
 
           pyproject = Path("pyproject.toml").read_text()
           match = re.search(r'(?m)^version = "([^"]+)"$', pyproject)
-          if match is None:
-              raise SystemExit("pyproject.toml version not found")
-          if match.group(1) != expected:
+          if match is None or match.group(1) != expected:
               raise SystemExit(
-                  f"pyproject.toml version {match.group(1)!r} does not match {expected!r}"
+                  f"pyproject.toml version does not match {expected!r}"
               )
 
           init = Path("src/agent_skill_installer/__init__.py").read_text()
           match = re.search(r'(?m)^__version__ = "([^"]+)"$', init)
-          if match is None:
-              raise SystemExit("__version__ not found")
-          if match.group(1) != expected:
-              raise SystemExit(
-                  f"__version__ {match.group(1)!r} does not match {expected!r}"
-              )
+          if match is None or match.group(1) != expected:
+              raise SystemExit(f"__version__ does not match {expected!r}")
 
           fragments = sorted(
-              path.name for path in Path("news").iterdir()
+              path.name
+              for path in Path("news").iterdir()
               if path.is_file() and path.name != "_template.rst"
           )
           if fragments:
@@ -104,7 +163,76 @@ jobs:
                   "news fragments remain after release preparation: "
                   + ", ".join(fragments)
               )
+
+          notes = Path("NEWS.md").read_text()
+          marker = "<!-- TOWNCRIER -->\n"
+          if marker not in notes:
+              raise SystemExit("NEWS.md does not contain the Towncrier marker")
+          rendered = notes.split(marker, 1)[1]
+          pattern = re.compile(
+              r"(?ms)^## Agent Skill Installer "
+              + re.escape(expected)
+              + r" [(][^)]+[)]\n.*?(?=^## |\Z)"
+          )
+          if pattern.search(rendered) is None:
+              raise SystemExit(f"NEWS.md has no release section for {expected}")
           PY
+
+  tests:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    steps:
+      - name: Check out exact release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest build "setuptools>=77"
+
+      - name: Run tests
+        run: python -m pytest tests
+
+  build:
+    name: Build and verify distributions
+    needs:
+      - validate
+      - tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
 
       - name: Build wheel and sdist
         run: python -m build
@@ -112,25 +240,64 @@ jobs:
       - name: Check distribution metadata
         run: python -m twine check dist/*
 
+      - name: Smoke-install wheel without dependencies
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python -m venv smoke-venv
+          smoke-venv/bin/python -m pip install --no-deps dist/*.whl
+          smoke-venv/bin/python - <<'PY'
+          import importlib.metadata
+          import os
+
+          actual = importlib.metadata.version("agent-skill-installer")
+          expected = os.environ["VERSION"]
+          if actual != expected:
+              raise SystemExit(f"installed version {actual!r} != {expected!r}")
+          PY
+
       - name: Upload distributions
         uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
+          retention-days: 7
 
   publish:
     name: Publish to PyPI
     needs:
-      - build
       - validate
+      - build
+    if: >-
+      ${{
+        inputs.publish &&
+        needs.validate.outputs.already_published != 'true'
+      }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/project/agent-skill-installer/
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
+      - name: Verify protected approval gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reviewer_count="$(gh api \
+            "repos/${{ github.repository }}/environments/pypi" \
+            --jq '[.protection_rules[] |
+              select(.type == "required_reviewers") |
+              .reviewers[]] | length')"
+          if [[ "$reviewer_count" -lt 1 ]]; then
+            echo "::error::pypi must have at least one required reviewer"
+            exit 1
+          fi
+
       - name: Download distributions
         uses: actions/download-artifact@v4
         with:
@@ -140,17 +307,164 @@ jobs:
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
-  promote:
-    name: Promote GitHub Release
+  release:
+    name: Create GitHub Release
     needs:
-      - publish
       - validate
+      - build
+      - publish
+    if: >-
+      ${{
+        always() &&
+        inputs.publish &&
+        needs.validate.result == 'success' &&
+        needs.build.result == 'success' &&
+        (
+          needs.publish.result == 'success' ||
+          (
+            needs.publish.result == 'skipped' &&
+            needs.validate.outputs.already_published == 'true'
+          )
+        )
+      }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      TAG: ${{ needs.validate.outputs.tag }}
     steps:
-      - name: Publish draft release
-        run: gh release edit "${{ needs.validate.outputs.tag }}" --draft=false
+      - name: Check out exact release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Download verified distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Wait for PyPI visibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          pypi_url="https://pypi.org/pypi/agent-skill-installer/$VERSION/json"
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error "$pypi_url" >/dev/null; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 12 ]]; then
+              sleep 5
+            fi
+          done
+          echo "::error::agent-skill-installer $VERSION is not visible on PyPI"
+          exit 1
+
+      - name: Verify PyPI artifact provenance
+        run: |
+          python - <<'PY'
+          from hashlib import sha256
+          import json
+          import os
+          from pathlib import Path
+          from urllib.request import urlopen
+
+          version = os.environ["VERSION"]
+          url = (
+              "https://pypi.org/pypi/agent-skill-installer/"
+              f"{version}/json"
+          )
+          with urlopen(url, timeout=30) as response:
+              release = json.load(response)
+
+          published = {
+              item["filename"]: item["digests"]["sha256"]
+              for item in release["urls"]
+          }
+          local = {
+              path.name: sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          if local != published:
+              missing = sorted(local.keys() - published.keys())
+              unexpected = sorted(published.keys() - local.keys())
+              mismatched = sorted(
+                  name
+                  for name in local.keys() & published.keys()
+                  if local[name] != published[name]
+              )
+              raise SystemExit(
+                  "PyPI artifacts do not match the exact release build: "
+                  f"missing={missing}, unexpected={unexpected}, "
+                  f"mismatched={mismatched}"
+              )
+          PY
+
+      - name: Extract Towncrier release notes
+        env:
+          RELEASE_NOTES_FILE: release-notes.md
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          version = os.environ["VERSION"]
+          notes = Path("NEWS.md").read_text()
+          marker = "<!-- TOWNCRIER -->\n"
+          if marker not in notes:
+              raise SystemExit("NEWS.md does not contain the Towncrier marker")
+          rendered = notes.split(marker, 1)[1]
+          pattern = re.compile(
+              r"(?ms)^## Agent Skill Installer "
+              + re.escape(version)
+              + r" [(][^)]+[)]\n(.*?)(?=^## |\Z)"
+          )
+          match = pattern.search(rendered)
+          if match is None or not match.group(1).strip():
+              raise SystemExit(f"NEWS.md has no release notes for {version}")
+          Path(os.environ["RELEASE_NOTES_FILE"]).write_text(
+              match.group(1).strip() + "\n"
+          )
+          PY
+
+      - name: Create immutable release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)"
+          if [[ -n "$remote_tag" ]]; then
+            git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+            existing_commit="$(git rev-list -n 1 "$TAG")"
+            if [[ "$existing_commit" != "$COMMIT" ]]; then
+              echo "::error::$TAG points to $existing_commit, not $COMMIT"
+              exit 1
+            fi
+          else
+            git tag "$TAG" "$COMMIT"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Create or repair GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Agent Skill Installer $VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "$title" \
+              --notes-file release-notes.md
+          else
+            gh release create "$TAG" \
+              --verify-tag \
+              --target "$COMMIT" \
+              --title "$title" \
+              --notes-file release-notes.md
+          fi

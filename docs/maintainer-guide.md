@@ -6,137 +6,130 @@ guides under `docs/`.
 
 ## Release Model
 
-Releases use a protected-branch-friendly workflow:
+Releases use a maintainer-controlled local command and a protected GitHub
+Actions workflow:
 
-1. Run **Prepare Release**. If release files need changes, it opens or updates
-   a release preparation PR.
-2. Approve the release preparation PR after reviewing the release notes and
-   version changes.
-3. **Prepare Release** reacts to the approval, merges the PR when required
-   checks allow it, creates or refreshes the draft GitHub Release from `main`,
-   then runs **Publish** for that tag.
+1. Run a local dry run for the intended version.
+2. Run the same command with `publish=true` when the result is ready.
+3. Approve the protected `pypi` environment after remote validation passes.
+4. The workflow publishes to PyPI, creates the immutable version tag, and
+   creates the GitHub Release from the matching Towncrier section in `NEWS.md`.
 
-The draft GitHub Release is the handoff object. It is safe to edit before the
-package is public. The publish workflow builds and publishes the PyPI package
-first, then promotes the draft GitHub Release only after PyPI publishing
-succeeds.
+The local command makes repository and remote changes only when
+`publish=true` is explicit. The workflow pins every job to the exact release
+commit, rebuilds and verifies the distributions remotely, and cannot publish
+until the `pypi` environment is approved.
 
-Do not manually publish a draft GitHub Release before PyPI publishing succeeds.
-The repository publish workflow intentionally avoids the `release: published`
-trigger so that GitHub Releases do not become public before the package is
-available on PyPI.
+GitHub Actions does not create or approve pull requests for releases. Release
+commits and pushes use the maintainer's local Sapling or Git identity, while
+PyPI uses GitHub Actions Trusted Publishing.
 
-The repository must allow GitHub Actions to create pull requests. Prepare uses
-that permission to open or update the release preparation PR. It also needs
-permission to merge approved release preparation PRs and dispatch the publish
-workflow.
+## Prerequisites
 
-## Prepare A Release
-
-Run the **Prepare Release** workflow from GitHub Actions.
-
-To dispatch it from a shell, specify the repository explicitly because a
-Sapling checkout may not have `.git` metadata for `gh` to infer it from:
-
-```bash
-gh workflow run "Prepare Release" \
-  --repo omry/agent-skill-installer \
-  --ref main \
-  -f version=0.4.0 \
-  -f target_branch=main
-```
-
-Replace `0.4.0` with the version being prepared.
-
-Inputs:
-
-- `version`: release version without a leading `v`, for example `0.1.4`.
-- `date`: optional `YYYY-MM-DD` release date. If omitted, the workflow uses the
-  current UTC date.
-- `target_branch`: branch to prepare from. Defaults to `main`.
-
-The workflow:
-
-- checks out the target branch
-- stops if the version is already published on PyPI
-- updates `pyproject.toml`
-- updates `src/agent_skill_installer/__init__.py`
-- runs Towncrier to consume `news/` fragments into `NEWS.md`
-- commits release preparation changes to `release/prepare-v<version>` and opens
-  or updates a PR, if release files changed
-- dispatches CI for the release preparation branch
-- creates or updates a draft GitHub Release for `v<version>`, if the target
-  branch is already prepared
-- points the draft release tag at the prepared target branch commit
-- writes the latest Towncrier release section into the draft body
-
-If the workflow opens or updates a release preparation PR, edit the generated
-`NEWS.md` release section in that PR if needed. Review and approve the PR.
-After approval, **Prepare Release** merges the PR when checks allow it, creates
-or refreshes the draft GitHub Release from `main`, and runs **Publish** for the
-prepared tag.
-
-If the workflow creates or updates a draft GitHub Release, review the draft.
-Keep the release as a draft.
-
-You can rerun **Prepare Release** with the same version until that version is
-published on PyPI. Before the release preparation PR is merged, reruns update
-the same PR. After the prepared changes are on the target branch, reruns move
-the release tag to that commit and refresh the GitHub Release as a draft.
-After the first prepare run, edit the generated section in `NEWS.md` directly
-for release-note changes. Do not add late fragments for the same version after
-the section exists. GitHub draft body edits are overwritten by the next prepare
-run, so make them only after the final prepare run. If the version is already
-published on PyPI, preparation fails before changing release files.
-
-## Publish A Release
-
-Run the **Publish** workflow from GitHub Actions with the draft release tag, for
-example `v0.1.4`.
-
-The workflow validates that:
-
-- the GitHub Release exists
-- the GitHub Release is still a draft
-- the tag looks like `vX.Y.Z`
-- `pyproject.toml` matches the tag version
-- `src/agent_skill_installer/__init__.py` matches the tag version
-- no release fragments remain under `news/`
-
-Then it:
-
-- checks out the draft release tag
-- builds the wheel and source distribution remotely
-- runs `twine check`
-- uploads the build artifacts inside the workflow
-- publishes to PyPI using trusted publishing
-- promotes the GitHub draft release to public after PyPI publishing succeeds
-
-If PyPI publishing fails, the GitHub Release remains a draft. Fix the issue and
-rerun the publish workflow against the same draft tag.
-
-## Manual Release Recovery
-
-The approval path is the normal release path. If it fails after the PR is
-merged, rerun **Prepare Release** with the same version on `main`, then run
-**Publish** with the draft release tag, for example `v0.1.4`.
-
-If it fails before merging the PR, fix the release preparation branch or rerun
-**Prepare Release** with the same version, then approve the updated PR after
-checks pass.
-
-## Local Checks
-
-Local checks are useful before preparing a release, but they are not the publish
-path.
-
-Use the project virtual environment:
+Start from a clean `main` checkout at `remote/main` with Sapling or
+`origin/main` with Git. Install the local release tools in the project virtual
+environment and authenticate GitHub CLI:
 
 ```bash
 source .venv/bin/activate
-python -m pytest
-towncrier build --draft
+python -m pip install "setuptools>=77" pytest build twine towncrier
+gh auth status
 ```
 
-The publish workflow performs the authoritative build from the draft release tag
-on GitHub-hosted runners.
+The repository's `pypi` environment must require the intended reviewer and be
+configured as the PyPI Trusted Publisher environment. The publish job fails
+closed before downloading artifacts if that required-reviewer rule is absent.
+
+## Dry Run
+
+Run the release tool without `publish=true`:
+
+```bash
+python tools/release.py version=0.4.0
+```
+
+The dry run:
+
+- verifies that the version is not already on PyPI
+- copies the current checkout into a temporary release workspace
+- updates both package version declarations in that workspace
+- consumes `news/` fragments with Towncrier in that workspace
+- runs the complete test suite
+- builds the wheel and source distribution
+- runs `twine check`
+- smoke-installs the wheel without dependencies and verifies its metadata
+- prints the exact GitHub Release notes
+
+It does not modify the checkout, commit, push, dispatch a workflow, create a
+tag, publish to PyPI, or create a GitHub Release.
+
+Use `date=YYYY-MM-DD` only when the Towncrier release date must differ from the
+current UTC date:
+
+```bash
+python tools/release.py version=0.4.0 date=2026-09-01
+```
+
+## Publish
+
+After reviewing a successful dry run, repeat it with `publish=true`:
+
+```bash
+python tools/release.py version=0.4.0 publish=true
+```
+
+The command repeats the dry-run checks before changing anything. It then:
+
+- updates `pyproject.toml`
+- updates `src/agent_skill_installer/__init__.py`
+- consumes the news fragments into `NEWS.md`
+- commits those release files as `Prepare <version> release`
+- pushes the release commit directly to `main` using the maintainer's identity
+- dispatches **Publish** with the exact 40-character commit SHA and
+  `publish=true`
+
+The remote workflow verifies that the commit is on `main`, that both version
+declarations and the Towncrier section match, and that no unconsumed news
+fragments remain. It then runs the full Python and operating-system test
+matrix, rebuilds the distributions, runs `twine check`, and smoke-installs the
+wheel.
+
+The workflow pauses at the protected `pypi` environment immediately before
+the Trusted Publishing upload. Review the workflow summary and approve that
+environment to publish. After the version is visible on PyPI, the workflow
+creates `v<version>` at the exact release commit and creates the GitHub Release
+from that version's `NEWS.md` section.
+
+Do not create or publish the GitHub Release manually before PyPI publishing
+succeeds.
+
+## Recovery And Remote Dry Runs
+
+Every publish run is pinned to an exact commit. To rerun remote validation for
+an existing prepared commit without uploading, pass its full SHA:
+
+```bash
+python tools/release.py \
+  version=0.4.0 \
+  commit=<full-40-character-sha>
+```
+
+To resume publication or repair the tag and GitHub Release from that same
+commit, add `publish=true`:
+
+```bash
+python tools/release.py \
+  version=0.4.0 \
+  commit=<full-40-character-sha> \
+  publish=true
+```
+
+Commit recovery does not modify, commit, or push the local checkout. The
+workflow requires the commit to be on `main` and validates its prepared release
+state before continuing.
+
+If the version already exists on PyPI, the workflow skips the upload and
+continues only after the published filenames and SHA-256 hashes exactly match
+the distributions rebuilt from the requested commit. It then performs
+exact-commit tag verification and GitHub Release creation or repair. It refuses
+to move an existing version tag to a different commit.
