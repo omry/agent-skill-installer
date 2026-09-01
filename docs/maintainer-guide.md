@@ -11,7 +11,9 @@ Actions workflow:
 
 1. Run a local dry run for the intended version.
 2. Run the same command with `publish=true` when the result is ready.
-3. Approve the protected `pypi` environment after remote validation passes.
+3. Approve the protected `pypi` environment near the start, after a quick PyPI
+   status check; remote validation continues independently, and publication
+   waits for both to succeed.
 4. The workflow publishes to PyPI, creates the immutable version tag, and
    creates the GitHub Release from the matching Towncrier section in `NEWS.md`.
 
@@ -99,9 +101,11 @@ The command repeats the dry-run checks before changing anything. It then:
   `publish=true`
 
 After dispatch, the command prints the exact workflow-run URL and labels it as
-the place to approve the release once validation passes. If GitHub CLI confirms
-the dispatch but does not return the run URL, the command preserves that
-success and links the Publish workflow runs page instead.
+the place to approve the release after a quick PyPI status check. The protected
+approval appears before full remote validation finishes, and publication starts
+only after both have succeeded. If GitHub CLI confirms the dispatch but does not
+return the run URL, the command preserves that success and links the Publish
+workflow runs page instead.
 
 The remote workflow verifies that the commit is on `main`, that both version
 declarations and the Towncrier section match, and that no unconsumed news
@@ -114,11 +118,13 @@ and normalizes archive metadata from the release commit timestamp. This makes
 later exact-commit recovery builds byte-for-byte comparable with the artifacts
 published by the original run.
 
-The workflow pauses at the protected `pypi` environment immediately before
-the Trusted Publishing upload. Review the workflow summary and approve that
-environment to publish. After the version is visible on PyPI, the workflow
-creates `v<version>` at the exact release commit and creates the GitHub Release
-from that version's `NEWS.md` section.
+The workflow presents the protected `pypi` environment approval after a quick
+PyPI status check, while release validation runs separately. Already-published
+recovery runs skip that no-op approval. Approving early does not publish
+immediately: the approved job waits for the test matrix and verified build to
+succeed before using Trusted Publishing. After the version is visible on PyPI,
+the workflow creates `v<version>` at the exact release commit and creates the
+GitHub Release from that version's `NEWS.md` section.
 
 Do not create or publish the GitHub Release manually before PyPI publishing
 succeeds.
