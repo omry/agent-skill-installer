@@ -99,6 +99,17 @@ jobs:
             exit 1
           fi
 
+          tag="v$VERSION"
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)"
+          if [[ -n "$remote_tag" ]]; then
+            git fetch origin "refs/tags/$tag:refs/tags/$tag"
+            existing_commit="$(git rev-list -n 1 "$tag")"
+            if [[ "$existing_commit" != "$COMMIT" ]]; then
+              echo "::error::$tag points to $existing_commit, not $COMMIT"
+              exit 1
+            fi
+          fi
+
           pypi_url="https://pypi.org/pypi/agent-skill-installer/$VERSION/json"
           pypi_status="$(curl \
             --silent \
@@ -474,6 +485,7 @@ jobs:
           title="Agent Skill Installer $VERSION"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" \
+              --draft=false \
               --title "$title" \
               --notes-file release-notes.md
           else
