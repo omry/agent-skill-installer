@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+import json
 from pathlib import Path
 import re
 import shutil
@@ -46,6 +47,7 @@ class ReleaseError(RuntimeError):
 class ReleaseConfig:
     version: str
     publish: bool = False
+    verbose: bool = False
     release_date: str = ""
     commit: str = ""
 
@@ -53,13 +55,13 @@ class ReleaseConfig:
 Runner = Callable[[Sequence[str], Path], None]
 
 
-def parse_bool(value: str) -> bool:
+def parse_bool(value: str, name: str) -> bool:
     normalized = value.strip().lower()
     if normalized == "true":
         return True
     if normalized == "false":
         return False
-    raise ReleaseError("publish must be true or false")
+    raise ReleaseError(f"{name} must be true or false")
 
 
 def normalize_version(value: str) -> str:
@@ -99,9 +101,10 @@ def parse_config(arguments: Sequence[str]) -> ReleaseConfig:
         if not separator or not key or not value:
             raise ReleaseError(
                 "arguments must use key=value form; expected version=1.2.3 "
-                "[publish=true] [date=YYYY-MM-DD] [commit=<sha>]"
+                "[publish=true] [verbose=true] [date=YYYY-MM-DD] "
+                "[commit=<sha>]"
             )
-        if key not in {"version", "publish", "date", "commit"}:
+        if key not in {"version", "publish", "verbose", "date", "commit"}:
             raise ReleaseError(f"unknown release argument: {key}")
         if key in values:
             raise ReleaseError(f"duplicate release argument: {key}")
@@ -116,15 +119,44 @@ def parse_config(arguments: Sequence[str]) -> ReleaseConfig:
 
     return ReleaseConfig(
         version=normalize_version(values["version"]),
-        publish=parse_bool(values.get("publish", "false")),
+        publish=parse_bool(values.get("publish", "false"), "publish"),
+        verbose=parse_bool(values.get("verbose", "false"), "verbose"),
         release_date=normalize_date(values.get("date", "")),
         commit=commit,
     )
 
 
-def run(command: Sequence[str], cwd: Path) -> None:
+def capture_run(command: Sequence[str], cwd: Path, *, verbose: bool = False) -> str:
+    if verbose:
+        print("+", " ".join(command), flush=True)
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = completed.stdout
+    if verbose and output:
+        print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    if completed.returncode != 0:
+        if not verbose and output:
+            print(output, end="" if output.endswith("\n") else "\n", file=sys.stderr)
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            command,
+            output=output,
+        )
+    return output
+
+
+def run(command: Sequence[str], cwd: Path, *, verbose: bool = False) -> str:
+    if not verbose:
+        return capture_run(command, cwd)
     print("+", " ".join(command), flush=True)
     subprocess.run(command, cwd=cwd, check=True)
+    return ""
 
 
 def capture(command: Sequence[str], cwd: Path) -> str:
@@ -329,6 +361,7 @@ class PreparedRelease:
 
 
 def local_dry_run(root: Path, config: ReleaseConfig) -> PreparedRelease:
+    print(f"Preparing release {config.version} in a temporary workspace...")
     temporary = tempfile.TemporaryDirectory(prefix="asi-release-")
     workspace = Path(temporary.name) / "agent-skill-installer"
     copy_repository(root, workspace)
@@ -342,9 +375,14 @@ def local_dry_run(root: Path, config: ReleaseConfig) -> PreparedRelease:
         cwd=workspace,
         check=True,
     )
-    fragments = prepare_tree(workspace, config)
-    validate_tree(workspace, config.version)
+    def runner(command: Sequence[str], cwd: Path) -> None:
+        run(command, cwd, verbose=config.verbose)
+
+    fragments = prepare_tree(workspace, config, runner=runner)
+    print("Running tests and validating release artifacts...")
+    validate_tree(workspace, config.version, runner=runner)
     notes = release_notes((workspace / "NEWS.md").read_text(), config.version)
+    print("Local release validation passed.")
     return PreparedRelease(
         workspace=workspace,
         notes=notes,
@@ -357,13 +395,14 @@ def local_dry_run(root: Path, config: ReleaseConfig) -> PreparedRelease:
 class Vcs:
     command: str
     root: Path
+    verbose: bool = False
 
     @classmethod
-    def detect(cls, root: Path) -> Vcs:
+    def detect(cls, root: Path, *, verbose: bool = False) -> Vcs:
         if (root / ".sl").is_dir():
-            return cls("sl", root)
+            return cls("sl", root, verbose)
         if (root / ".git").exists():
-            return cls("git", root)
+            return cls("git", root, verbose)
         raise ReleaseError("release publishing requires a Sapling or Git checkout")
 
     def status(self) -> str:
@@ -395,7 +434,19 @@ class Vcs:
 
     def commit(self, message: str) -> None:
         if self.command == "sl":
-            run(("sl", "commit", "-m", message), self.root)
+            run(
+                (
+                    "sl",
+                    "addremove",
+                    "pyproject.toml",
+                    "src/agent_skill_installer/__init__.py",
+                    "NEWS.md",
+                    "news",
+                ),
+                self.root,
+                verbose=self.verbose,
+            )
+            run(("sl", "commit", "-m", message), self.root, verbose=self.verbose)
         else:
             run(
                 (
@@ -407,14 +458,27 @@ class Vcs:
                     "news",
                 ),
                 self.root,
+                verbose=self.verbose,
             )
-            run(("git", "commit", "-m", message), self.root)
+            run(
+                ("git", "commit", "-m", message),
+                self.root,
+                verbose=self.verbose,
+            )
 
     def push_main(self) -> None:
         if self.command == "sl":
-            run(("sl", "push", "--to", "main", "--rev", "."), self.root)
+            run(
+                ("sl", "push", "--to", "main", "--rev", "."),
+                self.root,
+                verbose=self.verbose,
+            )
         else:
-            run(("git", "push", "origin", "HEAD:main"), self.root)
+            run(
+                ("git", "push", "origin", "HEAD:main"),
+                self.root,
+                verbose=self.verbose,
+            )
 
     def current_commit(self) -> str:
         if self.command == "sl":
@@ -437,9 +501,48 @@ def apply_prepared_tree(root: Path, workspace: Path, fragments: Sequence[Path]) 
             path.unlink()
 
 
-def dispatch_publish(root: Path, config: ReleaseConfig, commit: str) -> None:
+def require_publish_approval(root: Path, *, verbose: bool = False) -> None:
+    output = capture_run(
+        (
+            "gh",
+            "api",
+            f"repos/{REPOSITORY}/environments/pypi",
+        ),
+        root,
+        verbose=verbose,
+    )
+    try:
+        environment = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ReleaseError(
+            "GitHub returned invalid metadata for the pypi environment"
+        ) from exc
+
+    reviewer_rules = [
+        rule
+        for rule in environment.get("protection_rules", [])
+        if rule.get("type") == "required_reviewers" and rule.get("reviewers")
+    ]
+    if reviewer_rules:
+        return
+
+    environment_id = environment.get("id")
+    if isinstance(environment_id, int):
+        settings_url = (
+            f"https://github.com/{REPOSITORY}/settings/environments/"
+            f"{environment_id}/edit"
+        )
+    else:
+        settings_url = f"https://github.com/{REPOSITORY}/settings/environments"
+    raise ReleaseError(
+        "the pypi environment must have at least one required reviewer before "
+        f"publishing\nConfigure it here: {settings_url}"
+    )
+
+
+def dispatch_publish(root: Path, config: ReleaseConfig, commit: str) -> str:
     publish = "true" if config.publish else "false"
-    run(
+    output = capture_run(
         (
             "gh",
             "workflow",
@@ -457,16 +560,44 @@ def dispatch_publish(root: Path, config: ReleaseConfig, commit: str) -> None:
             f"publish={publish}",
         ),
         root,
+        verbose=config.verbose,
     )
+    match = re.search(
+        rf"https://github[.]com/{re.escape(REPOSITORY)}/actions/runs/[0-9]+",
+        output,
+    )
+    if match is None:
+        raise ReleaseError(
+            "GitHub dispatched the workflow but did not return its run URL; "
+            f"find the exact run at https://github.com/{REPOSITORY}/actions/"
+            "workflows/publish.yml"
+        )
+    return match.group(0)
+
+
+def print_dispatch_result(config: ReleaseConfig, commit: str, run_url: str) -> None:
+    mode = "release" if config.publish else "remote dry run"
+    print(f"\nDispatched {mode} {config.version} from {commit}.")
+    if config.publish:
+        print(
+            "Approval page (available after validation passes):\n"
+            f"{run_url}\n"
+            "Select Review deployments, choose pypi, then approve and deploy."
+        )
+    else:
+        print(f"Workflow run: {run_url}")
 
 
 def release(root: Path, config: ReleaseConfig) -> None:
     if config.commit:
+        if config.publish and not pypi_published(config.version):
+            require_publish_approval(root, verbose=config.verbose)
         print(
             f"Dispatching {'release' if config.publish else 'remote dry run'} "
             f"for {config.version} from {config.commit}."
         )
-        dispatch_publish(root, config, config.commit)
+        run_url = dispatch_publish(root, config, config.commit)
+        print_dispatch_result(config, config.commit, run_url)
         return
 
     if pypi_published(config.version):
@@ -476,8 +607,9 @@ def release(root: Path, config: ReleaseConfig) -> None:
 
     vcs: Vcs | None = None
     if config.publish:
-        vcs = Vcs.detect(root)
+        vcs = Vcs.detect(root, verbose=config.verbose)
         vcs.require_clean_main()
+        require_publish_approval(root, verbose=config.verbose)
 
     prepared = local_dry_run(root, config)
     print("\nRelease notes:\n")
@@ -496,11 +628,8 @@ def release(root: Path, config: ReleaseConfig) -> None:
         vcs.commit(f"Prepare {config.version} release")
         vcs.push_main()
     commit = vcs.current_commit()
-    dispatch_publish(root, config, commit)
-    print(
-        f"\nDispatched release {config.version} from {commit}. "
-        "Approve the protected pypi environment after remote validation passes."
-    )
+    run_url = dispatch_publish(root, config, commit)
+    print_dispatch_result(config, commit, run_url)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
