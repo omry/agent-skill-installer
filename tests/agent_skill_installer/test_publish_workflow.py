@@ -30,3 +30,30 @@ def test_existing_release_is_published_when_repaired() -> None:
     edit_end = workflow.index("else", edit_start)
 
     assert "--draft=false" in workflow[edit_start:edit_end]
+
+
+def test_publish_approval_is_available_while_validation_runs() -> None:
+    workflow = WORKFLOW.read_text()
+    publish_start = workflow.index("\n  publish:\n")
+    release_start = workflow.index("\n  release:\n")
+    publish = workflow[publish_start:release_start]
+
+    assert "name: Approve and publish to PyPI" in publish
+    assert "\n    needs:" not in publish
+    assert "environment:\n      name: pypi" in publish
+
+
+def test_publish_waits_for_successful_build_from_the_same_run() -> None:
+    workflow = WORKFLOW.read_text()
+    publish_start = workflow.index("\n  publish:\n")
+    release_start = workflow.index("\n  release:\n")
+    publish = workflow[publish_start:release_start]
+
+    wait = publish.index("- name: Wait for release validation")
+    upload = publish.index("uses: pypa/gh-action-pypi-publish")
+
+    assert wait < upload
+    assert "github.run_id" in publish
+    assert 'select(.name == "Build and verify distributions")' in publish
+    assert "completed:success" in publish
+    assert "completed:*" in publish

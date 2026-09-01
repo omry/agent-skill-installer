@@ -389,9 +389,11 @@ def test_publish_result_labels_exact_approval_page(
     )
 
     output = capsys.readouterr().out
-    assert "Approval page (available after validation passes):" in output
+    assert "Approval page (available immediately):" in output
     assert run_url in output
     assert "Review deployments" in output
+    assert "Validation runs in parallel" in output
+    assert "both approval and validation succeed" in output
 
 
 def test_publish_result_labels_fallback_workflow_page(
