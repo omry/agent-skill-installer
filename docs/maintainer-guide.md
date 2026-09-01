@@ -32,7 +32,7 @@ environment and authenticate GitHub CLI:
 
 ```bash
 source .venv/bin/activate
-python -m pip install "setuptools>=77" pytest build twine towncrier
+python -m pip install --requirement tools/release-requirements.txt
 gh auth status
 ```
 
@@ -93,6 +93,11 @@ declarations and the Towncrier section match, and that no unconsumed news
 fragments remain. It then runs the full Python and operating-system test
 matrix, rebuilds the distributions, runs `twine check`, and smoke-installs the
 wheel.
+
+The workflow uses the exact Python and build-tool versions pinned in `tools/`
+and normalizes archive metadata from the release commit timestamp. This makes
+later exact-commit recovery builds byte-for-byte comparable with the artifacts
+published by the original run.
 
 The workflow pauses at the protected `pypi` environment immediately before
 the Trusted Publishing upload. Review the workflow summary and approve that
