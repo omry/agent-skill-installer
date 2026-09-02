@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import stat
 import shutil
 import subprocess
 import sys
@@ -11,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib import resources
@@ -119,17 +120,21 @@ class SkillProject:
         )
 
     def config_instructions(self, agent: str) -> AgentInstructions | None:
+        agent_config = self.agent_config(agent)
+        return None if agent_config is None else agent_config.instructions
+
+    def agent_config(self, agent: str):
         config = self.installer_config
         if config is None:
             config = load_packaged_installer_config(self)
         if config is None:
             return None
         agents = config.installer.agents
-        if agent == "codex" and agents.codex is not None:
-            return agents.codex.instructions
-        if agent == "claude" and agents.claude is not None:
-            return agents.claude.instructions
-        return None
+        if agent == "codex":
+            return agents.codex
+        if agent == "claude":
+            return agents.claude
+        raise InstallerError(f"unknown agent target: {agent}")
 
     def hook_block(self, agent: str) -> str:
         instructions = self.config_instructions(agent)
@@ -270,6 +275,7 @@ class TargetSpec:
     repo_target: bool
     skill_dir: Path
     hook_path: Path
+    runtime_hook_path: Path | None
     hook_block: str
     marker_start: str
     marker_end: str
@@ -292,6 +298,7 @@ class InstallResult:
     source_url: str | None = None
     source_ref: str | None = None
     source_path: str | None = None
+    runtime_hook_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -346,8 +353,18 @@ class StagedInstall:
     staged_sidecar_manifest_path: Path | None
     sidecar_manifest_path: Path
     previous_manifest_file: Path | None
+    runtime_hooks: RuntimeHookPlan | None
     skill_exists: bool
     result: InstallResult
+
+
+@dataclass(frozen=True)
+class RuntimeHookPlan:
+    path: Path
+    desired_entries: dict[str, list[dict[str, object]]]
+    owned_entries: dict[str, list[dict[str, object]]]
+    previous_owned_entries: dict[str, list[dict[str, object]]]
+    created_file: bool
 
 
 @dataclass(frozen=True)
@@ -1111,10 +1128,16 @@ def target_spec(
         )
         skill_dir = agent_dir / "skills" / project.skill_name
         hook_path = agent_dir / layout["hook_file"]
+        runtime_hook_path = agent_dir / "hooks.json" if agent == "codex" else None
     else:
         assert repo_root is not None
         skill_dir = repo_root / layout["repo_dir"] / "skills" / project.skill_name
         hook_path = repo_root / layout["hook_file"]
+        runtime_hook_path = (
+            repo_root / layout["repo_dir"] / "hooks.json"
+            if agent == "codex"
+            else None
+        )
 
     return TargetSpec(
         agent=agent,
@@ -1122,6 +1145,7 @@ def target_spec(
         repo_target=repo_target,
         skill_dir=skill_dir,
         hook_path=hook_path,
+        runtime_hook_path=runtime_hook_path,
         hook_block=project.hook_block(agent),
         marker_start=project.marker_start,
         marker_end=project.marker_end,
@@ -2234,6 +2258,423 @@ def uninstall_hook(
     return True
 
 
+CODEX_RUNTIME_HOOK_FORMAT = "codex-hooks-json"
+
+
+def _without_none(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _without_none(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_without_none(item) for item in value]
+    return value
+
+
+def _append_unique_hook_group(
+    entries: dict[str, list[dict[str, object]]],
+    event: str,
+    group: dict[str, object],
+) -> None:
+    groups = entries.setdefault(event, [])
+    if group not in groups:
+        groups.append(group)
+
+
+def _validated_declared_hook_entries(
+    entries: object,
+    *,
+    agent: str,
+    field_name: str,
+) -> dict[str, list[dict[str, object]]]:
+    if not isinstance(entries, dict):
+        raise InstallerError(
+            f"installer.agents.{agent}.{field_name} must be an event mapping"
+        )
+    normalized: dict[str, list[dict[str, object]]] = {}
+    for event, raw_groups in entries.items():
+        if not isinstance(event, str) or not event.strip():
+            raise InstallerError(
+                f"installer.agents.{agent}.{field_name} event names must be "
+                "non-empty strings"
+            )
+        if not isinstance(raw_groups, list):
+            raise InstallerError(
+                f"installer.agents.{agent}.{field_name}.{event} must be a list"
+            )
+        for index, raw_group in enumerate(raw_groups):
+            if not isinstance(raw_group, dict):
+                raise InstallerError(
+                    f"installer.agents.{agent}.{field_name}.{event}[{index}] "
+                    "must be an object"
+                )
+            raw_handlers = raw_group.get("hooks")
+            if not isinstance(raw_handlers, list):
+                raise InstallerError(
+                    f"installer.agents.{agent}.{field_name}.{event}[{index}].hooks "
+                    "must be a list"
+                )
+            for hook_index, raw_handler in enumerate(raw_handlers):
+                location = (
+                    f"installer.agents.{agent}.{field_name}.{event}[{index}]"
+                    f".hooks[{hook_index}]"
+                )
+                if not isinstance(raw_handler, dict):
+                    raise InstallerError(f"{location} must be an object")
+                hook_type = raw_handler.get("type")
+                if hook_type != "command":
+                    raise InstallerError(
+                        f"unsupported {agent} hook type at {location}: "
+                        f"{hook_type!r}; supported types: command"
+                    )
+                command = raw_handler.get("command")
+                if not isinstance(command, str) or not command.strip():
+                    raise InstallerError(
+                        f"{location}.command must be a non-empty string"
+                    )
+            group = _without_none(raw_group)
+            assert isinstance(group, dict)
+            try:
+                json.dumps(group)
+            except (TypeError, ValueError) as error:
+                raise InstallerError(
+                    f"{field_name} hook group for {event} is not JSON serializable"
+                ) from error
+            _append_unique_hook_group(normalized, event, group)
+    return normalized
+
+
+def declared_runtime_hook_entries(
+    project: SkillProject,
+    agent: str,
+) -> dict[str, list[dict[str, object]]]:
+    config = project.agent_config(agent)
+    if config is None:
+        return {}
+
+    typed_hooks = getattr(config, "hooks", {})
+    direct_hooks = getattr(config, "hooks_direct", {})
+    has_declarations = any(typed_hooks.values()) or any(direct_hooks.values())
+    if agent == "claude":
+        if has_declarations:
+            raise InstallerError(
+                "runtime hook installation is not supported for agent target: claude"
+            )
+        return {}
+    if agent != "codex":
+        raise InstallerError(f"unknown agent target: {agent}")
+
+    typed_native = {
+        event: [asdict(group) if is_dataclass(group) else group for group in groups]
+        for event, groups in typed_hooks.items()
+    }
+    merged = _validated_declared_hook_entries(
+        typed_native,
+        agent=agent,
+        field_name="hooks",
+    )
+    direct = _validated_declared_hook_entries(
+        direct_hooks,
+        agent=agent,
+        field_name="hooks_direct",
+    )
+    for event, groups in direct.items():
+        for group in groups:
+            _append_unique_hook_group(merged, event, group)
+    return merged
+
+
+def read_codex_hooks_document(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"hooks": {}}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise InstallerError(f"invalid Codex hooks JSON: {path}") from error
+    except OSError as error:
+        raise InstallerError(
+            f"failed to read Codex hooks file {path}: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise InstallerError(f"Codex hooks file must contain a JSON object: {path}")
+    hooks = data.get("hooks")
+    if hooks is None:
+        data["hooks"] = {}
+        return data
+    if not isinstance(hooks, dict):
+        raise InstallerError(f"Codex hooks field must be a JSON object: {path}")
+    for event, groups in hooks.items():
+        if not isinstance(event, str) or not isinstance(groups, list):
+            raise InstallerError(f"invalid Codex hook event mapping in {path}")
+        if any(not isinstance(group, dict) for group in groups):
+            raise InstallerError(
+                f"invalid Codex hook matcher group for {event} in {path}"
+            )
+    return data
+
+
+def write_codex_hooks_document(path: Path, document: dict[str, object]) -> None:
+    destination = path.resolve() if path.is_symlink() else path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode = (
+        stat.S_IMODE(destination.stat().st_mode) if destination.exists() else None
+    )
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(document, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if existing_mode is not None:
+            temporary_path.chmod(existing_mode)
+        os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def runtime_hook_manifest_record(
+    manifest: dict[str, object] | None,
+    *,
+    source: Path | str,
+) -> tuple[Path, dict[str, list[dict[str, object]]], bool] | None:
+    if manifest is None or manifest.get("runtime_hooks") is None:
+        return None
+    record = manifest.get("runtime_hooks")
+    if not isinstance(record, dict):
+        raise InstallerError(
+            f"invalid runtime hook ownership in manifest: {source}"
+        )
+    if record.get("format") != CODEX_RUNTIME_HOOK_FORMAT:
+        raise InstallerError(f"unsupported runtime hook format in manifest: {source}")
+    raw_path = record.get("path")
+    raw_entries = record.get("entries")
+    if not isinstance(raw_path, str) or not isinstance(raw_entries, dict):
+        raise InstallerError(f"invalid runtime hook ownership in manifest: {source}")
+    entries: dict[str, list[dict[str, object]]] = {}
+    for event, groups in raw_entries.items():
+        if (
+            not isinstance(event, str)
+            or not isinstance(groups, list)
+            or any(not isinstance(group, dict) for group in groups)
+        ):
+            raise InstallerError(
+                f"invalid runtime hook ownership in manifest: {source}"
+            )
+        entries[event] = groups
+    return Path(raw_path), entries, record.get("created_file") is True
+
+
+def sibling_runtime_hook_ownership(
+    spec: TargetSpec,
+    runtime_path: Path,
+    *,
+    exclude: Iterable[Path] = (),
+) -> tuple[dict[str, list[dict[str, object]]], bool]:
+    excluded = set(exclude)
+    entries: dict[str, list[dict[str, object]]] = {}
+    created_file = False
+    for candidate in sibling_manifest_candidates(spec.skill_dir.parent):
+        if candidate in excluded:
+            continue
+        manifest = read_manifest_file(candidate)
+        record = runtime_hook_manifest_record(manifest, source=candidate)
+        if record is None:
+            continue
+        path, owned, record_created_file = record
+        if (
+            manifest.get("agent") != spec.agent
+            or manifest.get("scope") != spec.scope
+            or path != runtime_path
+        ):
+            continue
+        created_file = created_file or record_created_file
+        for event, groups in owned.items():
+            for group in groups:
+                _append_unique_hook_group(entries, event, group)
+    return entries, created_file
+
+
+def plan_runtime_hooks(
+    project: SkillProject,
+    spec: TargetSpec,
+    previous_manifest: dict[str, object] | None,
+    previous_manifest_file: Path | None,
+) -> RuntimeHookPlan | None:
+    desired_entries = declared_runtime_hook_entries(project, spec.agent)
+    previous_record = runtime_hook_manifest_record(
+        previous_manifest,
+        source=previous_manifest_file or spec.skill_dir,
+    )
+    if spec.agent != "codex":
+        return None
+    runtime_path = spec.runtime_hook_path
+    assert runtime_path is not None
+    if previous_record is None:
+        previous_owned_entries: dict[str, list[dict[str, object]]] = {}
+        previous_created_file = False
+    else:
+        previous_path, previous_owned_entries, previous_created_file = previous_record
+        if previous_path != runtime_path:
+            raise InstallerError(
+                "installed runtime hook path does not match the selected target: "
+                f"{previous_path} != {runtime_path}"
+            )
+    if not desired_entries and not previous_owned_entries:
+        return None
+
+    document = read_codex_hooks_document(runtime_path)
+    existing = document["hooks"]
+    assert isinstance(existing, dict)
+    excluded = (
+        manifest_path_candidates(project, spec.skill_dir)
+        if previous_manifest_file is None
+        else [previous_manifest_file]
+    )
+    sibling_owned, sibling_created_file = sibling_runtime_hook_ownership(
+        spec,
+        runtime_path,
+        exclude=excluded,
+    )
+    owned_entries: dict[str, list[dict[str, object]]] = {}
+    for event, groups in desired_entries.items():
+        existing_groups = existing.get(event, [])
+        assert isinstance(existing_groups, list)
+        for group in groups:
+            if (
+                group not in existing_groups
+                or group in previous_owned_entries.get(event, [])
+                or group in sibling_owned.get(event, [])
+            ):
+                _append_unique_hook_group(owned_entries, event, group)
+    return RuntimeHookPlan(
+        path=runtime_path,
+        desired_entries=desired_entries,
+        owned_entries=owned_entries,
+        previous_owned_entries=previous_owned_entries,
+        created_file=(
+            previous_created_file or sibling_created_file or not runtime_path.exists()
+        ),
+    )
+
+
+def apply_runtime_hook_plan(
+    staged: StagedInstall,
+    *,
+    current_manifest: Path,
+) -> None:
+    plan = staged.runtime_hooks
+    if plan is None:
+        return
+    path_existed = plan.path.exists()
+    document = read_codex_hooks_document(plan.path)
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    changed = False
+    sibling_owned, _ = sibling_runtime_hook_ownership(
+        staged.spec,
+        plan.path,
+        exclude=[current_manifest],
+    )
+    for event, groups in plan.previous_owned_entries.items():
+        event_groups = hooks.get(event)
+        if not isinstance(event_groups, list):
+            continue
+        for group in groups:
+            if (
+                group not in plan.desired_entries.get(event, [])
+                and group not in sibling_owned.get(event, [])
+                and group in event_groups
+            ):
+                event_groups.remove(group)
+                changed = True
+        if not event_groups:
+            hooks.pop(event, None)
+            changed = True
+    for event, groups in plan.desired_entries.items():
+        event_groups = hooks.setdefault(event, [])
+        assert isinstance(event_groups, list)
+        for group in groups:
+            if group not in event_groups:
+                event_groups.append(group)
+                changed = True
+
+    if plan.created_file and not hooks and set(document) == {"hooks"}:
+        if plan.path.is_symlink():
+            if path_existed and changed:
+                write_codex_hooks_document(plan.path, document)
+        else:
+            plan.path.unlink(missing_ok=True)
+        return
+    if not path_existed and not hooks:
+        return
+    if not changed:
+        return
+    write_codex_hooks_document(plan.path, document)
+
+
+def uninstall_runtime_hooks(
+    spec: TargetSpec,
+    manifest: dict[str, object] | None,
+    manifest_file: Path | None,
+) -> Path | None:
+    record = runtime_hook_manifest_record(
+        manifest,
+        source=manifest_file or spec.skill_dir,
+    )
+    if record is None:
+        return None
+    runtime_path, owned_entries, created_file = record
+    if spec.runtime_hook_path is None or runtime_path != spec.runtime_hook_path:
+        raise InstallerError(
+            "installed runtime hook path does not match the selected target: "
+            f"{runtime_path} != {spec.runtime_hook_path}"
+        )
+    path_existed = runtime_path.exists()
+    document = read_codex_hooks_document(runtime_path)
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    changed = False
+    sibling_owned, _ = sibling_runtime_hook_ownership(
+        spec,
+        runtime_path,
+        exclude=[] if manifest_file is None else [manifest_file],
+    )
+    for event, groups in owned_entries.items():
+        event_groups = hooks.get(event)
+        if not isinstance(event_groups, list):
+            continue
+        for group in groups:
+            if group not in sibling_owned.get(event, []) and group in event_groups:
+                event_groups.remove(group)
+                changed = True
+        if not event_groups:
+            hooks.pop(event, None)
+            changed = True
+
+    if created_file and not hooks and set(document) == {"hooks"}:
+        if runtime_path.is_symlink():
+            if path_existed and changed:
+                write_codex_hooks_document(runtime_path, document)
+        else:
+            runtime_path.unlink(missing_ok=True)
+    elif not path_existed and not hooks:
+        pass
+    elif not changed:
+        pass
+    else:
+        write_codex_hooks_document(runtime_path, document)
+    return runtime_path
+
+
 def write_manifest(
     project: SkillProject,
     spec: TargetSpec,
@@ -2248,6 +2689,7 @@ def write_manifest(
     source_ref: str | None = None,
     source_path: str | None = None,
     external_wheels: list[ExternalWheelInstallRecord] | None = None,
+    runtime_hooks: RuntimeHookPlan | None = None,
     write_path: Path | None = None,
     manifest_path_value: Path | None = None,
     installed_is_symlink: bool | None = None,
@@ -2329,15 +2771,26 @@ def write_manifest(
             }
             for wheel in external_wheels
         ]
+    if runtime_hooks is not None:
+        data["runtime_hooks"] = {
+            "format": CODEX_RUNTIME_HOOK_FORMAT,
+            "path": str(runtime_hooks.path),
+            "created_file": runtime_hooks.created_file,
+            "entries": runtime_hooks.owned_entries,
+        }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def sibling_manifest_candidates(skill_parent: Path) -> Iterable[Path]:
-    yield from skill_parent.glob("*/.*-install.json")
+    for candidate in skill_parent.glob("*/.*-install.json"):
+        if not candidate.relative_to(skill_parent).parts[0].startswith("."):
+            yield candidate
     # Temporary compatibility for very early installs. Remove no earlier than
     # 2027-01-01.
-    yield from skill_parent.glob("*/scripts/.*-install.json")
+    for candidate in skill_parent.glob("*/scripts/.*-install.json"):
+        if not candidate.relative_to(skill_parent).parts[0].startswith("."):
+            yield candidate
     yield from skill_parent.glob(".*-install.json")
 
 
@@ -2440,6 +2893,12 @@ def stage_install_target(
     )
     previous_manifest_file = (
         None if previous_manifest_entry is None else previous_manifest_entry[1]
+    )
+    runtime_hooks = plan_runtime_hooks(
+        project,
+        spec,
+        previous_manifest,
+        previous_manifest_file,
     )
     previous_version = manifest_package_version(previous_manifest)
     package_version = (
@@ -2594,6 +3053,7 @@ def stage_install_target(
                 github_source=github_source,
             ),
             external_wheels=external_wheel_records,
+            runtime_hooks=runtime_hooks,
             write_path=staged_manifest_path,
             manifest_path_value=final_manifest_path,
             installed_is_symlink=installed_is_symlink,
@@ -2613,6 +3073,11 @@ def stage_install_target(
         skill_dir=spec.skill_dir,
         hook_path=spec.hook_path,
         status="installed",
+        runtime_hook_path=(
+            runtime_hooks.path
+            if runtime_hooks is not None and runtime_hooks.desired_entries
+            else None
+        ),
         version=package_version,
         previous_version=previous_version,
         version_change=version_change(previous_version, package_version),
@@ -2634,6 +3099,7 @@ def stage_install_target(
         staged_sidecar_manifest_path=staged_sidecar_manifest_path,
         sidecar_manifest_path=sidecar_manifest_path,
         previous_manifest_file=previous_manifest_file,
+        runtime_hooks=runtime_hooks,
         skill_exists=skill_exists,
         result=result,
     )
@@ -2691,13 +3157,16 @@ def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[Ins
     staged_by_sidecar = {staged.sidecar_manifest_path: staged for staged in staged_list}
 
     for staged in staged_list:
-        hook_path = staged.spec.hook_path
-        if hook_path not in hook_snapshots:
-            hook_snapshots[hook_path] = (
-                hook_path.read_text()
-                if hook_path.exists()
-                else None
-            )
+        snapshot_paths = [staged.spec.hook_path]
+        if staged.runtime_hooks is not None:
+            snapshot_paths.append(staged.runtime_hooks.path)
+        for hook_path in snapshot_paths:
+            if hook_path not in hook_snapshots:
+                hook_snapshots[hook_path] = (
+                    hook_path.read_text()
+                    if hook_path.exists()
+                    else None
+                )
 
     try:
         for staged in staged_list:
@@ -2722,6 +3191,12 @@ def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[Ins
 
         for staged in staged_list:
             install_hook(staged.spec)
+            current_manifest = (
+                staged.sidecar_manifest_path
+                if staged.staged_sidecar_manifest_path is not None
+                else staged.spec.skill_dir / staged.project.manifest_relative_path
+            )
+            apply_runtime_hook_plan(staged, current_manifest=current_manifest)
     except Exception as install_error:
         rollback_errors: list[str] = []
         for hook_path, hook_text in hook_snapshots.items():
@@ -2901,6 +3376,7 @@ def uninstall_target(project: SkillProject, spec: TargetSpec) -> InstallResult:
             f"refusing to remove unowned skill directory: {spec.skill_dir}"
         )
 
+    runtime_hook_path = uninstall_runtime_hooks(spec, manifest, manifest_file)
     delete_hook_if_empty = bool((manifest or {}).get("created_hook_file", False))
     marker_start = (manifest or {}).get("hook_marker_start")
     marker_end = (manifest or {}).get("hook_marker_end")
@@ -2926,6 +3402,7 @@ def uninstall_target(project: SkillProject, spec: TargetSpec) -> InstallResult:
         skill_dir=spec.skill_dir,
         hook_path=spec.hook_path,
         status="removed",
+        runtime_hook_path=runtime_hook_path,
         version=package_version,
     )
 
