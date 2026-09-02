@@ -9,105 +9,29 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 from omegaconf import MISSING, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 
+from .agent_configs import (
+    AgentConfigs,
+    AgentInstructions,
+    ClaudeAgentConfig,
+    ClaudeHook,
+    ClaudeHookMatcher,
+    ClaudeHooks,
+    ClaudeRequires,
+    CodexAgentConfig,
+    CodexCommandHook,
+    CodexHookMatcher,
+    CodexHooks,
+    CodexRequires,
+    materialize_claude_hooks,
+    materialize_codex_hooks,
+)
+
 
 CONFIG_FILE_NAME = "agent-skill-installer.yaml"
 
 
 class InstallerConfigError(Exception):
     pass
-
-
-@dataclass
-class AgentInstructions:
-    title: str = MISSING
-    body: str = MISSING
-
-
-@dataclass
-class CodexRequires:
-    codex: str | None = None
-
-
-@dataclass
-class ClaudeRequires:
-    claude_code: str | None = None
-
-
-@dataclass
-class CodexCommandHook:
-    type: str = "command"
-    command: str = MISSING
-    timeout: int | None = None
-    statusMessage: str | None = None
-
-
-@dataclass
-class CodexHookMatcher:
-    matcher: str | None = None
-    hooks: list[CodexCommandHook] = field(default_factory=list)
-
-
-@dataclass
-class CodexHooks:
-    SessionStart: list[CodexHookMatcher] = field(default_factory=list)
-    PreToolUse: list[CodexHookMatcher] = field(default_factory=list)
-    PermissionRequest: list[CodexHookMatcher] = field(default_factory=list)
-    PostToolUse: list[CodexHookMatcher] = field(default_factory=list)
-    UserPromptSubmit: list[CodexHookMatcher] = field(default_factory=list)
-    Stop: list[CodexHookMatcher] = field(default_factory=list)
-
-
-@dataclass
-class CodexAgentConfig:
-    version: int = 1
-    requires: CodexRequires = field(default_factory=CodexRequires)
-    instructions: AgentInstructions | None = None
-    hooks: CodexHooks = field(default_factory=CodexHooks)
-    hooks_direct: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ClaudeHook:
-    type: str = "command"
-    command: str | None = None
-    timeout: int | None = None
-    url: str | None = None
-    prompt: str | None = None
-    tool: str | None = None
-    args: dict[str, Any] | None = None
-
-
-@dataclass
-class ClaudeHookMatcher:
-    matcher: str | None = None
-    hooks: list[ClaudeHook] = field(default_factory=list)
-
-
-@dataclass
-class ClaudeHooks:
-    SessionStart: list[ClaudeHookMatcher] = field(default_factory=list)
-    PreToolUse: list[ClaudeHookMatcher] = field(default_factory=list)
-    PostToolUse: list[ClaudeHookMatcher] = field(default_factory=list)
-    Notification: list[ClaudeHookMatcher] = field(default_factory=list)
-    Stop: list[ClaudeHookMatcher] = field(default_factory=list)
-    SubagentStop: list[ClaudeHookMatcher] = field(default_factory=list)
-    UserPromptSubmit: list[ClaudeHookMatcher] = field(default_factory=list)
-    PreCompact: list[ClaudeHookMatcher] = field(default_factory=list)
-
-
-@dataclass
-class ClaudeAgentConfig:
-    version: int = 1
-    requires: ClaudeRequires = field(default_factory=ClaudeRequires)
-    instructions: AgentInstructions | None = None
-    hooks: ClaudeHooks = field(default_factory=ClaudeHooks)
-    hooks_direct: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class AgentConfigs:
-    codex: CodexAgentConfig | None = None
-    claude: ClaudeAgentConfig | None = None
 
 
 @dataclass
@@ -192,6 +116,10 @@ def _validate_unknown_fields(
                 _validate_unknown_fields(item, item_type, f"{path}[{index}]")
         return
     if origin is dict:
+        item_type = get_args(annotation)[1] if len(get_args(annotation)) > 1 else Any
+        if isinstance(value, dict):
+            for key, item in value.items():
+                _validate_unknown_fields(item, item_type, f"{path}.{key}")
         return
 
     if not is_dataclass(annotation) or not isinstance(value, dict):
@@ -252,6 +180,11 @@ def _build_config(
 
     assert isinstance(config, schema_type)
     if isinstance(config, InstallerConfig):
+        agents = config.installer.agents
+        if agents.codex is not None:
+            materialize_codex_hooks(agents.codex)
+        if agents.claude is not None:
+            materialize_claude_hooks(agents.claude)
         _validate_supported_versions(config, source)
     return config
 

@@ -67,13 +67,13 @@ installer:
     assert codex.requires.codex == ">=0.116.0"
     assert codex.instructions is not None
     assert codex.instructions.title == "AWD Discoverability"
-    assert codex.hooks.UserPromptSubmit[0].hooks[0].statusMessage == (
+    assert codex.hooks["UserPromptSubmit"][0].hooks[0].statusMessage == (
         "Considering AWD workflow guidance"
     )
     assert claude.requires.claude_code == ">=2.1.141"
     assert claude.instructions is not None
     assert claude.instructions.body == "Use AWD for gated work."
-    assert claude.hooks.UserPromptSubmit[0].hooks[0].command == (
+    assert claude.hooks["UserPromptSubmit"][0].hooks[0].command == (
         "python3 .claude/hooks/awd_prompt_nudge.py"
     )
 
@@ -141,6 +141,25 @@ installer:
     assert codex.hooks_direct["FutureEvent"][0]["hooks"][0]["futureField"] == (
         "accepted here"
     )
+
+
+def test_typed_hook_schema_accepts_open_event_names(tmp_path: Path) -> None:
+    config = load_installer_config_text(
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        FutureEvent:
+          - hooks:
+              - type: command
+                command: python3 future.py
+"""
+    )
+
+    codex = config.installer.agents.codex
+    assert codex is not None
+    assert codex.hooks["FutureEvent"][0].hooks[0].command == "python3 future.py"
 
 
 def test_loads_external_wheel_copy_rules_with_package_version_context() -> None:

@@ -109,6 +109,22 @@ def make_project(tmp_path: Path) -> SkillProject:
     )
 
 
+def project_with_config(
+    tmp_path: Path,
+    config_text: str,
+    *,
+    skill_name: str = "example-agent-skill",
+    package_name: str = "example-agent-skill",
+) -> SkillProject:
+    project = make_project(tmp_path)
+    return replace(
+        project,
+        package_name=package_name,
+        skill_name=skill_name,
+        installer_config=load_installer_config_text(config_text),
+    )
+
+
 def make_repo(path: Path) -> Path:
     path.mkdir()
     (path / ".git").mkdir()
@@ -2238,6 +2254,545 @@ installer:
     assert "Fallback description." not in hook_text
 
 
+@pytest.mark.parametrize("scope", ["repo", "global"])
+def test_codex_install_writes_native_runtime_hooks(
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - matcher: startup
+            hooks:
+              - type: command
+                command: python3 .codex/skills/example-agent-skill/scripts/tool.py
+                timeout: 30
+                statusMessage: Preparing example skill
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    codex_home = tmp_path / "codex-home"
+
+    result = Installer(project).install(
+        ["codex"],
+        scope,
+        repo=repo if scope == "repo" else None,
+        codex_home=codex_home,
+    )[0]
+
+    hooks_path = (
+        repo / ".codex" / "hooks.json"
+        if scope == "repo"
+        else codex_home / "hooks.json"
+    )
+    assert result.runtime_hook_path == hooks_path
+    assert json.loads(hooks_path.read_text()) == {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "startup",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "python3 .codex/skills/example-agent-skill/"
+                                "scripts/tool.py"
+                            ),
+                            "timeout": 30,
+                            "statusMessage": "Preparing example skill",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    manifest = read_install_manifest(project, result.skill_dir)
+    assert manifest["runtime_hooks"] == {
+        "format": "codex-hooks-json",
+        "path": str(hooks_path),
+        "created_file": True,
+        "entries": json.loads(hooks_path.read_text())["hooks"],
+    }
+
+
+def test_codex_runtime_hook_upgrade_and_uninstall_preserve_user_content(
+    tmp_path: Path,
+) -> None:
+    old_project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 old.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    Installer(old_project).install(["codex"], "repo", repo=repo)
+    document = json.loads(hooks_path.read_text())
+    document["userSetting"] = {"keep": True}
+    document["hooks"]["UserPromptSubmit"] = [
+        {"hooks": [{"type": "command", "command": "python3 user.py"}]}
+    ]
+    hooks_path.write_text(json.dumps(document, indent=2) + "\n")
+
+    new_project = replace(
+        old_project,
+        version="2.0.0",
+        installer_config=load_installer_config_text(
+            """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 new.py
+"""
+        ),
+    )
+    Installer(new_project).install(["codex"], "repo", repo=repo)
+
+    upgraded = json.loads(hooks_path.read_text())
+    assert upgraded["userSetting"] == {"keep": True}
+    assert upgraded["hooks"] == {
+        "UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "python3 user.py"}]}
+        ],
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": "python3 new.py"}]}
+        ],
+    }
+
+    Installer(new_project).uninstall(["codex"], "repo", repo=repo)
+
+    assert json.loads(hooks_path.read_text()) == {
+        "userSetting": {"keep": True},
+        "hooks": {
+            "UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": "python3 user.py"}]}
+            ]
+        },
+    }
+
+
+def test_codex_does_not_claim_identical_preexisting_hook(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 shared.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir()
+    original = {
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "python3 shared.py"}]}
+            ]
+        }
+    }
+    original_text = json.dumps(original, separators=(",", ":")) + "\n"
+    hooks_path.write_text(original_text)
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    manifest = read_install_manifest(project, skill_dir)
+    assert manifest["runtime_hooks"]["entries"] == {}
+    assert hooks_path.read_text() == original_text
+
+    Installer(project).uninstall(["codex"], "repo", repo=repo)
+    assert hooks_path.read_text() == original_text
+
+
+def test_codex_runtime_hook_update_atomically_replaces_file_and_preserves_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 owned.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text('{"hooks":{}}\n')
+    hooks_path.chmod(0o640)
+    real_replace = os.replace
+    replacements: list[tuple[Path, Path]] = []
+
+    def record_replace(source, destination) -> None:
+        replacements.append((Path(source), Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr("agent_skill_installer.installer.os.replace", record_replace)
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert len(replacements) == 1
+    assert replacements[0][1] == hooks_path
+    assert replacements[0][0].parent == hooks_path.parent
+    assert replacements[0][0] != hooks_path
+    assert_posix_mode(hooks_path, 0o640)
+
+
+def test_codex_uninstall_rejects_manifest_runtime_path_outside_target(
+    tmp_path: Path,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 owned.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    Installer(project).install(["codex"], "repo", repo=repo)
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
+    install_manifest = manifest_path(project, skill_dir)
+    manifest = json.loads(install_manifest.read_text())
+    outside = tmp_path / "outside.json"
+    outside_text = '{"hooks":{"SessionStart":[]}}\n'
+    outside.write_text(outside_text)
+    manifest["runtime_hooks"]["path"] = str(outside)
+    install_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    with pytest.raises(InstallerError, match="does not match the selected target"):
+        Installer(project).uninstall(["codex"], "repo", repo=repo)
+
+    assert outside.read_text() == outside_text
+    assert skill_dir.exists()
+    assert (repo / ".codex" / "hooks.json").exists()
+
+
+def test_codex_uninstall_removes_asi_created_empty_hooks_file(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 owned.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+
+    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).uninstall(["codex"], "repo", repo=repo)
+
+    assert not hooks_path.exists()
+
+
+@pytest.mark.parametrize("operation", ["reinstall", "uninstall"])
+def test_codex_runtime_hook_cleanup_preserves_user_replacement_symlink(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 owned.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    Installer(project).install(["codex"], "repo", repo=repo)
+    symlink_target = tmp_path / "user-managed-hooks.json"
+    hooks_path.rename(symlink_target)
+    hooks_path.symlink_to(symlink_target)
+
+    if operation == "reinstall":
+        without_hooks = replace(
+            project,
+            version="2.0.0",
+            installer_config=load_installer_config_text(
+                """
+installer:
+  agents:
+    codex: {}
+"""
+            ),
+        )
+        Installer(without_hooks).install(["codex"], "repo", repo=repo)
+    else:
+        Installer(project).uninstall(["codex"], "repo", repo=repo)
+
+    assert hooks_path.is_symlink()
+    assert hooks_path.resolve() == symlink_target
+    assert json.loads(symlink_target.read_text()) == {"hooks": {}}
+
+
+def test_codex_reinstall_without_hooks_removes_previous_owned_hooks(
+    tmp_path: Path,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 old.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    Installer(project).install(["codex"], "repo", repo=repo)
+
+    without_hooks = replace(
+        project,
+        version="2.0.0",
+        installer_config=load_installer_config_text(
+            """
+installer:
+  agents:
+    codex: {}
+"""
+        ),
+    )
+    result = Installer(without_hooks).install(["codex"], "repo", repo=repo)[0]
+
+    assert result.runtime_hook_path is None
+    assert not hooks_path.exists()
+
+    Installer(without_hooks).uninstall(["codex"], "repo", repo=repo)
+    assert not hooks_path.exists()
+
+
+def test_codex_shared_runtime_hook_is_removed_after_last_owner(tmp_path: Path) -> None:
+    config_text = """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 shared.py
+"""
+    first = project_with_config(tmp_path / "first", config_text, skill_name="first")
+    second = project_with_config(
+        tmp_path / "second",
+        config_text,
+        skill_name="second",
+        package_name="second-package",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+
+    Installer(first).install(["codex"], "repo", repo=repo)
+    Installer(second).install(["codex"], "repo", repo=repo)
+    Installer(first).uninstall(["codex"], "repo", repo=repo)
+
+    assert hooks_path.exists()
+    assert len(json.loads(hooks_path.read_text())["hooks"]["SessionStart"]) == 1
+
+    Installer(second).uninstall(["codex"], "repo", repo=repo)
+    assert not hooks_path.exists()
+
+
+def test_codex_shared_runtime_hook_fails_closed_for_corrupt_sibling_manifest(
+    tmp_path: Path,
+) -> None:
+    config_text = """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 shared.py
+"""
+    first = project_with_config(tmp_path / "first", config_text, skill_name="first")
+    second = project_with_config(
+        tmp_path / "second",
+        config_text,
+        skill_name="second",
+        package_name="second-package",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    Installer(first).install(["codex"], "repo", repo=repo)
+    Installer(second).install(["codex"], "repo", repo=repo)
+    first_skill_dir = repo / ".codex" / "skills" / first.skill_name
+    second_skill_dir = repo / ".codex" / "skills" / second.skill_name
+    manifest_path(second, second_skill_dir).write_text("not json\n")
+
+    with pytest.raises(InstallerError, match="invalid install manifest"):
+        Installer(first).uninstall(["codex"], "repo", repo=repo)
+
+    assert first_skill_dir.exists()
+    assert len(json.loads(hooks_path.read_text())["hooks"]["SessionStart"]) == 1
+
+
+def test_claude_runtime_hook_declaration_fails_without_writes(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    claude:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 hook.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(InstallerError, match="not supported.*claude"):
+        Installer(project).install(["claude"], "repo", repo=repo)
+
+    assert not (repo / ".claude").exists()
+    assert not (repo / "CLAUDE.md").exists()
+
+
+def test_codex_unsupported_runtime_hook_type_fails_without_writes(
+    tmp_path: Path,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks_direct:
+        SessionStart:
+          - hooks:
+              - type: mcp_tool
+                tool: example
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(InstallerError, match="unsupported codex hook type"):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert not (repo / ".codex").exists()
+    assert not (repo / "AGENTS.md").exists()
+
+
+def test_invalid_existing_codex_hooks_file_fails_before_install(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 hook.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text("not json\n")
+
+    with pytest.raises(InstallerError, match="invalid Codex hooks JSON"):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert hooks_path.read_text() == "not json\n"
+    assert not (repo / ".codex" / "skills").exists()
+    assert not (repo / "AGENTS.md").exists()
+
+
+def test_codex_runtime_hook_failure_rolls_back_all_install_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 hook.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir()
+    original = '{\n  "hooks": {}\n}\n'
+    hooks_path.write_text(original)
+    from agent_skill_installer import installer as installer_module
+
+    original_apply = installer_module.apply_runtime_hook_plan
+
+    def apply_then_fail(*args, **kwargs) -> None:
+        original_apply(*args, **kwargs)
+        raise InstallerError("runtime hook write failed")
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.apply_runtime_hook_plan",
+        apply_then_fail,
+    )
+
+    with pytest.raises(InstallerError, match="rolled back changes"):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert hooks_path.read_text() == original
+    assert not (repo / ".codex" / "skills" / project.skill_name).exists()
+    assert not (repo / "AGENTS.md").exists()
+
+
 def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
     project = make_project(tmp_path)
     repo = make_repo(tmp_path / "repo")
@@ -2374,10 +2929,63 @@ def test_cli_no_ui_verbose_lists_paths(tmp_path: Path, capsys) -> None:
     assert f"  hook:  {repo / 'AGENTS.md'}" in output.out
 
 
+def test_cli_reports_codex_runtime_hook_trust_step(tmp_path: Path, capsys) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 hook.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    exit_code = main(
+        [
+            "--no-ui",
+            "install",
+            "--verbose",
+            "--agent",
+            "codex",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Review and trust the installed Codex hooks with /hooks." in output.out
+    assert f"  runtime hooks: {repo / '.codex' / 'hooks.json'}" in output.out
+
+
 def test_installing_skills_docs_show_global_verbose_before_subcommand() -> None:
     docs = (Path(__file__).parents[2] / "docs" / "installing-skills.md").read_text()
 
     assert "agent-skill-installer --no-ui --verbose install" in docs
+
+
+def test_codex_runtime_hook_docs_cover_command_and_plugin_boundaries() -> None:
+    root = Path(__file__).parents[2]
+    authoring = (root / "docs" / "authoring-skills.md").read_text()
+    installing = (root / "docs" / "installing-skills.md").read_text()
+    fragment = root / "news" / "43.api_change"
+
+    assert "command: my-skill-helper prepare" in authoring
+    assert "session working directory" in authoring
+    assert "git rev-parse --show-toplevel" in authoring
+    assert "issues/14" in authoring
+    assert "issues/14" in installing
+    assert fragment.is_file()
+    assert "open event-name mappings" in fragment.read_text()
+    assert not (root / "news" / "43.feature").exists()
 
 
 def test_cli_no_ui_uses_per_agent_home_directories(
