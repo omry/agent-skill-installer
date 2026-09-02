@@ -1,0 +1,1 @@
+Install Codex command hooks into native repo or global `hooks.json` files, preserving user entries and tracking exact ownership for safe reinstall and uninstall. `CodexHooks` and `ClaudeHooks` now use open event-name mappings; Python callers should access events by mapping key instead of dataclass attribute.
