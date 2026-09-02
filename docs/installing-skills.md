@@ -208,12 +208,12 @@ the directory must be resolved to, and asserted as, a Git or Sapling repository
 root. Plain directory installs use the exact target directory and do not imply
 that any agent runtime will automatically discover that directory.
 
-| Agent | Scope | Skill directory | Hook file |
-| --- | --- | --- | --- |
-| Codex | `dir` | `<target-dir>/.codex/skills/<skill_name>` | `<target-dir>/AGENTS.md` |
-| Codex | `global` | `~/.codex/skills/<skill_name>` | `~/.codex/AGENTS.md` |
-| Claude Code | `dir` | `<target-dir>/.claude/skills/<skill_name>` | `<target-dir>/CLAUDE.md` |
-| Claude Code | `global` | `~/.claude/skills/<skill_name>` | `~/.claude/CLAUDE.md` |
+| Agent | Scope | Skill directory | Instructions | Runtime hooks |
+| --- | --- | --- | --- | --- |
+| Codex | `dir` | `<target-dir>/.codex/skills/<skill_name>` | `<target-dir>/AGENTS.md` | `<target-dir>/.codex/hooks.json` |
+| Codex | `global` | `~/.codex/skills/<skill_name>` | `~/.codex/AGENTS.md` | `~/.codex/hooks.json` |
+| Claude Code | `dir` | `<target-dir>/.claude/skills/<skill_name>` | `<target-dir>/CLAUDE.md` | Not yet supported |
+| Claude Code | `global` | `~/.claude/skills/<skill_name>` | `~/.claude/CLAUDE.md` | Not yet supported |
 
 For directory targets, pass `--target-dir PATH` to install somewhere other than
 the current working directory. With `--repo`, the installer walks upward from
@@ -241,7 +241,8 @@ agent-skill-installer --no-ui uninstall \
 ```
 
 Uninstall uses the install manifest written by the installer. It removes the
-installed skill directory or symlink, the matching discoverability block, and
+installed skill directory or symlink, the matching discoverability block,
+owned Codex runtime hook groups after their last ASI owner is gone, and
 directories the installer created when they become empty.
 
 ## Ownership And Safety
@@ -258,12 +259,19 @@ external wheels, the manifest records them under `external_wheels` with the
 declared package spec, resolved distribution and version, selected wheel
 filename, SHA256 digest, resolver method, and each `wheel_path` to installed
 `skill_path` copy.
+For Codex hooks, the manifest also records each exact native matcher group that
+ASI owns. Existing user hook settings are preserved, including an identical
+matcher group that predates installation. New or changed hooks are not trusted
+automatically; review and trust them from Codex with `/hooks`.
+ASI manages standalone native `hooks.json` entries only; Codex plugin packaging
+and installation is tracked separately in
+[issue #14](https://github.com/omry/agent-skill-installer/issues/14).
 Reinstalls replace previously owned installs. If an existing skill directory has
 no matching manifest, the installer refuses to replace it unless you pass
 `--force`.
 
 Pass the global `--verbose` option before the subcommand to print installed
-skill, source, and hook paths:
+skill, source, instruction, and runtime-hook paths:
 
 ```bash
 agent-skill-installer --no-ui --verbose install ...

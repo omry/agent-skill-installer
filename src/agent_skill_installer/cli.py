@@ -3419,6 +3419,8 @@ def print_results(results: Sequence[InstallResult], *, verbose: bool = False) ->
     color = sys.stdout.isatty()
     for result in results:
         print(format_status_line(result, color=color))
+        if result.action == "install" and result.runtime_hook_path is not None:
+            print("  Review and trust the installed Codex hooks with /hooks.")
         if not verbose:
             continue
         print(f"  skill: {result.skill_dir}")
@@ -3429,6 +3431,8 @@ def print_results(results: Sequence[InstallResult], *, verbose: bool = False) ->
         elif result.source_path is not None:
             print(f"  source: {result.source_path}")
         print(f"  hook:  {result.hook_path}")
+        if result.runtime_hook_path is not None:
+            print(f"  runtime hooks: {result.runtime_hook_path}")
 
 
 def installs_remote_payload(args: argparse.Namespace) -> bool:

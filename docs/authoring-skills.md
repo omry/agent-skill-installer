@@ -70,7 +70,7 @@ for their own skill discovery, so published Codex skills should include valid
 
 `agent-skill-installer.yaml` is optional. Put it next to `SKILL.md` when you
 want to customize the discoverability block written to `AGENTS.md` or
-`CLAUDE.md`.
+`CLAUDE.md`, or install supported agent runtime hooks.
 
 ```yaml
 installer:
@@ -80,6 +80,14 @@ installer:
       instructions:
         title: My Skill
         body: Use this skill when working on my project workflows.
+      hooks:
+        SessionStart:
+          - matcher: startup
+            hooks:
+              - type: command
+                command: my-skill-helper prepare
+                timeout: 30
+                statusMessage: Preparing My Skill
     claude:
       instructions:
         title: My Skill
@@ -186,7 +194,7 @@ class CodexAgentConfig:
     version: int = 1
     requires: CodexRequires = field(default_factory=CodexRequires)
     instructions: AgentInstructions | None = None
-    hooks: CodexHooks = field(default_factory=CodexHooks)
+    hooks: CodexHooks = field(default_factory=dict)
     hooks_direct: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -194,7 +202,7 @@ class ClaudeAgentConfig:
     version: int = 1
     requires: ClaudeRequires = field(default_factory=ClaudeRequires)
     instructions: AgentInstructions | None = None
-    hooks: ClaudeHooks = field(default_factory=ClaudeHooks)
+    hooks: ClaudeHooks = field(default_factory=dict)
     hooks_direct: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -214,14 +222,7 @@ class CodexHookMatcher:
     matcher: str | None = None
     hooks: list[CodexCommandHook] = field(default_factory=list)
 
-@dataclass
-class CodexHooks:
-    SessionStart: list[CodexHookMatcher] = field(default_factory=list)
-    PreToolUse: list[CodexHookMatcher] = field(default_factory=list)
-    PermissionRequest: list[CodexHookMatcher] = field(default_factory=list)
-    PostToolUse: list[CodexHookMatcher] = field(default_factory=list)
-    UserPromptSubmit: list[CodexHookMatcher] = field(default_factory=list)
-    Stop: list[CodexHookMatcher] = field(default_factory=list)
+CodexHooks = dict[str, list[CodexHookMatcher]]
 
 @dataclass
 class ClaudeHook:
@@ -238,22 +239,43 @@ class ClaudeHookMatcher:
     matcher: str | None = None
     hooks: list[ClaudeHook] = field(default_factory=list)
 
-@dataclass
-class ClaudeHooks:
-    SessionStart: list[ClaudeHookMatcher] = field(default_factory=list)
-    PreToolUse: list[ClaudeHookMatcher] = field(default_factory=list)
-    PostToolUse: list[ClaudeHookMatcher] = field(default_factory=list)
-    Notification: list[ClaudeHookMatcher] = field(default_factory=list)
-    Stop: list[ClaudeHookMatcher] = field(default_factory=list)
-    SubagentStop: list[ClaudeHookMatcher] = field(default_factory=list)
-    UserPromptSubmit: list[ClaudeHookMatcher] = field(default_factory=list)
-    PreCompact: list[ClaudeHookMatcher] = field(default_factory=list)
+ClaudeHooks = dict[str, list[ClaudeHookMatcher]]
 ```
 
-`instructions` is used today to write the discoverability block. `hooks` and
-`hooks_direct` are parsed and schema-validated when present, so packaged skills
-can carry hook metadata, but this installer does not yet write Codex or Claude
-runtime hook settings.
+The agent schemas live in separate modules because their matcher and handler
+shapes can evolve independently. Event names are open strings rather than a
+shared enum, so a new native event does not require an installer schema release.
+
+For Codex targets, `hooks` command handlers are merged into the target's native
+`hooks.json`: `.codex/hooks.json` for a directory target and
+`~/.codex/hooks.json` for a global target. `hooks_direct` uses the same event
+mapping but permits additional native fields. The installer currently accepts
+only `type: command`; it fails clearly on other handler types instead of
+silently dropping them. Existing top-level settings, events, and matcher groups
+are preserved.
+
+Codex runs command hooks from the session working directory. The example above
+therefore uses a target-independent executable that is already available on
+`PATH`. A command that invokes files from the installed skill must resolve an
+absolute location for every supported scope: repository hooks can derive the
+root with `git rev-parse --show-toplevel`, while global hooks can derive the
+Codex home from `${CODEX_HOME:-$HOME/.codex}`. Do not assume the session starts
+at the repository root. Installing a skill from source or a wheel extracts its
+payload but does not install its Python package or console scripts.
+
+ASI records the exact matcher groups it added in the install manifest. Reinstall
+can replace those groups, and uninstall removes a group only after its last ASI
+owner is gone. An identical group that already existed before installation is
+treated as user-owned and is not removed later.
+
+Codex still requires the user to review and trust new or changed hooks with
+`/hooks`; installation never grants trust automatically. Claude hook declarations
+are parsed against the Claude-specific schema, but runtime installation is not
+yet supported and fails without changing the target.
+
+This support manages standalone native `hooks.json` entries only. Packaging and
+installing Codex plugin-provided hooks or MCP servers is tracked separately in
+[issue #14](https://github.com/omry/agent-skill-installer/issues/14).
 
 You can check a config file directly from Python:
 
