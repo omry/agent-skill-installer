@@ -12,10 +12,10 @@ from .claude import (
 )
 from .codex import (
     CodexAgentConfig,
-    CodexCommandHook,
     CodexHookMatcher,
     CodexHooks,
     CodexRequires,
+    CodexSkillCommandHook,
     materialize_codex_hooks,
 )
 from .common import AgentInstructions
@@ -36,10 +36,10 @@ __all__ = [
     "ClaudeHooks",
     "ClaudeRequires",
     "CodexAgentConfig",
-    "CodexCommandHook",
     "CodexHookMatcher",
     "CodexHooks",
     "CodexRequires",
+    "CodexSkillCommandHook",
     "materialize_claude_hooks",
     "materialize_codex_hooks",
 ]

@@ -9,8 +9,8 @@ installer:
           Use this wheel-packaged demo skill to verify local wheel installs.
     hooks:
       hello:
-        type: command
-        command: python3 .codex/skills/wheel-agent-skill/scripts/hello.py
+        type: skill-command
+        executable: scripts/hello.py
         timeout: 5
         statusMessage: Running wheel-agent-skill hello hook
 

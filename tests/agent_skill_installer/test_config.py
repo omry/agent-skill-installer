@@ -29,8 +29,9 @@ installer:
         body: Use AWD for gated work.
     hooks:
       prompt_nudge:
-        type: command
-        command: python3 .codex/hooks/awd_prompt_nudge.py
+        type: skill-command
+        executable: scripts/awd_prompt_nudge.py
+        args: [consider]
         timeout: 5
         statusMessage: Considering AWD workflow guidance
   agents:
@@ -70,6 +71,10 @@ installer:
     assert codex.hooks["UserPromptSubmit"][0].hooks[0].statusMessage == (
         "Considering AWD workflow guidance"
     )
+    assert codex.hooks["UserPromptSubmit"][0].hooks[0].executable == (
+        "scripts/awd_prompt_nudge.py"
+    )
+    assert codex.hooks["UserPromptSubmit"][0].hooks[0].args == ["consider"]
     assert claude.requires.claude_code == ">=2.1.141"
     assert claude.instructions is not None
     assert claude.instructions.body == "Use AWD for gated work."
@@ -88,8 +93,8 @@ installer:
       hooks:
         UserPromptSubmit:
           - hooks:
-              - type: command
-                command: python3 hook.py
+              - type: skill-command
+                executable: scripts/tool.py
                 status_message: wrong spelling
 """,
     )
@@ -128,8 +133,8 @@ installer:
       hooks_direct:
         FutureEvent:
           - hooks:
-              - type: command
-                command: python3 future.py
+              - type: skill-command
+                executable: scripts/future.py
                 futureField: accepted here
 """,
     )
@@ -152,14 +157,14 @@ installer:
       hooks:
         FutureEvent:
           - hooks:
-              - type: command
-                command: python3 future.py
+              - type: skill-command
+                executable: scripts/future.py
 """
     )
 
     codex = config.installer.agents.codex
     assert codex is not None
-    assert codex.hooks["FutureEvent"][0].hooks[0].command == "python3 future.py"
+    assert codex.hooks["FutureEvent"][0].hooks[0].executable == "scripts/future.py"
 
 
 def test_loads_external_wheel_copy_rules_with_package_version_context() -> None:
