@@ -84,8 +84,9 @@ installer:
         SessionStart:
           - matcher: startup
             hooks:
-              - type: command
-                command: my-skill-helper prepare
+              - type: skill-command
+                executable: scripts/my-skill-helper
+                args: [prepare]
                 timeout: 30
                 statusMessage: Preparing My Skill
     claude:
@@ -211,16 +212,17 @@ class AgentInstructions:
     body: str
 
 @dataclass
-class CodexCommandHook:
-    type: str = "command"
-    command: str
+class CodexSkillCommandHook:
+    type: str = "skill-command"
+    executable: str
+    args: list[str] = field(default_factory=list)
     timeout: int | None = None
     statusMessage: str | None = None
 
 @dataclass
 class CodexHookMatcher:
     matcher: str | None = None
-    hooks: list[CodexCommandHook] = field(default_factory=list)
+    hooks: list[CodexSkillCommandHook] = field(default_factory=list)
 
 CodexHooks = dict[str, list[CodexHookMatcher]]
 
@@ -246,22 +248,27 @@ The agent schemas live in separate modules because their matcher and handler
 shapes can evolve independently. Event names are open strings rather than a
 shared enum, so a new native event does not require an installer schema release.
 
-For Codex targets, `hooks` command handlers are merged into the target's native
-`hooks.json`: `.codex/hooks.json` for a directory target and
+For Codex targets, `hooks` skill-command handlers are merged into the target's
+native `hooks.json`: `.codex/hooks.json` for a directory target and
 `~/.codex/hooks.json` for a global target. `hooks_direct` uses the same event
-mapping but permits additional native fields. The installer currently accepts
-only `type: command`; it fails clearly on other handler types instead of
-silently dropping them. Existing top-level settings, events, and matcher groups
-are preserved.
+mapping but permits additional native matcher and handler fields. Both forms
+require `type: skill-command`; legacy packaged `type: command` declarations are
+rejected with a migration error rather than reinterpreted. Existing top-level
+settings, events, and matcher groups are preserved.
 
-Codex runs command hooks from the session working directory. The example above
-therefore uses a target-independent executable that is already available on
-`PATH`. A command that invokes files from the installed skill must resolve an
-absolute location for every supported scope: repository hooks can derive the
-root with `git rev-parse --show-toplevel`, while global hooks can derive the
-Codex home from `${CODEX_HOME:-$HOME/.codex}`. Do not assume the session starts
-at the repository root. Installing a skill from source or a wheel extracts its
-payload but does not install its Python package or console scripts.
+`executable` is a normalized POSIX-style path relative to the installed skill
+root. It must name a regular file in the final staged payload. Absolute paths,
+`.` or `..` segments, backslashes, missing files, directories, and symlinks that
+resolve outside the skill are rejected. Companion-wheel files are copied before
+this check, so an `external_wheels` copy can provide the entry point. `args` is
+a list of strings; ASI writes the native Codex command using the exact absolute
+path for that installation and shell-quotes the path and every argument.
+
+This boundary guarantees only the selected hook entry point. It is not a sandbox:
+the installed executable can read other files or launch other programs.
+Installing a skill from source or a wheel extracts its payload but does not
+install its Python package or console scripts, so package any required runtime
+files in the skill payload or copy them from a companion wheel.
 
 ASI records the exact matcher groups it added in the install manifest. Reinstall
 can replace those groups, and uninstall removes a group only after its last ASI

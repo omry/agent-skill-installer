@@ -18,10 +18,10 @@ from .agent_configs import (
     ClaudeHooks,
     ClaudeRequires,
     CodexAgentConfig,
-    CodexCommandHook,
     CodexHookMatcher,
     CodexHooks,
     CodexRequires,
+    CodexSkillCommandHook,
     materialize_claude_hooks,
     materialize_codex_hooks,
 )

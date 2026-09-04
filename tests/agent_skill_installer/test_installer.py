@@ -56,6 +56,7 @@ from agent_skill_installer.installer import (
     Installer,
     InstallerError,
     SkillProject,
+    _native_command_line,
     copy_github_archive_skill,
     copy_pypi_wheel_skill,
     fetch_json_url,
@@ -83,8 +84,32 @@ def make_skill(path: Path, text: str = "example skill\n") -> Path:
     (path / "scripts").mkdir()
     (path / "SKILL.md").write_text(text)
     (path / "agents" / "openai.yaml").write_text("agent: openai\n")
-    (path / "scripts" / "tool.py").write_text("print('tool')\n")
+    tool = path / "scripts" / "tool.py"
+    tool.write_text("#!/usr/bin/env python3\nprint('tool')\n")
+    tool.chmod(0o755)
     return path
+
+
+def native_skill_command(skill_dir: Path, *args: str) -> str:
+    command = [str(skill_dir / "scripts" / "tool.py"), *args]
+    if os.name == "nt":
+        return subprocess.list2cmdline(command)
+    return shlex.join(command)
+
+
+def test_native_command_line_uses_host_shell_quoting() -> None:
+    windows_argv = [
+        r"C:\Codex Home\skills\example\bin\tool.cmd",
+        "prepare",
+        "value with spaces",
+    ]
+    assert _native_command_line(windows_argv, os_name="nt") == (
+        r'"C:\Codex Home\skills\example\bin\tool.cmd" prepare "value with spaces"'
+    )
+    assert _native_command_line(
+        ["/tmp/Codex Home/skills/example/bin/tool", "prepare", "value with spaces"],
+        os_name="posix",
+    ) == "'/tmp/Codex Home/skills/example/bin/tool' prepare 'value with spaces'"
 
 
 def invalid_skill_frontmatter() -> str:
@@ -828,7 +853,9 @@ installer:
     Installer(project).install(["codex"], "repo", repo=repo)
 
     skill_dir = repo / ".codex" / "skills" / project.skill_name
-    assert (skill_dir / "scripts" / "tool.py").read_text() == "print('tool')\n"
+    assert (skill_dir / "scripts" / "tool.py").read_text() == (
+        "#!/usr/bin/env python3\nprint('tool')\n"
+    )
     assert not (skill_dir / "agents" / "openai.yaml").exists()
 
 
@@ -2269,14 +2296,15 @@ installer:
         SessionStart:
           - matcher: startup
             hooks:
-              - type: command
-                command: python3 .codex/skills/example-agent-skill/scripts/tool.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [prepare, "value with spaces"]
                 timeout: 30
                 statusMessage: Preparing example skill
 """,
     )
-    repo = make_repo(tmp_path / "repo")
-    codex_home = tmp_path / "codex-home"
+    repo = make_repo(tmp_path / "repo with spaces")
+    codex_home = tmp_path / "codex home"
 
     result = Installer(project).install(
         ["codex"],
@@ -2291,6 +2319,7 @@ installer:
         else codex_home / "hooks.json"
     )
     assert result.runtime_hook_path == hooks_path
+    assert result.skill_dir is not None
     assert json.loads(hooks_path.read_text()) == {
         "hooks": {
             "SessionStart": [
@@ -2299,9 +2328,10 @@ installer:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "python3 .codex/skills/example-agent-skill/"
-                                "scripts/tool.py"
+                            "command": native_skill_command(
+                                result.skill_dir,
+                                "prepare",
+                                "value with spaces",
                             ),
                             "timeout": 30,
                             "statusMessage": "Preparing example skill",
@@ -2320,6 +2350,278 @@ installer:
     }
 
 
+def test_codex_editable_skill_command_uses_installed_symlink_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.chdir(checkout)
+
+    result = Installer(project).install(
+        ["codex"],
+        "repo",
+        repo=repo,
+        editable=True,
+    )[0]
+
+    assert result.skill_dir is not None
+    assert result.skill_dir.is_symlink()
+    hooks = json.loads((repo / ".codex" / "hooks.json").read_text())
+    assert hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        native_skill_command(result.skill_dir)
+    )
+
+
+@pytest.mark.parametrize(
+    ("executable", "message"),
+    [
+        ("/tmp/tool", "absolute path"),
+        ("C:/tools/tool.exe", "absolute path"),
+        ("../tool", "parent traversal"),
+        ("scripts/../tool", "parent traversal"),
+        ("scripts//tool", "normalized relative path"),
+        ("scripts\\tool", "normalized relative path"),
+    ],
+)
+def test_codex_skill_command_rejects_unsafe_executable_paths_without_writes(
+    tmp_path: Path,
+    executable: str,
+    message: str,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        f"""
+installer:
+  agents:
+    codex:
+      hooks_direct:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: {json.dumps(executable)}
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(InstallerError, match=message):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert not (repo / ".codex").exists()
+    assert not (repo / "AGENTS.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("executable", "message"),
+    [
+        ("scripts/missing", "does not exist"),
+        ("scripts", "regular file"),
+    ],
+)
+def test_codex_skill_command_rejects_missing_or_non_regular_entry_point(
+    tmp_path: Path,
+    executable: str,
+    message: str,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        f"""
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: {executable}
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(InstallerError, match=message):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert not (repo / ".codex").exists()
+
+
+def test_codex_skill_command_rejects_editable_symlink_escape(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/escape
+""",
+    )
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    outside = tmp_path / "outside-tool"
+    outside.write_text("#!/bin/sh\n")
+    (checkout / "skill" / "scripts" / "escape").symlink_to(outside)
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.chdir(checkout)
+
+    with pytest.raises(InstallerError, match="escapes.*symlink"):
+        Installer(project).install(
+            ["codex"],
+            "repo",
+            repo=repo,
+            editable=True,
+        )
+
+    assert not (repo / ".codex").exists()
+
+
+def test_codex_legacy_packaged_command_is_rejected_explicitly(
+    tmp_path: Path,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(
+        InstallerError,
+        match="packaged hooks must use type: skill-command",
+    ):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert not (repo / ".codex").exists()
+
+
+@pytest.mark.parametrize("field", ["commandWindows", "command_windows"])
+def test_codex_skill_command_rejects_windows_command_override_without_writes(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        f"""
+installer:
+  agents:
+    codex:
+      hooks_direct:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                {field}: arbitrary-command
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    with pytest.raises(
+        InstallerError,
+        match=rf"{field} is not valid for type: skill-command",
+    ):
+        Installer(project).install(["codex"], "repo", repo=repo)
+
+    assert not (repo / ".codex").exists()
+    assert not (repo / "AGENTS.md").exists()
+
+
+def test_codex_skill_command_accepts_companion_wheel_executable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  external_wheels:
+    - package: arbiter-client==2.4.7
+      copies:
+        - wheel_path: arbiter_client/bin/arbiter
+          skill_path: bin/arbiter
+          executable: true
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: bin/arbiter
+                args: [serve, "value with spaces"]
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    skill_wheel = make_skill_wheel(
+        tmp_path / "example_agent_skill-2.0.0-py3-none-any.whl",
+        project,
+    )
+    external_wheel = make_external_wheel(
+        tmp_path / "arbiter_client-2.4.7-py3-none-any.whl"
+    )
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.download_pypi_wheel",
+        lambda _project, _version, _download_dir: skill_wheel,
+    )
+
+    def fake_build_external_wheel(**kwargs) -> tuple[Path, str, str, str]:
+        target = kwargs["wheel_dir"] / external_wheel.name
+        shutil.copy2(external_wheel, target)
+        return (
+            target,
+            hashlib.sha256(target.read_bytes()).hexdigest(),
+            "arbiter-client",
+            "2.4.7",
+        )
+
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.build_external_wheel",
+        fake_build_external_wheel,
+    )
+
+    result = Installer(project).install(
+        ["codex"],
+        "repo",
+        repo=repo,
+        pypi_version="2.0.0",
+    )[0]
+
+    assert result.skill_dir is not None
+    hooks = json.loads((repo / ".codex" / "hooks.json").read_text())
+    assert hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        shlex.join(
+            [
+                str(result.skill_dir / "bin" / "arbiter"),
+                "serve",
+                "value with spaces",
+            ]
+        )
+    )
+
+
 def test_codex_runtime_hook_upgrade_and_uninstall_preserve_user_content(
     tmp_path: Path,
 ) -> None:
@@ -2332,8 +2634,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 old.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [old]
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2357,21 +2660,30 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 new.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [new]
 """
         ),
     )
     Installer(new_project).install(["codex"], "repo", repo=repo)
 
     upgraded = json.loads(hooks_path.read_text())
+    skill_dir = repo / ".codex" / "skills" / new_project.skill_name
     assert upgraded["userSetting"] == {"keep": True}
     assert upgraded["hooks"] == {
         "UserPromptSubmit": [
             {"hooks": [{"type": "command", "command": "python3 user.py"}]}
         ],
         "SessionStart": [
-            {"hooks": [{"type": "command", "command": "python3 new.py"}]}
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": native_skill_command(skill_dir, "new"),
+                    }
+                ]
+            }
         ],
     }
 
@@ -2397,17 +2709,26 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 shared.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [shared]
 """,
     )
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".codex" / "hooks.json"
+    skill_dir = repo / ".codex" / "skills" / project.skill_name
     hooks_path.parent.mkdir()
     original = {
         "hooks": {
             "SessionStart": [
-                {"hooks": [{"type": "command", "command": "python3 shared.py"}]}
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": native_skill_command(skill_dir, "shared"),
+                        }
+                    ]
+                }
             ]
         }
     }
@@ -2415,7 +2736,6 @@ installer:
     hooks_path.write_text(original_text)
 
     Installer(project).install(["codex"], "repo", repo=repo)
-    skill_dir = repo / ".codex" / "skills" / project.skill_name
     manifest = read_install_manifest(project, skill_dir)
     assert manifest["runtime_hooks"]["entries"] == {}
     assert hooks_path.read_text() == original_text
@@ -2437,8 +2757,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 owned.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [owned]
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2476,8 +2797,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 owned.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [owned]
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2509,8 +2831,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 owned.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [owned]
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2534,8 +2857,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 owned.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [owned]
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2575,8 +2899,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 owned.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [owned]
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2619,8 +2944,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 old.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [old]
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2647,7 +2973,7 @@ installer:
     assert not hooks_path.exists()
 
 
-def test_codex_shared_runtime_hook_is_removed_after_last_owner(tmp_path: Path) -> None:
+def test_codex_runtime_hook_uninstall_removes_only_its_owned_group(tmp_path: Path) -> None:
     config_text = """
 installer:
   agents:
@@ -2655,8 +2981,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 shared.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [shared]
 """
     first = project_with_config(tmp_path / "first", config_text, skill_name="first")
     second = project_with_config(
@@ -2670,6 +2997,7 @@ installer:
 
     Installer(first).install(["codex"], "repo", repo=repo)
     Installer(second).install(["codex"], "repo", repo=repo)
+    assert len(json.loads(hooks_path.read_text())["hooks"]["SessionStart"]) == 2
     Installer(first).uninstall(["codex"], "repo", repo=repo)
 
     assert hooks_path.exists()
@@ -2679,7 +3007,7 @@ installer:
     assert not hooks_path.exists()
 
 
-def test_codex_shared_runtime_hook_fails_closed_for_corrupt_sibling_manifest(
+def test_codex_runtime_hook_cleanup_fails_closed_for_corrupt_sibling_manifest(
     tmp_path: Path,
 ) -> None:
     config_text = """
@@ -2689,8 +3017,9 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 shared.py
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [shared]
 """
     first = project_with_config(tmp_path / "first", config_text, skill_name="first")
     second = project_with_config(
@@ -2711,7 +3040,7 @@ installer:
         Installer(first).uninstall(["codex"], "repo", repo=repo)
 
     assert first_skill_dir.exists()
-    assert len(json.loads(hooks_path.read_text())["hooks"]["SessionStart"]) == 1
+    assert len(json.loads(hooks_path.read_text())["hooks"]["SessionStart"]) == 2
 
 
 def test_claude_runtime_hook_declaration_fails_without_writes(tmp_path: Path) -> None:
@@ -2772,8 +3101,8 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 hook.py
+              - type: skill-command
+                executable: scripts/tool.py
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2802,8 +3131,8 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 hook.py
+              - type: skill-command
+                executable: scripts/tool.py
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -2978,8 +3307,8 @@ installer:
       hooks:
         SessionStart:
           - hooks:
-              - type: command
-                command: python3 hook.py
+              - type: skill-command
+                executable: scripts/tool.py
 """,
     )
     repo = make_repo(tmp_path / "repo")
@@ -3011,19 +3340,30 @@ def test_installing_skills_docs_show_global_verbose_before_subcommand() -> None:
     assert "agent-skill-installer --no-ui --verbose install" in docs
 
 
-def test_codex_runtime_hook_docs_cover_command_and_plugin_boundaries() -> None:
+def test_codex_runtime_hook_docs_cover_skill_command_and_plugin_boundaries() -> None:
     root = Path(__file__).parents[2]
     authoring = (root / "docs" / "authoring-skills.md").read_text()
     installing = (root / "docs" / "installing-skills.md").read_text()
-    fragment = root / "news" / "43.api_change"
+    original_fragment = root / "news" / "43.api_change"
+    skill_command_fragment = root / "news" / "45.api_change"
 
-    assert "command: my-skill-helper prepare" in authoring
-    assert "session working directory" in authoring
-    assert "git rev-parse --show-toplevel" in authoring
+    assert "type: skill-command" in authoring
+    assert "executable: scripts/my-skill-helper" in authoring
+    assert "args: [prepare]" in authoring
+    assert "legacy packaged `type: command` declarations are" in authoring
+    assert "symlinks that" in authoring
+    assert "not a sandbox" in authoring
+    assert "not a sandbox" in installing
+    assert "review and trust" in installing
     assert "issues/14" in authoring
     assert "issues/14" in installing
-    assert fragment.is_file()
-    assert "open event-name mappings" in fragment.read_text()
+    assert original_fragment.is_file()
+    assert "open event-name mappings" in original_fragment.read_text()
+    assert skill_command_fragment.is_file()
+    skill_command_note = skill_command_fragment.read_text()
+    assert "Legacy packaged `type: command`" in skill_command_note
+    assert "`CodexCommandHook`" in skill_command_note
+    assert "`CodexSkillCommandHook`" in skill_command_note
     assert not (root / "news" / "43.feature").exists()
 
 

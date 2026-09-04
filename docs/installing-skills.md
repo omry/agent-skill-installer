@@ -263,6 +263,10 @@ For Codex hooks, the manifest also records each exact native matcher group that
 ASI owns. Existing user hook settings are preserved, including an identical
 matcher group that predates installation. New or changed hooks are not trusted
 automatically; review and trust them from Codex with `/hooks`.
+Packaged Codex hooks name a skill-relative executable; ASI validates it against
+the staged skill and writes the installation's absolute executable path into the
+native matcher group. This pins the entry point to that installed skill, but is
+not a sandbox for programs the entry point may launch.
 ASI manages standalone native `hooks.json` entries only; Codex plugin packaging
 and installation is tracked separately in
 [issue #14](https://github.com/omry/agent-skill-installer/issues/14).
