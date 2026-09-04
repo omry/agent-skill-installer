@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import fnmatch
 import json
 import os
+import shlex
 import stat
 import shutil
 import subprocess
@@ -16,7 +18,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib import resources
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable, Mapping
 from uuid import uuid4
 
@@ -2311,11 +2313,150 @@ def _append_unique_hook_group(
         groups.append(group)
 
 
+def _normalized_skill_executable(value: object, *, location: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise InstallerError(f"{location}.executable must be a non-empty string")
+    if value != value.strip():
+        raise InstallerError(
+            f"{location}.executable must be a normalized relative path"
+        )
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+        raise InstallerError(
+            f"{location}.executable must not be an absolute path: {value}"
+        )
+    parts = value.split("/")
+    if ".." in parts:
+        raise InstallerError(
+            f"{location}.executable must not contain parent traversal: {value}"
+        )
+    if "\\" in value or "\0" in value or any(
+        part in {"", "."} for part in parts
+    ):
+        raise InstallerError(
+            f"{location}.executable must be a normalized relative path: {value}"
+        )
+    return Path(*parts)
+
+
+def _native_command_line(arguments: list[str], *, os_name: str | None = None) -> str:
+    if os_name is None:
+        os_name = os.name
+    if os_name == "nt":
+        powershell_arguments = " ".join(
+            "'" + argument.replace("'", "''") + "'" for argument in arguments
+        )
+        script = f"& {powershell_arguments}\nexit $LASTEXITCODE"
+        encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            f"-EncodedCommand {encoded_script}"
+        )
+    return shlex.join(arguments)
+
+
+def _native_skill_command(
+    raw_handler: dict[str, object],
+    *,
+    location: str,
+    staged_skill_dir: Path,
+    installed_skill_dir: Path,
+) -> dict[str, object]:
+    hook_type = raw_handler.get("type")
+    if hook_type == "command":
+        raise InstallerError(
+            f"unsupported codex hook type at {location}: 'command'; packaged "
+            "hooks must use type: skill-command with a skill-relative executable"
+        )
+    if hook_type != "skill-command":
+        raise InstallerError(
+            f"unsupported codex hook type at {location}: {hook_type!r}; "
+            "supported types: skill-command"
+        )
+    relative_executable = _normalized_skill_executable(
+        raw_handler.get("executable"),
+        location=location,
+    )
+    args = raw_handler.get("args", [])
+    if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
+        raise InstallerError(f"{location}.args must be a list of strings")
+    if "command" in raw_handler and raw_handler["command"] is not None:
+        raise InstallerError(
+            f"{location}.command is not valid for type: skill-command"
+        )
+    for windows_command_field in ("commandWindows", "command_windows"):
+        if windows_command_field in raw_handler:
+            raise InstallerError(
+                f"{location}.{windows_command_field} is not valid for "
+                "type: skill-command"
+            )
+
+    staged_root = staged_skill_dir.resolve(strict=True)
+    staged_executable = staged_root / relative_executable
+    try:
+        resolved_executable = staged_executable.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise InstallerError(
+            f"{location}.executable does not exist in the installed skill: "
+            f"{relative_executable.as_posix()}"
+        ) from error
+    except (OSError, RuntimeError, ValueError) as error:
+        raise InstallerError(
+            f"{location}.executable could not be safely resolved in the "
+            f"installed skill: {relative_executable.as_posix()}"
+        ) from error
+    try:
+        resolved_executable.relative_to(staged_root)
+    except ValueError as error:
+        raise InstallerError(
+            f"{location}.executable escapes the installed skill through a symlink: "
+            f"{relative_executable.as_posix()}"
+        ) from error
+    if not resolved_executable.is_file():
+        raise InstallerError(
+            f"{location}.executable must resolve to a regular file: "
+            f"{relative_executable.as_posix()}"
+        )
+    if os.name != "nt" and not os.access(resolved_executable, os.X_OK):
+        if staged_skill_dir.is_symlink():
+            raise InstallerError(
+                f"{location}.executable must already be executable for an "
+                f"editable install on POSIX: {relative_executable.as_posix()}"
+            )
+        resolved_executable.chmod(resolved_executable.stat().st_mode | 0o111)
+        if not os.access(resolved_executable, os.X_OK):
+            raise InstallerError(
+                f"{location}.executable could not be made executable on POSIX: "
+                f"{relative_executable.as_posix()}"
+            )
+
+    final_executable = (installed_skill_dir / relative_executable).absolute()
+    native = {
+        key: value
+        for key, value in raw_handler.items()
+        if key
+        not in {
+            "type",
+            "executable",
+            "args",
+            "command",
+            "commandWindows",
+            "command_windows",
+        }
+    }
+    native["type"] = "command"
+    native["command"] = _native_command_line([str(final_executable), *args])
+    return native
+
+
 def _validated_declared_hook_entries(
     entries: object,
     *,
     agent: str,
     field_name: str,
+    staged_skill_dir: Path,
+    installed_skill_dir: Path,
 ) -> dict[str, list[dict[str, object]]]:
     if not isinstance(entries, dict):
         raise InstallerError(
@@ -2344,6 +2485,7 @@ def _validated_declared_hook_entries(
                     f"installer.agents.{agent}.{field_name}.{event}[{index}].hooks "
                     "must be a list"
                 )
+            native_handlers: list[dict[str, object]] = []
             for hook_index, raw_handler in enumerate(raw_handlers):
                 location = (
                     f"installer.agents.{agent}.{field_name}.{event}[{index}]"
@@ -2351,18 +2493,16 @@ def _validated_declared_hook_entries(
                 )
                 if not isinstance(raw_handler, dict):
                     raise InstallerError(f"{location} must be an object")
-                hook_type = raw_handler.get("type")
-                if hook_type != "command":
-                    raise InstallerError(
-                        f"unsupported {agent} hook type at {location}: "
-                        f"{hook_type!r}; supported types: command"
+                native_handlers.append(
+                    _native_skill_command(
+                        raw_handler,
+                        location=location,
+                        staged_skill_dir=staged_skill_dir,
+                        installed_skill_dir=installed_skill_dir,
                     )
-                command = raw_handler.get("command")
-                if not isinstance(command, str) or not command.strip():
-                    raise InstallerError(
-                        f"{location}.command must be a non-empty string"
-                    )
-            group = _without_none(raw_group)
+                )
+            native_group = {**raw_group, "hooks": native_handlers}
+            group = _without_none(native_group)
             assert isinstance(group, dict)
             try:
                 json.dumps(group)
@@ -2377,6 +2517,9 @@ def _validated_declared_hook_entries(
 def declared_runtime_hook_entries(
     project: SkillProject,
     agent: str,
+    *,
+    staged_skill_dir: Path,
+    installed_skill_dir: Path,
 ) -> dict[str, list[dict[str, object]]]:
     config = project.agent_config(agent)
     if config is None:
@@ -2402,11 +2545,15 @@ def declared_runtime_hook_entries(
         typed_native,
         agent=agent,
         field_name="hooks",
+        staged_skill_dir=staged_skill_dir,
+        installed_skill_dir=installed_skill_dir,
     )
     direct = _validated_declared_hook_entries(
         direct_hooks,
         agent=agent,
         field_name="hooks_direct",
+        staged_skill_dir=staged_skill_dir,
+        installed_skill_dir=installed_skill_dir,
     )
     for event, groups in direct.items():
         for group in groups:
@@ -2536,8 +2683,15 @@ def plan_runtime_hooks(
     spec: TargetSpec,
     previous_manifest: dict[str, object] | None,
     previous_manifest_file: Path | None,
+    *,
+    staged_skill_dir: Path,
 ) -> RuntimeHookPlan | None:
-    desired_entries = declared_runtime_hook_entries(project, spec.agent)
+    desired_entries = declared_runtime_hook_entries(
+        project,
+        spec.agent,
+        staged_skill_dir=staged_skill_dir,
+        installed_skill_dir=spec.skill_dir,
+    )
     previous_record = runtime_hook_manifest_record(
         previous_manifest,
         source=previous_manifest_file or spec.skill_dir,
@@ -2922,12 +3076,7 @@ def stage_install_target(
     previous_manifest_file = (
         None if previous_manifest_entry is None else previous_manifest_entry[1]
     )
-    runtime_hooks = plan_runtime_hooks(
-        project,
-        spec,
-        previous_manifest,
-        previous_manifest_file,
-    )
+    runtime_hooks: RuntimeHookPlan | None = None
     previous_version = manifest_package_version(previous_manifest)
     package_version = (
         pypi_version
@@ -3053,6 +3202,14 @@ def stage_install_target(
             skill_files,
         )
         skill_files.extend(external_wheel_files)
+
+        runtime_hooks = plan_runtime_hooks(
+            project,
+            spec,
+            previous_manifest,
+            previous_manifest_file,
+            staged_skill_dir=staged_skill_dir,
+        )
 
         remember_created_dirs(created_dirs, spec.hook_path)
         if installed_is_symlink:

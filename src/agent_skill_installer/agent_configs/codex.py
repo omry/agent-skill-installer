@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from omegaconf import MISSING
-
 from .common import AgentInstructions
 
 
@@ -14,17 +12,21 @@ class CodexRequires:
 
 
 @dataclass
-class CodexCommandHook:
-    type: str = "command"
-    command: str = MISSING
+class CodexSkillCommandHook:
+    type: str = "skill-command"
+    # Optional in the loader so install-time validation can report the full path.
+    executable: str | None = None
+    args: list[str] = field(default_factory=list)
     timeout: int | None = None
     statusMessage: str | None = None
+    # Parse legacy declarations only to produce an explicit migration error.
+    command: str | None = None
 
 
 @dataclass
 class CodexHookMatcher:
     matcher: str | None = None
-    hooks: list[CodexCommandHook] = field(default_factory=list)
+    hooks: list[CodexSkillCommandHook] = field(default_factory=list)
 
 
 CodexHooks = dict[str, list[CodexHookMatcher]]
@@ -48,8 +50,8 @@ def materialize_codex_hooks(config: CodexAgentConfig) -> None:
                 matcher=group.get("matcher"),
                 hooks=[
                     hook
-                    if isinstance(hook, CodexCommandHook)
-                    else CodexCommandHook(**hook)
+                    if isinstance(hook, CodexSkillCommandHook)
+                    else CodexSkillCommandHook(**hook)
                     for hook in group.get("hooks", [])
                 ],
             )
