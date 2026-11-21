@@ -22,6 +22,17 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable, Mapping
 from uuid import uuid4
 
+from json5.dumper import ModelDumper as Json5ModelDumper
+from json5.dumper import dumps as json5_dumps
+from json5.loader import ModelLoader as Json5ModelLoader
+from json5.loader import loads as json5_loads
+from json5.model import Comment as Json5Comment
+from json5.model import LineComment as Json5LineComment
+from json5.model import JSONArray as Json5Array
+from json5.model import JSONObject as Json5Object
+from json5.model import String as Json5String
+from json5.model import walk as json5_walk
+from json5.tokenizer import JSON5DecodeError, tokenize as json5_tokenize
 from omegaconf import OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from packaging.requirements import InvalidRequirement, Requirement
@@ -48,7 +59,7 @@ PYPI_METADATA_TIMEOUT_SECONDS = 2.0
 PYPI_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 GITHUB_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 DEFAULT_GITHUB_REF = "main"
-AGENTS = ("codex", "claude")
+AGENTS = ("codex", "claude", "gemini")
 SCOPES = ("dir", "global")
 INSTALLER_METADATA_FILE_NAMES = frozenset({CONFIG_FILE_NAME})
 
@@ -136,6 +147,8 @@ class SkillProject:
             return agents.codex
         if agent == "claude":
             return agents.claude
+        if agent == "gemini":
+            return agents.gemini
         raise InstallerError(f"unknown agent target: {agent}")
 
     def hook_block(self, agent: str) -> str:
@@ -149,6 +162,14 @@ class SkillProject:
             )
         if agent in self.hook_blocks:
             return self.hook_blocks[agent]
+        if agent == "gemini":
+            return (
+                f"{self.marker_start}\n"
+                f"## {self.skill_name} Discoverability\n\n"
+                f"{self.description}\n\n"
+                f"Activate the `{self.skill_name}` skill when a prompt explicitly asks for this skill.\n"
+                f"{self.marker_end}\n"
+            )
         trigger = f"${self.skill_name}" if agent == "codex" else f"/{self.skill_name}"
         return (
             f"{self.marker_start}\n"
@@ -367,6 +388,7 @@ class RuntimeHookPlan:
     owned_entries: dict[str, list[dict[str, object]]]
     previous_owned_entries: dict[str, list[dict[str, object]]]
     created_file: bool
+    format: str = "codex-hooks-json"
 
 
 @dataclass(frozen=True)
@@ -415,6 +437,7 @@ class Installer:
         home: Path | None = None,
         codex_home: Path | None = None,
         claude_home: Path | None = None,
+        gemini_home: Path | None = None,
         force: bool = False,
         editable: bool = False,
         pypi: bool = False,
@@ -422,6 +445,7 @@ class Installer:
         github_url: str | None = None,
         github_ref: str | None = None,
         github_path: str | None = None,
+        enable_gemini_hooks: bool = True,
     ) -> list[InstallResult]:
         return install(
             self.project,
@@ -432,6 +456,7 @@ class Installer:
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
             force=force,
             editable=editable,
             pypi=pypi,
@@ -439,6 +464,7 @@ class Installer:
             github_url=github_url,
             github_ref=github_ref,
             github_path=github_path,
+            enable_gemini_hooks=enable_gemini_hooks,
         )
 
     def uninstall(
@@ -451,6 +477,7 @@ class Installer:
         home: Path | None = None,
         codex_home: Path | None = None,
         claude_home: Path | None = None,
+        gemini_home: Path | None = None,
     ) -> list[InstallResult]:
         return uninstall(
             self.project,
@@ -461,6 +488,7 @@ class Installer:
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
 
     def discover_managed_installations(
@@ -470,6 +498,7 @@ class Installer:
         home: Path | None = None,
         codex_home: Path | None = None,
         claude_home: Path | None = None,
+        gemini_home: Path | None = None,
     ) -> list[InstallationStatus]:
         return discover_managed_installations(
             self.project,
@@ -477,6 +506,7 @@ class Installer:
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
 
     def inspect_installations(
@@ -486,6 +516,7 @@ class Installer:
         home: Path | None = None,
         codex_home: Path | None = None,
         claude_home: Path | None = None,
+        gemini_home: Path | None = None,
     ) -> list[InstallationStatus]:
         return inspect_installations(
             self.project,
@@ -493,6 +524,7 @@ class Installer:
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
 
     def published_pypi_versions(
@@ -1092,6 +1124,7 @@ def target_spec(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> TargetSpec:
     if agent not in AGENTS:
         raise InstallerError(f"unknown agent target: {agent}")
@@ -1107,37 +1140,57 @@ def target_spec(
     else:
         repo_root = None
 
-    layouts: dict[str, dict[str, str]] = {
+    layouts: dict[str, dict[str, str | None]] = {
         "codex": {
             "default_home": ".codex",
             "repo_dir": ".codex",
             "hook_file": "AGENTS.md",
+            "runtime_hook_file": "hooks.json",
         },
         "claude": {
             "default_home": ".claude",
             "repo_dir": ".claude",
             "hook_file": "CLAUDE.md",
+            "runtime_hook_file": None,
+        },
+        "gemini": {
+            "default_home": ".gemini",
+            "repo_dir": ".gemini",
+            "hook_file": "GEMINI.md",
+            "runtime_hook_file": "settings.json",
         },
     }
     layout = layouts[agent]
-    override_home = codex_home if agent == "codex" else claude_home
+    override_homes = {
+        "codex": codex_home,
+        "claude": claude_home,
+        "gemini": gemini_home,
+    }
+    override_home = override_homes[agent]
+    runtime_hook_file = layout["runtime_hook_file"]
+    default_home = layout["default_home"]
+    repo_dir = layout["repo_dir"]
+    hook_file = layout["hook_file"]
+    assert default_home is not None and repo_dir is not None and hook_file is not None
 
     if scope == "global":
         agent_dir = resolve_agent_home(
             override_home,
             default_user_home=home_path,
-            default_name=layout["default_home"],
+            default_name=default_home,
         )
         skill_dir = agent_dir / "skills" / project.skill_name
-        hook_path = agent_dir / layout["hook_file"]
-        runtime_hook_path = agent_dir / "hooks.json" if agent == "codex" else None
+        hook_path = agent_dir / hook_file
+        runtime_hook_path = (
+            agent_dir / runtime_hook_file if runtime_hook_file is not None else None
+        )
     else:
         assert repo_root is not None
-        skill_dir = repo_root / layout["repo_dir"] / "skills" / project.skill_name
-        hook_path = repo_root / layout["hook_file"]
+        skill_dir = repo_root / repo_dir / "skills" / project.skill_name
+        hook_path = repo_root / hook_file
         runtime_hook_path = (
-            repo_root / layout["repo_dir"] / "hooks.json"
-            if agent == "codex"
+            repo_root / repo_dir / runtime_hook_file
+            if runtime_hook_file is not None
             else None
         )
 
@@ -1304,6 +1357,7 @@ def discover_managed_installations(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> list[InstallationStatus]:
     statuses: list[InstallationStatus] = []
     seen: set[Path] = set()
@@ -1321,6 +1375,7 @@ def discover_managed_installations(
                         home=home,
                         codex_home=codex_home,
                         claude_home=claude_home,
+                        gemini_home=gemini_home,
                     )
                 except InstallerError:
                     continue
@@ -1342,6 +1397,7 @@ def inspect_installation(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> InstallationStatus:
     try:
         spec = target_spec(
@@ -1353,6 +1409,7 @@ def inspect_installation(
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
     except InstallerError as error:
         return InstallationStatus(
@@ -1413,6 +1470,7 @@ def inspect_installations(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> list[InstallationStatus]:
     return [
         inspect_installation(
@@ -1424,6 +1482,7 @@ def inspect_installations(
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
         for agent in AGENTS
         for scope in SCOPES
@@ -2289,6 +2348,16 @@ def uninstall_hook(
 
 
 CODEX_RUNTIME_HOOK_FORMAT = "codex-hooks-json"
+GEMINI_RUNTIME_HOOK_FORMAT = "gemini-settings-json"
+RUNTIME_HOOK_FORMATS = {
+    "codex": CODEX_RUNTIME_HOOK_FORMAT,
+    "gemini": GEMINI_RUNTIME_HOOK_FORMAT,
+}
+RUNTIME_HOOK_LABELS = {
+    "codex": "Codex hooks",
+    "gemini": "Gemini hooks",
+}
+GEMINI_HOOK_RESERVED_KEYS = frozenset({"enabled", "disabled", "notifications"})
 
 
 def _without_none(value: object) -> object:
@@ -2356,9 +2425,31 @@ def _native_command_line(arguments: list[str], *, os_name: str | None = None) ->
     return shlex.join(arguments)
 
 
+def _gemini_native_command_line(
+    arguments: list[str], *, os_name: str | None = None
+) -> str:
+    if os_name is None:
+        os_name = os.name
+    if os_name == "nt":
+        return _native_command_line(arguments, os_name=os_name)
+
+    def quote_argument(argument: str) -> str:
+        pieces = argument.split("$")
+        command = shlex.quote(pieces[0])
+        for piece in pieces[1:]:
+            # Gemini expands $NAME and ${NAME} in settings before the shell
+            # parses the command. Keep each dollar in a single-quoted shell
+            # fragment so native settings interpolation cannot consume it.
+            command += "'$'" + shlex.quote(piece)
+        return command
+
+    return " ".join(quote_argument(argument) for argument in arguments)
+
+
 def _native_skill_command(
     raw_handler: dict[str, object],
     *,
+    agent: str,
     location: str,
     staged_skill_dir: Path,
     installed_skill_dir: Path,
@@ -2366,12 +2457,12 @@ def _native_skill_command(
     hook_type = raw_handler.get("type")
     if hook_type == "command":
         raise InstallerError(
-            f"unsupported codex hook type at {location}: 'command'; packaged "
+            f"unsupported {agent} hook type at {location}: 'command'; packaged "
             "hooks must use type: skill-command with a skill-relative executable"
         )
     if hook_type != "skill-command":
         raise InstallerError(
-            f"unsupported codex hook type at {location}: {hook_type!r}; "
+            f"unsupported {agent} hook type at {location}: {hook_type!r}; "
             "supported types: skill-command"
         )
     relative_executable = _normalized_skill_executable(
@@ -2446,7 +2537,12 @@ def _native_skill_command(
         }
     }
     native["type"] = "command"
-    native["command"] = _native_command_line([str(final_executable), *args])
+    arguments = [str(final_executable), *args]
+    native["command"] = (
+        _gemini_native_command_line(arguments)
+        if agent == "gemini"
+        else _native_command_line(arguments)
+    )
     return native
 
 
@@ -2468,6 +2564,11 @@ def _validated_declared_hook_entries(
             raise InstallerError(
                 f"installer.agents.{agent}.{field_name} event names must be "
                 "non-empty strings"
+            )
+        if agent == "gemini" and event in GEMINI_HOOK_RESERVED_KEYS:
+            raise InstallerError(
+                f"installer.agents.{agent}.{field_name} cannot declare reserved "
+                f"Gemini hooks key: {event}"
             )
         if not isinstance(raw_groups, list):
             raise InstallerError(
@@ -2496,6 +2597,7 @@ def _validated_declared_hook_entries(
                 native_handlers.append(
                     _native_skill_command(
                         raw_handler,
+                        agent=agent,
                         location=location,
                         staged_skill_dir=staged_skill_dir,
                         installed_skill_dir=installed_skill_dir,
@@ -2534,7 +2636,7 @@ def declared_runtime_hook_entries(
                 "runtime hook installation is not supported for agent target: claude"
             )
         return {}
-    if agent != "codex":
+    if agent not in RUNTIME_HOOK_FORMATS:
         raise InstallerError(f"unknown agent target: {agent}")
 
     typed_native = {
@@ -2561,38 +2663,304 @@ def declared_runtime_hook_entries(
     return merged
 
 
-def read_codex_hooks_document(path: Path) -> dict[str, object]:
+def _is_valid_gemini_hook_config_value(key: str, value: object) -> bool:
+    if key in {"enabled", "notifications"}:
+        return isinstance(value, bool)
+    if key == "disabled":
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    return False
+
+
+def _gemini_json5_tokens(text: str) -> list[object]:
+    return list(json5_tokenize(text))
+
+
+def _gemini_json5_model_text(text: str) -> str:
+    pieces: list[str] = []
+    offset = 0
+    for token in _gemini_json5_tokens(text):
+        if token.type != "DOUBLE_QUOTE_STRING":
+            continue
+        value = text[token.index : token.end]
+        escaped = value.replace("\u2028", "\\u2028").replace(
+            "\u2029", "\\u2029"
+        )
+        if escaped == value:
+            continue
+        pieces.append(text[offset : token.index])
+        pieces.append(escaped)
+        offset = token.end
+    pieces.append(text[offset:])
+    return "".join(pieces)
+
+
+def _gemini_json_without_comments(text: str) -> str:
+    pieces: list[str] = []
+    offset = 0
+    for token in _gemini_json5_tokens(text):
+        if token.type not in {"LINE_COMMENT", "BLOCK_COMMENT"}:
+            continue
+        pieces.append(text[offset : token.index])
+        comment = text[token.index : token.end]
+        pieces.append(
+            "".join(
+                "\n" if character == "\n" else "\r" if character == "\r" else " "
+                for character in comment
+            )
+        )
+        offset = token.end
+    pieces.append(text[offset:])
+    return "".join(pieces)
+
+
+def _reject_non_json_constant(value: str) -> object:
+    raise ValueError(f"not valid native JSON: {value}")
+
+
+def _gemini_json_loads(text: str) -> object:
+    return json.loads(
+        _gemini_json_without_comments(text),
+        parse_constant=_reject_non_json_constant,
+    )
+
+
+def _gemini_json_has_comments(text: str) -> bool:
+    return any(
+        token.type in {"LINE_COMMENT", "BLOCK_COMMENT"}
+        for token in _gemini_json5_tokens(text)
+    )
+
+
+def _gemini_settings_path_has_comments(path: Path) -> bool:
+    return path.exists() and _gemini_json_has_comments(
+        path.read_text(encoding="utf-8")
+    )
+
+
+def _json5_node_comments(node: object) -> list[object]:
+    comments: list[Json5Comment] = []
+    for child in json5_walk(node):
+        if isinstance(child, Json5Comment):
+            comments.append(child)
+        if isinstance(child, (Json5Array, Json5Object)):
+            comments.extend(
+                trivia
+                for trivia in child.leading_wsc
+                if isinstance(trivia, Json5Comment)
+            )
+    comments.sort(
+        key=lambda comment: (
+            comment._tok.index if comment._tok is not None else -1
+        )
+    )
+    trivia: list[object] = []
+    for comment in comments:
+        trivia.append(comment)
+        if isinstance(comment, Json5LineComment):
+            trivia.append("\n")
+    return trivia
+
+
+def _json5_data_equal(left: object, right: object) -> bool:
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _json5_data_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json5_data_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
+def _new_json5_model_node(value: object) -> object:
+    text = json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    return json5_loads(text, loader=Json5ModelLoader()).value
+
+
+def _json5_object_key(key: object) -> str:
+    if not isinstance(key, Json5String):
+        raise InstallerError("Gemini settings object keys must use native JSON strings")
+    return key.characters
+
+
+def _sync_json5_model_node(
+    node: object,
+    previous: object,
+    updated: object,
+) -> object:
+    if _json5_data_equal(previous, updated):
+        return node
+
+    if (
+        isinstance(node, Json5Object)
+        and isinstance(previous, dict)
+        and isinstance(updated, dict)
+    ):
+        keys: list[object] = []
+        values: list[object] = []
+        pending_comments: list[object] = []
+        previous_keys: set[str] = set()
+        for key_node, value_node in zip(node.keys, node.values):
+            key = _json5_object_key(key_node)
+            previous_keys.add(key)
+            if key not in updated:
+                pending_comments.extend(_json5_node_comments(key_node))
+                pending_comments.extend(_json5_node_comments(value_node))
+                continue
+            if pending_comments:
+                key_node.wsc_before = pending_comments + key_node.wsc_before
+                pending_comments = []
+            keys.append(key_node)
+            values.append(
+                _sync_json5_model_node(value_node, previous[key], updated[key])
+            )
+
+        for key, value in updated.items():
+            if key in previous_keys:
+                continue
+            entry = _new_json5_model_node({key: value})
+            assert isinstance(entry, Json5Object)
+            key_node, value_node = entry.key_value_pairs[0]
+            if pending_comments:
+                key_node.wsc_before = pending_comments + key_node.wsc_before
+                pending_comments = []
+            keys.append(key_node)
+            values.append(value_node)
+
+        node.keys = keys
+        node.values = values
+        if pending_comments:
+            node.wsc_after.extend(pending_comments)
+        return node
+
+    if (
+        isinstance(node, Json5Array)
+        and isinstance(previous, list)
+        and isinstance(updated, list)
+    ):
+        old_values = list(zip(previous, node.values))
+        used: set[int] = set()
+        values: list[object] = []
+        for new_value in updated:
+            match = next(
+                (
+                    index
+                    for index, (old_value, _) in enumerate(old_values)
+                    if index not in used and _json5_data_equal(old_value, new_value)
+                ),
+                None,
+            )
+            if match is None:
+                values.append(_new_json5_model_node(new_value))
+            else:
+                used.add(match)
+                values.append(old_values[match][1])
+        for index, (_, removed_node) in enumerate(old_values):
+            if index not in used:
+                node.wsc_after.extend(_json5_node_comments(removed_node))
+        node.values = values
+        return node
+
+    replacement = _new_json5_model_node(updated)
+    if hasattr(replacement, "wsc_before") and hasattr(node, "wsc_before"):
+        replacement.wsc_before = node.wsc_before
+        replacement.wsc_after = node.wsc_after
+    return replacement
+
+
+def _gemini_settings_document_text(
+    path: Path,
+    document: dict[str, object],
+) -> str:
+    if not path.exists():
+        return json.dumps(document, indent=2) + "\n"
+    try:
+        source = path.read_text(encoding="utf-8")
+        original = _gemini_json_loads(source)
+        model = json5_loads(
+            _gemini_json5_model_text(source), loader=Json5ModelLoader()
+        )
+    except (JSON5DecodeError, json.JSONDecodeError, ValueError) as error:
+        raise InstallerError(f"invalid Gemini hooks JSON: {path}") from error
+    if not isinstance(original, dict) or not isinstance(model.value, Json5Object):
+        raise InstallerError(f"Gemini settings file must contain a JSON object: {path}")
+    model.value = _sync_json5_model_node(model.value, original, document)
+    serialized = json5_dumps(model, dumper=Json5ModelDumper())
+    if not _json5_data_equal(_gemini_json_loads(serialized), document):
+        raise InstallerError(f"failed to preserve Gemini settings values: {path}")
+    return serialized
+
+
+def read_runtime_hooks_document(
+    path: Path,
+    *,
+    agent: str = "codex",
+) -> dict[str, object]:
+    label = RUNTIME_HOOK_LABELS.get(agent, f"{agent} hooks")
+    agent_label = label.removesuffix(" hooks")
     if not path.exists():
         return {"hooks": {}}
     try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as error:
-        raise InstallerError(f"invalid Codex hooks JSON: {path}") from error
+        text = path.read_text(encoding="utf-8" if agent == "gemini" else None)
+        data = _gemini_json_loads(text) if agent == "gemini" else json.loads(text)
+    except (json.JSONDecodeError, JSON5DecodeError, ValueError) as error:
+        raise InstallerError(f"invalid {label} JSON: {path}") from error
     except OSError as error:
         raise InstallerError(
-            f"failed to read Codex hooks file {path}: {error}"
+            f"failed to read {label} file {path}: {error}"
         ) from error
     if not isinstance(data, dict):
-        raise InstallerError(f"Codex hooks file must contain a JSON object: {path}")
+        raise InstallerError(f"{label} file must contain a JSON object: {path}")
     hooks = data.get("hooks")
     if hooks is None:
         data["hooks"] = {}
         return data
     if not isinstance(hooks, dict):
-        raise InstallerError(f"Codex hooks field must be a JSON object: {path}")
+        raise InstallerError(f"{label} field must be a JSON object: {path}")
     for event, groups in hooks.items():
-        if not isinstance(event, str) or not isinstance(groups, list):
-            raise InstallerError(f"invalid Codex hook event mapping in {path}")
+        if not isinstance(event, str):
+            raise InstallerError(f"invalid {agent_label} hook event mapping in {path}")
+        if agent == "gemini" and event in GEMINI_HOOK_RESERVED_KEYS:
+            if not _is_valid_gemini_hook_config_value(event, groups):
+                raise InstallerError(
+                    f"invalid {agent_label} hook setting for {event} in {path}"
+                )
+            continue
+        if not isinstance(groups, list):
+            raise InstallerError(f"invalid {agent_label} hook event mapping in {path}")
         if any(not isinstance(group, dict) for group in groups):
             raise InstallerError(
-                f"invalid Codex hook matcher group for {event} in {path}"
+                f"invalid {agent_label} hook matcher group for {event} in {path}"
             )
     return data
 
 
-def write_codex_hooks_document(path: Path, document: dict[str, object]) -> None:
+def read_codex_hooks_document(path: Path) -> dict[str, object]:
+    return read_runtime_hooks_document(path, agent="codex")
+
+
+def write_runtime_hooks_document(
+    path: Path,
+    document: dict[str, object],
+    *,
+    agent: str = "codex",
+) -> None:
     destination = path.resolve() if path.is_symlink() else path
     destination.parent.mkdir(parents=True, exist_ok=True)
+    serialized = (
+        _gemini_settings_document_text(destination, document)
+        if agent == "gemini"
+        else None
+    )
     existing_mode = (
         stat.S_IMODE(destination.stat().st_mode) if destination.exists() else None
     )
@@ -2605,8 +2973,11 @@ def write_codex_hooks_document(path: Path, document: dict[str, object]) -> None:
     temporary_path = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(document, stream, indent=2)
-            stream.write("\n")
+            if serialized is None:
+                json.dump(document, stream, indent=2)
+                stream.write("\n")
+            else:
+                stream.write(serialized)
             stream.flush()
             os.fsync(stream.fileno())
         if existing_mode is not None:
@@ -2614,6 +2985,10 @@ def write_codex_hooks_document(path: Path, document: dict[str, object]) -> None:
         os.replace(temporary_path, destination)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def write_codex_hooks_document(path: Path, document: dict[str, object]) -> None:
+    write_runtime_hooks_document(path, document)
 
 
 def runtime_hook_manifest_record(
@@ -2628,7 +3003,19 @@ def runtime_hook_manifest_record(
         raise InstallerError(
             f"invalid runtime hook ownership in manifest: {source}"
         )
-    if record.get("format") != CODEX_RUNTIME_HOOK_FORMAT:
+    manifest_agent = manifest.get("agent")
+    expected_format = (
+        RUNTIME_HOOK_FORMATS.get(manifest_agent)
+        if isinstance(manifest_agent, str)
+        else None
+    )
+    record_format = record.get("format")
+    if expected_format is not None:
+        if record_format != expected_format:
+            raise InstallerError(
+                f"unsupported runtime hook format in manifest: {source}"
+            )
+    elif record_format not in RUNTIME_HOOK_FORMATS.values():
         raise InstallerError(f"unsupported runtime hook format in manifest: {source}")
     raw_path = record.get("path")
     raw_entries = record.get("entries")
@@ -2685,6 +3072,7 @@ def plan_runtime_hooks(
     previous_manifest_file: Path | None,
     *,
     staged_skill_dir: Path,
+    enable_hooks: bool = True,
 ) -> RuntimeHookPlan | None:
     desired_entries = declared_runtime_hook_entries(
         project,
@@ -2696,7 +3084,7 @@ def plan_runtime_hooks(
         previous_manifest,
         source=previous_manifest_file or spec.skill_dir,
     )
-    if spec.agent != "codex":
+    if spec.agent not in RUNTIME_HOOK_FORMATS:
         return None
     runtime_path = spec.runtime_hook_path
     assert runtime_path is not None
@@ -2710,10 +3098,14 @@ def plan_runtime_hooks(
                 "installed runtime hook path does not match the selected target: "
                 f"{previous_path} != {runtime_path}"
             )
+    if not enable_hooks:
+        # Skipping consent for a new install must not disable hooks the user
+        # explicitly enabled during an earlier install or upgrade.
+        desired_entries = previous_owned_entries
     if not desired_entries and not previous_owned_entries:
         return None
 
-    document = read_codex_hooks_document(runtime_path)
+    document = read_runtime_hooks_document(runtime_path, agent=spec.agent)
     existing = document["hooks"]
     assert isinstance(existing, dict)
     excluded = (
@@ -2745,6 +3137,7 @@ def plan_runtime_hooks(
         created_file=(
             previous_created_file or sibling_created_file or not runtime_path.exists()
         ),
+        format=RUNTIME_HOOK_FORMATS[spec.agent],
     )
 
 
@@ -2757,7 +3150,7 @@ def apply_runtime_hook_plan(
     if plan is None:
         return
     path_existed = plan.path.exists()
-    document = read_codex_hooks_document(plan.path)
+    document = read_runtime_hooks_document(plan.path, agent=staged.spec.agent)
     hooks = document["hooks"]
     assert isinstance(hooks, dict)
     changed = False
@@ -2792,7 +3185,18 @@ def apply_runtime_hook_plan(
     if plan.created_file and not hooks and set(document) == {"hooks"}:
         if plan.path.is_symlink():
             if path_existed and changed:
-                write_codex_hooks_document(plan.path, document)
+                write_runtime_hooks_document(
+                    plan.path, document, agent=staged.spec.agent
+                )
+        elif (
+            staged.spec.agent == "gemini"
+            and path_existed
+            and _gemini_settings_path_has_comments(plan.path)
+        ):
+            if changed:
+                write_runtime_hooks_document(
+                    plan.path, document, agent=staged.spec.agent
+                )
         else:
             plan.path.unlink(missing_ok=True)
         return
@@ -2800,7 +3204,7 @@ def apply_runtime_hook_plan(
         return
     if not changed:
         return
-    write_codex_hooks_document(plan.path, document)
+    write_runtime_hooks_document(plan.path, document, agent=staged.spec.agent)
 
 
 def uninstall_runtime_hooks(
@@ -2821,7 +3225,7 @@ def uninstall_runtime_hooks(
             f"{runtime_path} != {spec.runtime_hook_path}"
         )
     path_existed = runtime_path.exists()
-    document = read_codex_hooks_document(runtime_path)
+    document = read_runtime_hooks_document(runtime_path, agent=spec.agent)
     hooks = document["hooks"]
     assert isinstance(hooks, dict)
     changed = False
@@ -2845,7 +3249,18 @@ def uninstall_runtime_hooks(
     if created_file and not hooks and set(document) == {"hooks"}:
         if runtime_path.is_symlink():
             if path_existed and changed:
-                write_codex_hooks_document(runtime_path, document)
+                write_runtime_hooks_document(
+                    runtime_path, document, agent=spec.agent
+                )
+        elif (
+            spec.agent == "gemini"
+            and path_existed
+            and _gemini_settings_path_has_comments(runtime_path)
+        ):
+            if changed:
+                write_runtime_hooks_document(
+                    runtime_path, document, agent=spec.agent
+                )
         else:
             runtime_path.unlink(missing_ok=True)
     elif not path_existed and not hooks:
@@ -2853,7 +3268,7 @@ def uninstall_runtime_hooks(
     elif not changed:
         pass
     else:
-        write_codex_hooks_document(runtime_path, document)
+        write_runtime_hooks_document(runtime_path, document, agent=spec.agent)
     return runtime_path
 
 
@@ -2955,7 +3370,7 @@ def write_manifest(
         ]
     if runtime_hooks is not None:
         data["runtime_hooks"] = {
-            "format": CODEX_RUNTIME_HOOK_FORMAT,
+            "format": runtime_hooks.format,
             "path": str(runtime_hooks.path),
             "created_file": runtime_hooks.created_file,
             "entries": runtime_hooks.owned_entries,
@@ -3057,6 +3472,7 @@ def stage_install_target(
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
     transaction_created_dirs: Iterable[Path] = (),
+    enable_gemini_hooks: bool = True,
 ) -> StagedInstall:
     effective_editable = editable or editable_source_dir is not None
     validate_install_source_selection(
@@ -3209,6 +3625,7 @@ def stage_install_target(
             previous_manifest,
             previous_manifest_file,
             staged_skill_dir=staged_skill_dir,
+            enable_hooks=enable_gemini_hooks or spec.agent != "gemini",
         )
 
         remember_created_dirs(created_dirs, spec.hook_path)
@@ -3337,7 +3754,7 @@ def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[Ins
     backup_sidecar_manifest_paths: dict[Path, Path] = {}
     skill_swapped: set[Path] = set()
     sidecar_swapped: set[Path] = set()
-    hook_snapshots: dict[Path, str | None] = {}
+    hook_snapshots: dict[Path, bytes | None] = {}
     staged_by_skill_dir = {staged.spec.skill_dir: staged for staged in staged_list}
     staged_by_sidecar = {staged.sidecar_manifest_path: staged for staged in staged_list}
 
@@ -3348,7 +3765,7 @@ def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[Ins
         for hook_path in snapshot_paths:
             if hook_path not in hook_snapshots:
                 hook_snapshots[hook_path] = (
-                    hook_path.read_text()
+                    hook_path.read_bytes()
                     if hook_path.exists()
                     else None
                 )
@@ -3387,14 +3804,14 @@ def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[Ins
         for hook_path, hook_text in hook_snapshots.items():
             def restore_hook(
                 hook_path: Path = hook_path,
-                hook_text: str | None = hook_text,
+                hook_text: bytes | None = hook_text,
             ) -> None:
                 if hook_text is None:
                     if hook_path.exists():
                         hook_path.unlink()
                 else:
                     hook_path.parent.mkdir(parents=True, exist_ok=True)
-                    hook_path.write_text(hook_text)
+                    hook_path.write_bytes(hook_text)
 
             record_recovery_error(
                 rollback_errors,
@@ -3517,6 +3934,7 @@ def install_target(
     pypi_wheel_path: Path | None = None,
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
+    enable_gemini_hooks: bool = True,
 ) -> InstallResult:
     staged = stage_install_target(
         project,
@@ -3529,6 +3947,7 @@ def install_target(
         pypi_wheel_path=pypi_wheel_path,
         github_source=github_source,
         github_archive_path=github_archive_path,
+        enable_gemini_hooks=enable_gemini_hooks,
     )
     return commit_staged_installs([staged])[0]
 
@@ -3606,6 +4025,7 @@ def install(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
     force: bool = False,
     editable: bool = False,
     pypi: bool = False,
@@ -3613,6 +4033,7 @@ def install(
     github_url: str | None = None,
     github_ref: str | None = None,
     github_path: str | None = None,
+    enable_gemini_hooks: bool = True,
 ) -> list[InstallResult]:
     if github_url is None and (github_ref is not None or github_path is not None):
         raise InstallerError("--github-ref and --github-path require --github-url")
@@ -3648,6 +4069,7 @@ def install(
                 home=home,
                 codex_home=codex_home,
                 claude_home=claude_home,
+                gemini_home=gemini_home,
             )
             for directory in missing_parent_dirs(spec.skill_dir):
                 if directory not in created_dirs:
@@ -3666,12 +4088,14 @@ def install(
                             home=home,
                             codex_home=codex_home,
                             claude_home=claude_home,
+                            gemini_home=gemini_home,
                         ),
                         force=force,
                         editable=editable,
                         pypi_version=pypi_version_override or pypi_version,
                         pypi_wheel_path=pypi_wheel_path,
                         github_source=github_source,
+                        enable_gemini_hooks=enable_gemini_hooks,
                         github_archive_path=github_archive_path,
                         transaction_created_dirs=created_dirs,
                     )
@@ -3724,6 +4148,7 @@ def uninstall(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> list[InstallResult]:
     return [
         uninstall_target(
@@ -3737,6 +4162,7 @@ def uninstall(
                 home=home,
                 codex_home=codex_home,
                 claude_home=claude_home,
+                gemini_home=gemini_home,
             ),
         )
         for agent in normalize_agents(agents)
