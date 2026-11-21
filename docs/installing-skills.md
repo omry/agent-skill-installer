@@ -1,6 +1,7 @@
 # Installing Skills
 
-This guide is for people who want to install a skill for Codex or Claude Code.
+This guide is for people who want to install a skill for Codex, Claude Code, or
+Gemini CLI.
 You do not need to create a Python package to use the installer.
 
 ## Install The Installer
@@ -199,8 +200,8 @@ does not provide its own installer config.
 
 ## Targets
 
-Use `--agent codex`, `--agent claude`, `--agent codex,claude`, or
-`--agent all`.
+Use `--agent codex`, `--agent claude`, `--agent gemini`,
+`--agent codex,claude,gemini`, or `--agent all`.
 
 Use `--scope global` to install into the selected agent's config directory, or
 `--scope dir` to install into a directory. Add `--repo` with `--scope dir` when
@@ -214,12 +215,14 @@ that any agent runtime will automatically discover that directory.
 | Codex | `global` | `~/.codex/skills/<skill_name>` | `~/.codex/AGENTS.md` | `~/.codex/hooks.json` |
 | Claude Code | `dir` | `<target-dir>/.claude/skills/<skill_name>` | `<target-dir>/CLAUDE.md` | Not yet supported |
 | Claude Code | `global` | `~/.claude/skills/<skill_name>` | `~/.claude/CLAUDE.md` | Not yet supported |
+| Gemini CLI | `dir` | `<target-dir>/.gemini/skills/<skill_name>` | `<target-dir>/GEMINI.md` | `<target-dir>/.gemini/settings.json` |
+| Gemini CLI | `global` | `~/.gemini/skills/<skill_name>` | `~/.gemini/GEMINI.md` | `~/.gemini/settings.json` |
 
 For directory targets, pass `--target-dir PATH` to install somewhere other than
 the current working directory. With `--repo`, the installer walks upward from
 that path to find a `.git` or `.sl` root. For global targets, pass
-`--codex-home PATH` or `--claude-home PATH` to override the default agent home
-directories.
+`--codex-home PATH`, `--claude-home PATH`, or `--gemini-home PATH` to override
+the default agent home directories.
 
 In the text UI, the install location screen offers agent config directory,
 current repository directory when one is detected, and directory.
@@ -242,8 +245,8 @@ agent-skill-installer --no-ui uninstall \
 
 Uninstall uses the install manifest written by the installer. It removes the
 installed skill directory or symlink, the matching discoverability block,
-owned Codex runtime hook groups after their last ASI owner is gone, and
-directories the installer created when they become empty.
+owned Codex and Gemini CLI runtime hook groups after their last ASI owner is
+gone, and directories the installer created when they become empty.
 
 ## Ownership And Safety
 
@@ -259,17 +262,21 @@ external wheels, the manifest records them under `external_wheels` with the
 declared package spec, resolved distribution and version, selected wheel
 filename, SHA256 digest, resolver method, and each `wheel_path` to installed
 `skill_path` copy.
-For Codex hooks, the manifest also records each exact native matcher group that
-ASI owns. Existing user hook settings are preserved, including an identical
-matcher group that predates installation. New or changed hooks are not trusted
-automatically; review and trust them from Codex with `/hooks`.
-Packaged Codex hooks name a skill-relative executable; ASI validates it against
-the staged skill, ensures copied and packaged payloads are executable on POSIX,
-and writes the installation's absolute executable path into a host-quoted
-native matcher group. Editable source entry points must already be executable
-and are not modified. This pins the entry point to that installed skill, but is
-not a sandbox for programs the entry point may launch.
-ASI manages standalone native `hooks.json` entries only; Codex plugin packaging
+For Codex and Gemini CLI hooks, the manifest also records each exact native
+matcher group that ASI owns. Existing user settings and hook entries are
+preserved, including an identical matcher group that predates installation.
+Interactive CLI installs ask before enabling Gemini runtime hooks. Use
+`--enable-gemini-hooks` to approve them without a prompt, including with
+`--no-ui` or when running without a terminal. Without this flag, non-interactive
+installs skip new Gemini hooks. Before using Codex hooks, review and trust them with `/hooks`,
+and review enabled Gemini CLI hooks with `/hooks`. Packaged hooks
+name a skill-relative executable; ASI validates it against the staged skill,
+ensures copied and packaged payloads are executable on POSIX, and writes the
+installation's absolute executable path into a host-quoted native matcher group. Editable source entry points must already be
+executable and are not modified. This pins the entry point to that installed
+skill, but is not a sandbox for programs the entry point may launch.
+ASI manages standalone native `hooks.json` (Codex) and `settings.json`
+`hooks` (Gemini CLI) entries only; Codex plugin packaging
 and installation is tracked separately in
 [issue #14](https://github.com/omry/agent-skill-installer/issues/14).
 Reinstalls replace previously owned installs. If an existing skill directory has

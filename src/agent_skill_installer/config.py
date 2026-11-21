@@ -22,8 +22,14 @@ from .agent_configs import (
     CodexHooks,
     CodexRequires,
     CodexSkillCommandHook,
+    GeminiAgentConfig,
+    GeminiHookMatcher,
+    GeminiHooks,
+    GeminiRequires,
+    GeminiSkillCommandHook,
     materialize_claude_hooks,
     materialize_codex_hooks,
+    materialize_gemini_hooks,
 )
 
 
@@ -150,6 +156,11 @@ def _validate_supported_versions(config: InstallerConfig, path: Path | str) -> N
             f"unsupported installer.agents.claude.version in {_display_path(path)}: "
             f"{agents.claude.version}; supported versions: 1"
         )
+    if agents.gemini is not None and agents.gemini.version != 1:
+        raise InstallerConfigError(
+            f"unsupported installer.agents.gemini.version in {_display_path(path)}: "
+            f"{agents.gemini.version}; supported versions: 1"
+        )
 
 
 def _build_config(
@@ -185,6 +196,8 @@ def _build_config(
             materialize_codex_hooks(agents.codex)
         if agents.claude is not None:
             materialize_claude_hooks(agents.claude)
+        if agents.gemini is not None:
+            materialize_gemini_hooks(agents.gemini)
         _validate_supported_versions(config, source)
     return config
 

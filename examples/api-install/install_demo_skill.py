@@ -19,10 +19,10 @@ PROJECT = SkillProject(
 
 def split_agents(value: str) -> list[str]:
     if value == "all":
-        return ["codex", "claude"]
+        return ["codex", "claude", "gemini"]
     agents = [item.strip() for item in value.split(",")]
-    if any(agent not in {"codex", "claude"} for agent in agents):
-        raise argparse.ArgumentTypeError("agent must be codex, claude, or all")
+    if any(agent not in {"codex", "claude", "gemini"} for agent in agents):
+        raise argparse.ArgumentTypeError("agent must be codex, claude, gemini, or all")
     return agents
 
 
@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", dest="repo_target", action="store_true")
     parser.add_argument("--codex-home", type=Path)
     parser.add_argument("--claude-home", type=Path)
+    parser.add_argument("--gemini-home", type=Path)
     return parser
 
 
@@ -58,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
             repo=args.repo,
             codex_home=args.codex_home,
             claude_home=args.claude_home,
+            gemini_home=args.gemini_home,
         )
     else:
         results = installer.uninstall(
@@ -67,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             repo=args.repo,
             codex_home=args.codex_home,
             claude_home=args.claude_home,
+            gemini_home=args.gemini_home,
         )
 
     for result in results:
