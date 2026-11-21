@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [
   { name = "Omry Yadan" },
 ]
-keywords = ["agents", "skills", "installer", "codex", "claude"]
+keywords = ["agents", "skills", "installer", "codex", "claude", "gemini"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -27,6 +27,7 @@ classifiers = [
   "Topic :: Software Development",
 ]
 dependencies = [
+  "json-five==1.1.2",
   "omegaconf>=2.3.0",
   "packaging>=24.0",
   "textual>=0.89.0",
@@ -43,6 +44,9 @@ agent-skill-installer = "agent_skill_installer.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 
 [tool.towncrier]
 package = "agent_skill_installer"
