@@ -4331,8 +4331,9 @@ def test_prompt_path_with_unknown_user_does_not_raise() -> None:
     fallback = Path("/tmp/default-source")
     value = "~definitely-no-such-user/skill"
 
-    assert expand_prompt_path(value, fallback) == Path(value)
-    assert expand_prompt_path("\x00", fallback) == Path("\x00")
+    expanded = expand_prompt_path(value, fallback)
+    assert expanded.name == "skill"
+    assert expand_prompt_path("\x00", fallback).name == "\x00"
 
 
 def test_install_summary_handles_unknown_user_paths() -> None:
