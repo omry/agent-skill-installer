@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import os
 import shlex
 import sys
+try:
+    import termios
+except ImportError:  # pragma: no cover - unavailable on Windows
+    termios = None  # type: ignore[assignment]
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
@@ -61,6 +67,33 @@ PROMPT_BACK = "__agent_skill_installer_prompt_back__"
 DEFAULT_SUBMIT_LABEL = "Continue"
 DEFAULT_EMPTY_COMMAND_PREVIEW_MESSAGE = "Complete the selections to build the no-UI command."
 ACTION_BUTTON_IDS = ("continue", "back", "quit")
+
+
+@contextmanager
+def preserve_terminal_state():
+    """Restore line settings if an interactive prompt exits with an error."""
+    state = None
+    fd = None
+    if os.name == "posix" and termios is not None and running_on_tty():
+        try:
+            fd = sys.stdin.fileno()
+            state = termios.tcgetattr(fd)
+        except (OSError, termios.error):
+            state = None
+            fd = None
+    try:
+        yield
+    finally:
+        if state is not None and fd is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSANOW, state)
+            except (OSError, termios.error):
+                pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except OSError:
+            pass
 
 
 def focus_prompt_action(app, focused_id: str | None, button_type, offset: int) -> None:
@@ -222,6 +255,7 @@ class TextualPrompter:
         command_preview_builder: CommandPreviewBuilder | None = None,
         summary: str | None = None,
         summary_builder: CommandPreviewBuilder | None = None,
+        validator: PromptValidator | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> Path:
         result = run_textual_path(
@@ -231,6 +265,7 @@ class TextualPrompter:
             command_preview_builder=command_preview_builder,
             summary=summary,
             summary_builder=summary_builder,
+            validator=validator,
             submit_label=submit_label,
         )
         if result == PROMPT_BACK:
@@ -463,7 +498,7 @@ def run_textual_select(
     summary_builder: CommandPreviewBuilder | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> str | None:
-    return make_textual_select_app(
+    return run_textual_app(make_textual_select_app(
         message,
         choices,
         command_preview=command_preview,
@@ -471,7 +506,12 @@ def run_textual_select(
         summary=summary,
         summary_builder=summary_builder,
         submit_label=submit_label,
-    ).run()
+    ))
+
+
+def run_textual_app(app) -> object:
+    with preserve_terminal_state():
+        return app.run()
 
 
 def make_textual_select_app(
@@ -761,7 +801,7 @@ def run_textual_checkbox(
     accept_highlighted_on_empty: bool = True,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> list[str] | None:
-    return make_textual_checkbox_app(
+    return run_textual_app(make_textual_checkbox_app(
         message,
         choices,
         command_preview=command_preview,
@@ -772,7 +812,7 @@ def run_textual_checkbox(
         empty_message=empty_message,
         accept_highlighted_on_empty=accept_highlighted_on_empty,
         submit_label=submit_label,
-    ).run()
+    ))
 
 
 def make_textual_checkbox_app(
@@ -1125,6 +1165,7 @@ def run_textual_path(
     command_preview_builder: CommandPreviewBuilder | None = None,
     summary: str | None = None,
     summary_builder: CommandPreviewBuilder | None = None,
+    validator: PromptValidator | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> str | None:
     from textual.app import App, ComposeResult
@@ -1204,6 +1245,7 @@ def run_textual_path(
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
                 yield PromptInput(value=str(default), id="path")
+                yield Static("", id="error")
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
                     yield PromptButton("Back (ESC)", id="back")
@@ -1237,6 +1279,19 @@ def run_textual_path(
 
         def action_focus_next_action(self) -> None:
             focus_prompt_action(self, self.focused_id(), PromptButton, 1)
+
+        def accept_value(self, value: str) -> None:
+            candidate = value.strip() or str(default)
+            if validator is not None:
+                try:
+                    error = validator(candidate)
+                except (InstallerError, UsageError) as caught:
+                    error = str(caught)
+                if error:
+                    self.query_one("#error", Static).update(error)
+                    self.query_one("#path", PromptInput).focus()
+                    return
+            self.exit(candidate)
 
         def update_command_preview(self, value: str) -> None:
             if command_preview_builder is None:
@@ -1274,7 +1329,7 @@ def run_textual_path(
             self.update_installation_summary(event.value)
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
-            self.exit(event.value.strip() or str(default))
+            self.accept_value(event.value)
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "copy-command":
@@ -1287,10 +1342,9 @@ def run_textual_path(
                 self.exit(None)
                 return
             if event.button.id == "continue":
-                value = self.query_one("#path", PromptInput).value.strip()
-                self.exit(value or str(default))
+                self.accept_value(self.query_one("#path", PromptInput).value)
 
-    return PathPromptApp().run()
+    return run_textual_app(PathPromptApp())
 
 
 def run_textual_text(
@@ -1466,7 +1520,7 @@ def run_textual_text(
                 value = self.query_one("#text", PromptInput).value.strip()
                 self.exit(value or default)
 
-    return TextPromptApp().run()
+    return run_textual_app(TextPromptApp())
 
 
 def run_textual_version(
@@ -1481,7 +1535,7 @@ def run_textual_version(
     validator: PromptValidator | None = None,
     submit_label: str = DEFAULT_SUBMIT_LABEL,
 ) -> str | None:
-    return make_textual_version_app(
+    return run_textual_app(make_textual_version_app(
         message,
         default,
         choices,
@@ -1491,7 +1545,7 @@ def run_textual_version(
         summary_builder=summary_builder,
         validator=validator,
         submit_label=submit_label,
-    ).run()
+    ))
 
 
 def make_textual_version_app(

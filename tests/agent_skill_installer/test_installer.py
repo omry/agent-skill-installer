@@ -4412,14 +4412,18 @@ class ScriptedPrompter:
         command_preview_builder=None,
         summary=None,
         summary_builder=None,
+        validator=None,
         submit_label="Continue",
     ):
         self.calls.append(("path", message))
         self.submit_labels.append(submit_label)
-        answer = next(self.answers)
-        if isinstance(answer, BaseException):
-            raise answer
-        path = answer if isinstance(answer, Path) else Path(answer)
+        while True:
+            answer = next(self.answers)
+            if isinstance(answer, BaseException):
+                raise answer
+            path = answer if isinstance(answer, Path) else Path(answer)
+            if validator is None or not validator(str(path)):
+                break
         self.previews.append(
             command_preview_builder(path)
             if command_preview_builder is not None
@@ -5170,6 +5174,38 @@ def test_generic_complete_with_ui_selects_local_install_source(
         f"Installing skill-source as editable symlink from {source}"
     )
     assert prompter.submit_labels[-1] == "Install"
+
+
+def test_generic_complete_with_ui_reprompts_for_invalid_local_source(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "local",
+        repo,
+        source,
+        "editable",
+        ["codex"],
+        "repo",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.skill_path == source
+    assert ("path", "Local repo or skill directory") in prompter.calls
 
 
 def test_generic_complete_with_ui_selects_local_copy_install_source(
