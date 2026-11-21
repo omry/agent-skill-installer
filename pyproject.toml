@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [
   { name = "Omry Yadan" },
 ]
-keywords = ["agents", "skills", "installer", "codex", "claude", "gemini"]
+keywords = ["agents", "skills", "installer", "codex", "claude", "gemini", "antigravity"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
