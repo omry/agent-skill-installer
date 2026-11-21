@@ -7,6 +7,24 @@ A skill is just a directory with `SKILL.md` and any supporting files it needs.
 It does not need `pyproject.toml` or `MANIFEST.in` unless you also want to
 publish it as a Python package.
 
+## Agent compatibility
+
+The same skill payload can target all four runtimes. Keep the shared
+instructions in `SKILL.md`; use `agent-skill-installer.yaml` only when a target
+needs different discoverability text or native hook fields.
+
+| Target | Default activation text | Instruction file or rule | Hook representation |
+| --- | --- | --- | --- |
+| Codex | `$<skill_name>` | `AGENTS.md` | Native `hooks.json` |
+| Claude Code | `/<skill_name>` | `CLAUDE.md` | Parsed only; runtime install is unsupported |
+| Gemini CLI | Activate by skill name | `GEMINI.md` | `settings.json` `hooks` |
+| Antigravity | Activate by skill name | Per-skill `trigger: always_on` rule | Native `hooks.json` |
+
+Use the per-agent sections in the metadata below only for fields that differ
+between runtimes. A hook declaration that is valid for one target is not
+automatically valid for another target because matcher shapes and timeout units
+are native to each runtime.
+
 ## Directory Layout
 
 A minimal standalone skill:
@@ -42,7 +60,7 @@ frontmatter is real YAML metadata delimited by `---`; it is not a Markdown
 comment. If present, it must parse as a YAML mapping. The installer validates
 the frontmatter before installing or replacing a skill, so syntax errors such
 as an unquoted `: ` inside a plain scalar fail early instead of producing a
-skill that Codex, Claude Code, or Gemini CLI cannot load.
+skill that Codex, Claude Code, Gemini CLI, or Antigravity cannot load.
 
 The installer reads only `name`, `description`, and `version`:
 
@@ -70,7 +88,8 @@ for their own skill discovery, so published Codex skills should include valid
 
 `agent-skill-installer.yaml` is optional. Put it next to `SKILL.md` when you
 want to customize the discoverability block written to `AGENTS.md`,
-`CLAUDE.md`, or `GEMINI.md`, or install supported agent runtime hooks.
+`CLAUDE.md`, `GEMINI.md`, or Antigravity rule files, or install supported agent
+runtime hooks.
 
 ```yaml
 installer:
@@ -107,20 +126,38 @@ installer:
                 name: my-skill-prepare
                 timeout: 30000
                 description: Preparing My Skill
+    antigravity:
+      instructions:
+        title: My Skill
+        body: Use this skill when working on my project workflows.
+      hooks:
+        PreToolUse:
+          - matcher: run_command
+            hooks:
+              - type: skill-command
+                executable: scripts/my-skill-helper
+                args: [check]
+                timeout: 15
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/my-skill-helper
+                args: [prepare]
+                timeout: 30
 ```
 
 When this file is omitted, the installer writes a default discoverability block
 using the skill name and description. The default trigger text is `$<skill_name>`
 for Codex, `/<skill_name>` for Claude Code, and skill activation by name
-(`Activate the \`<skill_name>\` skill...`) for Gemini CLI.
+(`Activate the \`<skill_name>\` skill...`) for Gemini CLI and Antigravity.
 
 ### Trigger Names
 
 A skill answers to its skill name: `$<skill_name>` for Codex, `/<skill_name>`
-for Claude Code, and `activate_skill` by skill name for Gemini CLI. There is no
-alias field, so writing a different trigger into an `instructions` body does not
-register it. An authored body is copied verbatim, so keep any trigger it
-mentions in sync with the skill name by hand.
+for Claude Code, and skill activation by name for Gemini CLI and Antigravity.
+There is no alias field, so writing a different trigger into an `instructions`
+body does not register it. An authored body is copied verbatim, so keep any
+trigger it mentions in sync with the skill name by hand.
 
 ### Payload File Selection
 
@@ -205,6 +242,7 @@ class AgentConfigs:
     codex: CodexAgentConfig | None = None
     claude: ClaudeAgentConfig | None = None
     gemini: GeminiAgentConfig | None = None
+    antigravity: AntigravityAgentConfig | None = None
 
 @dataclass
 class CodexAgentConfig:
@@ -228,6 +266,14 @@ class GeminiAgentConfig:
     requires: GeminiRequires = field(default_factory=GeminiRequires)
     instructions: AgentInstructions | None = None
     hooks: GeminiHooks = field(default_factory=dict)
+    hooks_direct: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class AntigravityAgentConfig:
+    version: int = 1
+    requires: AntigravityRequires = field(default_factory=AntigravityRequires)
+    instructions: AgentInstructions | None = None
+    hooks: AntigravityHooks = field(default_factory=dict)
     hooks_direct: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -283,6 +329,20 @@ class GeminiHookMatcher:
     hooks: list[GeminiSkillCommandHook] = field(default_factory=list)
 
 GeminiHooks = dict[str, list[GeminiHookMatcher]]
+
+@dataclass
+class AntigravitySkillCommandHook:
+    type: str = "skill-command"
+    executable: str
+    args: list[str] = field(default_factory=list)
+    timeout: int | None = None
+
+@dataclass
+class AntigravityHookMatcher:
+    matcher: str | None = None
+    hooks: list[AntigravitySkillCommandHook] = field(default_factory=list)
+
+AntigravityHooks = dict[str, list[AntigravityHookMatcher]]
 ```
 
 The agent schemas live in separate modules because their matcher and handler
@@ -294,14 +354,20 @@ native `hooks.json`: `.codex/hooks.json` for a directory target and
 `~/.codex/hooks.json` for a global target. For Gemini CLI targets, `hooks`
 skill-command handlers are merged into the `hooks` object of the target's
 native `settings.json`: `.gemini/settings.json` for a directory target and
-`~/.gemini/settings.json` for a global target. `hooks_direct` uses the same
-event mapping but permits additional native matcher and handler fields. Both
-forms require `type: skill-command`; legacy packaged `type: command` declarations are
+`~/.gemini/settings.json` for a global target. For Antigravity targets, `hooks`
+skill-command handlers are merged under a top-level entry named for the
+installed skill in `.agents/hooks.json` (directory target) or
+`~/.gemini/config/hooks.json` (global target), emitting grouped `{matcher, hooks}`
+entries for tool events (`PreToolUse`, `PostToolUse`) and flat handler lists for
+lifecycle events (`SessionStart`, `PreInvocation`, `PostInvocation`, `Stop`).
+`hooks_direct` uses the same event mapping but permits additional native matcher
+and handler fields. Both forms require `type: skill-command`; legacy packaged `type: command` declarations are
 rejected with a migration error rather than reinterpreted. Existing top-level
 settings, events, and matcher groups are preserved.
 Gemini's native line and block comments in `settings.json` are also preserved
 when ASI updates its owned hook groups.
-In Gemini CLI, hook `timeout` values are in milliseconds.
+In Gemini CLI, hook `timeout` values are in milliseconds; in Antigravity, hook
+`timeout` values are in seconds.
 
 `executable` is a normalized POSIX-style path relative to the installed skill
 root. It must name a regular file in the final staged payload. Absolute paths,
@@ -332,9 +398,9 @@ also be reviewed with `/hooks`. Claude hook declarations are parsed against the
 Claude-specific schema, but runtime installation is not yet supported and fails
 without changing the target.
 
-This support manages standalone native `hooks.json` (Codex) and `settings.json`
-`hooks` (Gemini CLI) entries only. Packaging and installing Codex
-plugin-provided hooks or MCP servers is tracked separately in
+This support manages standalone native `hooks.json` (Codex and Antigravity) and
+`settings.json` `hooks` (Gemini CLI) entries only. Packaging and installing
+Codex plugin-provided hooks or MCP servers is tracked separately in
 [issue #14](https://github.com/omry/agent-skill-installer/issues/14).
 
 You can check a config file directly from Python:

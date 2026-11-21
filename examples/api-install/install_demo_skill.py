@@ -19,10 +19,12 @@ PROJECT = SkillProject(
 
 def split_agents(value: str) -> list[str]:
     if value == "all":
-        return ["codex", "claude", "gemini"]
+        return ["codex", "claude", "gemini", "antigravity"]
     agents = [item.strip() for item in value.split(",")]
-    if any(agent not in {"codex", "claude", "gemini"} for agent in agents):
-        raise argparse.ArgumentTypeError("agent must be codex, claude, gemini, or all")
+    if any(agent not in {"codex", "claude", "gemini", "antigravity"} for agent in agents):
+        raise argparse.ArgumentTypeError(
+            "agent must be codex, claude, gemini, antigravity, or all"
+        )
     return agents
 
 
@@ -42,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-home", type=Path)
     parser.add_argument("--claude-home", type=Path)
     parser.add_argument("--gemini-home", type=Path)
+    parser.add_argument("--antigravity-home", type=Path)
     return parser
 
 
@@ -60,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             codex_home=args.codex_home,
             claude_home=args.claude_home,
             gemini_home=args.gemini_home,
+            antigravity_home=args.antigravity_home,
         )
     else:
         results = installer.uninstall(
@@ -70,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             codex_home=args.codex_home,
             claude_home=args.claude_home,
             gemini_home=args.gemini_home,
+            antigravity_home=args.antigravity_home,
         )
 
     for result in results:

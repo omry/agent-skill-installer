@@ -6,15 +6,27 @@
 | Status | [![CI](https://github.com/omry/agent-skill-installer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/omry/agent-skill-installer/actions/workflows/ci.yml) [![Publish](https://github.com/omry/agent-skill-installer/actions/workflows/publish.yml/badge.svg)](https://github.com/omry/agent-skill-installer/actions/workflows/publish.yml) |
 | Docs and support | [![Zulip chat](https://img.shields.io/badge/chat-Zulip-2e77d0?logo=zulip)](https://hydra-framework.zulipchat.com/#narrow/channel/agent-skill-installer) |
 
-`agent-skill-installer` installs agent skills for Codex, Claude Code, and Gemini CLI from
-local skill directories, GitHub repositories, or PyPI wheels. It supports
-directory and global install targets, can assert directory targets are Git or
-Sapling repositories with `--repo`, writes discoverability blocks into the agent
-hook files, and records enough install state to safely upgrade or uninstall
-skills it owns.
+`agent-skill-installer` installs agent skills for Codex, Claude Code, Gemini CLI,
+and Antigravity from local skill directories, GitHub repositories, or PyPI
+wheels. It supports directory and global targets, can assert directory targets
+are Git or Sapling repositories with `--repo`, writes discoverability blocks into
+the target's instruction files, and records enough install state to safely
+upgrade or uninstall skills it owns.
 
-Additional agent targets or installer functionality are open for discussion,
-and pull requests are welcome.
+### Agent targets
+
+Use one target, a comma-separated list, or `--agent all`:
+
+| Target | Directory discovery | Global discovery | Runtime hooks |
+| --- | --- | --- | --- |
+| `codex` | `.codex/skills` and `AGENTS.md` | `~/.codex/skills` and `~/.codex/AGENTS.md` | `.codex/hooks.json` |
+| `claude` | `.claude/skills` and `CLAUDE.md` | `~/.claude/skills` and `~/.claude/CLAUDE.md` | Not installed |
+| `gemini` | `.gemini/skills` and `GEMINI.md` | `~/.gemini/skills` and `~/.gemini/GEMINI.md` | `.gemini/settings.json` |
+| `antigravity` | `.agents/skills` and `.agents/rules/*.md` | `~/.gemini/config/skills` and `~/.gemini/config/rules/*.md` | `.agents/hooks.json` |
+
+The complete path matrix, target-home overrides, hook behavior, and uninstall
+ownership rules are in [Installing Skills](docs/installing-skills.md). Skill
+metadata and per-agent hook schemas are in [Authoring Skills](docs/authoring-skills.md).
 
 ## Install
 

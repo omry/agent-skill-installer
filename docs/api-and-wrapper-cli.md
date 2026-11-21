@@ -83,7 +83,7 @@ Important `SkillProject` fields:
 | `bundled_skill_path` | Package-relative bundled skill directory. Required for packaged skill resources unless `bundled_skill_source` is set. |
 | `bundled_skill_source` | Optional filesystem directory for tests or custom development tooling. |
 | `pypi_project_name` | Optional PyPI project name when it differs from `package_name`. |
-| `hook_blocks` | Optional per-agent custom discoverability blocks keyed by `codex`, `claude`, or `gemini`. |
+| `hook_blocks` | Optional per-agent custom discoverability blocks keyed by `codex`, `claude`, `gemini`, or `antigravity`. |
 | `manifest_package_aliases` | Optional old package names accepted when migrating existing installs. |
 | `declared_skill_name` | Optional name declared in `SKILL.md` frontmatter. Leave unset; the installer reads it from the bundled payload and warns when it disagrees with `skill_name`. |
 | `marker_slug_override` | Optional discoverability marker slug for preserving hook markers during renames. |
