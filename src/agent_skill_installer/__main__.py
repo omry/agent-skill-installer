@@ -122,6 +122,7 @@ TARGET_FIELDS = [
     "codex_home",
     "claude_home",
     "gemini_home",
+    "antigravity_home",
 ]
 UNINSTALL_FIELDS = [
     "skill_name",
@@ -299,7 +300,7 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent",
         metavar="AGENT[,AGENT...]",
-        help="Agent integration to target: codex, claude, gemini, or all.",
+        help="Agent integration to target: codex, claude, gemini, antigravity, or all.",
     )
     parser.add_argument(
         "--scope",
@@ -333,6 +334,14 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
         "--gemini-home",
         type=Path,
         help="Gemini CLI home directory for global scope. Defaults to ~/.gemini.",
+    )
+    parser.add_argument(
+        "--antigravity-home",
+        type=Path,
+        help=(
+            "Antigravity home directory for global scope. "
+            "Defaults to ~/.gemini/config."
+        ),
     )
     parser.add_argument("--home", type=Path, help=argparse.SUPPRESS)
 
@@ -483,6 +492,8 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
             parts.extend(["--claude-home", args.claude_home])
         if getattr(args, "gemini_home", None) is not None:
             parts.extend(["--gemini-home", args.gemini_home])
+        if getattr(args, "antigravity_home", None) is not None:
+            parts.extend(["--antigravity-home", args.antigravity_home])
     return quote_command(parts)
 
 
@@ -511,6 +522,7 @@ def ensure_arg_defaults(args: argparse.Namespace) -> None:
         "codex_home": None,
         "claude_home": None,
         "gemini_home": None,
+        "antigravity_home": None,
         "home": None,
         "verbose": False,
         "package_name": None,
@@ -599,7 +611,10 @@ def preview_skill_path() -> Path:
 
 def local_summary_path(path: Path | None) -> Path:
     source_path = path or default_skill_path()
-    return source_path.expanduser().resolve()
+    try:
+        return source_path.expanduser().resolve()
+    except (RuntimeError, ValueError):
+        return source_path
 
 
 def preview_command(
@@ -788,7 +803,10 @@ def install_source_summary(
         )
         if path_value is None:
             return "Installing from a local wheel file"
-        wheel_path = Path(str(path_value)).expanduser()
+        try:
+            wheel_path = Path(str(path_value)).expanduser()
+        except (RuntimeError, ValueError):
+            wheel_path = Path(str(path_value))
         return f"Installing from local wheel file {wheel_path}"
     if selected_source == "local":
         path_value = (
@@ -1229,10 +1247,10 @@ def directory_repository_summary(directory: Path) -> str:
 def repo_from_status(status: InstallationStatus) -> Path | None:
     if status.scope != "dir":
         return None
-    if status.hook_path is not None:
-        return status.hook_path.parent
     if status.skill_dir is not None and len(status.skill_dir.parents) >= 3:
         return status.skill_dir.parents[2]
+    if status.hook_path is not None:
+        return status.hook_path.parent
     return None
 
 
@@ -1476,6 +1494,7 @@ def matching_uninstall_statuses(args: argparse.Namespace) -> list[InstallationSt
         codex_home=getattr(args, "codex_home", None),
         claude_home=getattr(args, "claude_home", None),
         gemini_home=getattr(args, "gemini_home", None),
+        antigravity_home=getattr(args, "antigravity_home", None),
     )
     skill_name = getattr(args, "skill_name", None)
     if skill_name is not None:
@@ -1625,6 +1644,23 @@ def complete_install_with_ui(
             validate_pypi_skill_package(args)
     elif source == "wheel":
         if args.wheel_file is None:
+            def validate_wheel_path(value: str) -> str | None:
+                validation_args = copy_args(args)
+                try:
+                    validation_args.wheel_file = Path(value).expanduser()
+                    validate_wheel_file(validation_args)
+                except (
+                    InstallerError,
+                    InstallerConfigError,
+                    UsageError,
+                    OSError,
+                    UnicodeError,
+                    RuntimeError,
+                    ValueError,
+                ) as error:
+                    return str(error)
+                return None
+
             wheel_file = run_prompt(
                 ["wheel_file", *VALIDATED_WHEEL_FIELDS],
                 lambda: prompter.path(
@@ -1641,6 +1677,7 @@ def complete_install_with_ui(
                         source="wheel",
                         wheel_file=Path(str(value)),
                     ),
+                    validator=validate_wheel_path,
                 ),
             )
             if wheel_file == PROMPT_BACK:
@@ -1702,6 +1739,23 @@ def complete_install_with_ui(
             validate_github_skill_source(args)
     elif source == "local":
         if args.skill_path is None:
+            def validate_local_path(value: str) -> str | None:
+                validation_args = copy_args(args)
+                try:
+                    validation_args.skill_path = Path(value).expanduser()
+                    read_local_projects(validation_args)
+                except (
+                    InstallerError,
+                    InstallerConfigError,
+                    UsageError,
+                    OSError,
+                    UnicodeError,
+                    RuntimeError,
+                    ValueError,
+                ) as error:
+                    return str(error)
+                return None
+
             skill_path = run_prompt(
                 ["skill_path"],
                 lambda: prompter.path(
@@ -1718,6 +1772,7 @@ def complete_install_with_ui(
                         source="local",
                         skill_path=Path(str(value)),
                     ),
+                    validator=validate_local_path,
                 ),
             )
             if skill_path == PROMPT_BACK:
@@ -3009,6 +3064,7 @@ def stage_project_for_targets(
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
                 gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
             ),
             force=args.force,
             editable_source_dir=editable_source_dir,
@@ -3041,6 +3097,7 @@ def validate_install_plan(
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
                 gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
             )
             key = (agent, args.scope, spec.skill_dir)
             if key in seen_targets:
@@ -3083,10 +3140,12 @@ def transaction_created_dirs(
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
                 gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
             )
-            for directory in missing_parent_dirs(spec.skill_dir):
-                if directory not in created_dirs:
-                    created_dirs.append(directory)
+            for path in (spec.skill_dir, spec.hook_path):
+                for directory in missing_parent_dirs(path):
+                    if directory not in created_dirs:
+                        created_dirs.append(directory)
     return created_dirs
 
 
@@ -3307,6 +3366,7 @@ def run_uninstall(args: argparse.Namespace) -> list[InstallResult]:
         codex_home=args.codex_home,
         claude_home=args.claude_home,
         gemini_home=getattr(args, "gemini_home", None),
+        antigravity_home=getattr(args, "antigravity_home", None),
     )
 
 

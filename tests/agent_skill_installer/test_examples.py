@@ -309,3 +309,52 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
     assert not gemini_skill_dir.exists()
     assert not repo.joinpath("GEMINI.md").exists()
+
+    antigravity_install = run_example(
+        [
+            sys.executable,
+            str(script),
+            "install",
+            "--agent",
+            "antigravity",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+    assert antigravity_install.returncode == 0, antigravity_install.stderr
+    assert (
+        "Installed api-demo-agent-skill 0.1.0 to Antigravity repo:"
+        in antigravity_install.stdout
+    )
+    ag_skill_dir = repo / ".agents" / "skills" / "api-demo-agent-skill"
+    ag_rule = repo / ".agents" / "rules" / "api-demo-agent-skill.md"
+    assert "API Demo Agent Skill" in ag_skill_dir.joinpath("SKILL.md").read_text()
+    rule_text = ag_rule.read_text()
+    assert rule_text.startswith("---\ntrigger: always_on\n---\n")
+    assert "<!-- API-DEMO-AGENT-SKILL-DISCOVERABILITY-START -->" in rule_text
+
+    antigravity_uninstall = run_example(
+        [
+            sys.executable,
+            str(script),
+            "uninstall",
+            "--agent",
+            "antigravity",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+    assert antigravity_uninstall.returncode == 0, antigravity_uninstall.stderr
+    assert (
+        "Removed api-demo-agent-skill 0.1.0 from Antigravity repo:"
+        in antigravity_uninstall.stdout
+    )
+    assert not ag_skill_dir.exists()
+    assert not ag_rule.exists()
+    assert not (repo / ".agents").exists()

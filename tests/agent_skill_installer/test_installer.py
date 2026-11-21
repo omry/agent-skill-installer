@@ -34,6 +34,7 @@ from agent_skill_installer.__main__ import (
     complete_with_ui as complete_generic_with_ui,
     load_recent_github_urls,
     install_source_choices as generic_install_source_choices,
+    install_decision_summary,
     load_recent_pypi_packages,
     main as generic_main,
     recent_installations_path,
@@ -50,6 +51,7 @@ from agent_skill_installer.cli import (
     build_no_ui_command,
     command_preview_classes,
     complete_with_ui,
+    expand_prompt_path,
     format_status_line,
     install_source_choices,
     installation_option_choices,
@@ -587,6 +589,7 @@ def test_global_scope_supports_per_agent_home_directories(tmp_path: Path) -> Non
     codex_home = tmp_path / "codex-alt"
     claude_home = tmp_path / "claude-alt"
     gemini_home = tmp_path / "gemini-alt"
+    antigravity_home = tmp_path / "antigravity-alt"
 
     Installer(project).install(
         ["all"],
@@ -594,14 +597,17 @@ def test_global_scope_supports_per_agent_home_directories(tmp_path: Path) -> Non
         codex_home=codex_home,
         claude_home=claude_home,
         gemini_home=gemini_home,
+        antigravity_home=antigravity_home,
     )
 
     assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (claude_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (gemini_home / "skills" / project.skill_name / "SKILL.md").exists()
+    assert (antigravity_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (codex_home / "AGENTS.md").exists()
     assert (claude_home / "CLAUDE.md").exists()
     assert (gemini_home / "GEMINI.md").exists()
+    assert (antigravity_home / "rules" / f"{project.skill_name}.md").exists()
 
     Installer(project).uninstall(
         ["all"],
@@ -609,11 +615,13 @@ def test_global_scope_supports_per_agent_home_directories(tmp_path: Path) -> Non
         codex_home=codex_home,
         claude_home=claude_home,
         gemini_home=gemini_home,
+        antigravity_home=antigravity_home,
     )
 
     assert not codex_home.exists()
     assert not claude_home.exists()
     assert not gemini_home.exists()
+    assert not antigravity_home.exists()
 
 
 def test_install_rejects_invalid_skill_frontmatter_before_replacing_existing(
@@ -3554,6 +3562,7 @@ def test_cli_no_ui_uses_per_agent_home_directories(
     codex_home = tmp_path / "codex-cli"
     claude_home = tmp_path / "claude-cli"
     gemini_home = tmp_path / "gemini-cli"
+    antigravity_home = tmp_path / "antigravity-cli"
 
     exit_code = main(
         [
@@ -3569,6 +3578,8 @@ def test_cli_no_ui_uses_per_agent_home_directories(
             str(claude_home),
             "--gemini-home",
             str(gemini_home),
+            "--antigravity-home",
+            str(antigravity_home),
         ],
         project=project,
     )
@@ -3584,9 +3595,14 @@ def test_cli_no_ui_uses_per_agent_home_directories(
         "Installed example-agent-skill 1.2.3 to Gemini CLI global:"
         in output.out
     )
+    assert (
+        "Installed example-agent-skill 1.2.3 to Antigravity global:"
+        in output.out
+    )
     assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (claude_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (gemini_home / "skills" / project.skill_name / "SKILL.md").exists()
+    assert (antigravity_home / "skills" / project.skill_name / "SKILL.md").exists()
 
 
 def test_cli_no_ui_accepts_comma_separated_agents(
@@ -4276,7 +4292,7 @@ def test_textual_version_validator_blocks_invalid_value() -> None:
 
     def validate(value: str) -> str | None:
         if value == "missing-package":
-            return "PyPI package not found: missing-package"
+            return "unexpected field in config.[/broken]"
         return None
 
     app = make_textual_version_app(
@@ -4300,7 +4316,7 @@ def test_textual_version_validator_blocks_invalid_value() -> None:
 
             assert app.return_value is None
             assert str(app.query_one("#error", Static).content) == (
-                "PyPI package not found: missing-package"
+                "unexpected field in config.[/broken]"
             )
 
             package_input.value = "valid-package"
@@ -4309,6 +4325,43 @@ def test_textual_version_validator_blocks_invalid_value() -> None:
     asyncio.run(run_scenario())
 
     assert app.return_value == "valid-package"
+
+
+def test_prompt_path_with_unknown_user_does_not_raise() -> None:
+    fallback = Path("/tmp/default-source")
+    value = "~definitely-no-such-user/skill"
+
+    assert expand_prompt_path(value, fallback) == Path(value)
+    assert expand_prompt_path("\x00", fallback) == Path("\x00")
+
+
+def test_install_summary_handles_unknown_user_paths() -> None:
+    args = Namespace(
+        skill_path=None,
+        wheel_file=None,
+        github_url=None,
+        github_path=None,
+        pypi_package=None,
+        skill_name=None,
+        editable=None,
+    )
+    unknown = Path("~definitely-no-such-user/skill")
+
+    local = install_decision_summary(
+        args,
+        command="install",
+        source="local",
+        skill_path=unknown,
+    )
+    wheel = install_decision_summary(
+        args,
+        command="install",
+        source="wheel",
+        wheel_file=unknown,
+    )
+
+    assert "definitely-no-such-user" in local
+    assert "definitely-no-such-user" in wheel
 
 
 class ScriptedPrompter:
@@ -4398,14 +4451,18 @@ class ScriptedPrompter:
         command_preview_builder=None,
         summary=None,
         summary_builder=None,
+        validator=None,
         submit_label="Continue",
     ):
         self.calls.append(("path", message))
         self.submit_labels.append(submit_label)
-        answer = next(self.answers)
-        if isinstance(answer, BaseException):
-            raise answer
-        path = answer if isinstance(answer, Path) else Path(answer)
+        while True:
+            answer = next(self.answers)
+            if isinstance(answer, BaseException):
+                raise answer
+            path = answer if isinstance(answer, Path) else Path(answer)
+            if validator is None or not validator(str(path)):
+                break
         self.previews.append(
             command_preview_builder(path)
             if command_preview_builder is not None
@@ -5158,6 +5215,38 @@ def test_generic_complete_with_ui_selects_local_install_source(
     assert prompter.submit_labels[-1] == "Install"
 
 
+def test_generic_complete_with_ui_reprompts_for_invalid_local_source(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "skill-source")
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "local",
+        repo,
+        source,
+        "editable",
+        ["codex"],
+        "repo",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.skill_path == source
+    assert ("path", "Local repo or skill directory") in prompter.calls
+
+
 def test_generic_complete_with_ui_selects_local_copy_install_source(
     tmp_path: Path,
 ) -> None:
@@ -5280,11 +5369,11 @@ def test_generic_install_source_selection_summary_excludes_target(
     assert "Into" not in prompter.summaries[0]
     assert prompter.summaries[1] == (
         f"Installing skill from local path {source}\n"
-        "Into Codex Global, Claude Global, Gemini Global"
+        "Into Codex Global, Claude Global, Gemini Global, Antigravity Global"
     )
     assert prompter.summaries[2] == (
         f"Installing a copy of skill from {source}\n"
-        "Into Codex Global, Claude Global, Gemini Global"
+        "Into Codex Global, Claude Global, Gemini Global, Antigravity Global"
     )
 
 
@@ -5514,6 +5603,41 @@ def test_generic_complete_with_ui_selects_wheel_file(
     assert (
         repo / ".codex" / "skills" / project.skill_name / "SKILL.md"
     ).read_text() == "wheel skill\n"
+
+
+def test_generic_complete_with_ui_reprompts_for_invalid_wheel_file(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    wheel = make_skill_wheel(
+        tmp_path / "example_agent_skill-1.2.3-py3-none-any.whl",
+        project,
+    )
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "wheel",
+        tmp_path / "missing.whl",
+        wheel,
+        ["codex"],
+        "repo",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.wheel_file == wheel
+    assert getattr(args, "_validated_wheel_project").skill_name == project.skill_name
 
 
 def test_generic_complete_with_ui_requires_pypi_package_without_recent_default(
@@ -5812,7 +5936,7 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
     assert args.package_name == project.package_name
     assert args.agent == "all"
     assert args.scope == "global"
-    assert len(args.uninstall_statuses) == 3
+    assert len(args.uninstall_statuses) == 4
     assert prompter.calls == [
         ("select", "What would you like to do?"),
         ("select", "Skills installed by Agent Skill Installer"),
@@ -5828,7 +5952,7 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
     assert prompter.choices[1] == [
         {
             "name": project.skill_name,
-            "description": "3 installed targets\nPackage: example-agent-skill",
+            "description": "4 installed targets\nPackage: example-agent-skill",
             "value": "0",
         }
     ]
@@ -5848,6 +5972,7 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
         choice["name"].strip()
         for choice in prompter.choices[2][2:]
     ] == [
+        "Antigravity User global - version 1.2.3",
         "Claude Code User global - version 1.2.3",
         "Codex User global - version 1.2.3",
         "Gemini CLI User global - version 1.2.3",
@@ -5857,10 +5982,16 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
         f"--skill-name {project.skill_name} --agent all --scope global"
     )
     results = run_generic_uninstall(args)
-    assert [result.status for result in results] == ["removed", "removed", "removed"]
+    assert [result.status for result in results] == [
+        "removed",
+        "removed",
+        "removed",
+        "removed",
+    ]
     assert not (home / ".codex" / "skills" / project.skill_name).exists()
     assert not (home / ".claude" / "skills" / project.skill_name).exists()
     assert not (home / ".gemini" / "skills" / project.skill_name).exists()
+    assert not (home / ".gemini" / "config" / "skills" / project.skill_name).exists()
 
 
 def test_generic_uninstall_target_labels_github_ref_as_source(
@@ -5911,6 +6042,7 @@ def test_generic_uninstall_target_labels_github_ref_as_source(
         choice["name"].strip()
         for choice in prompter.choices[1][2:]
     ] == [
+        "Antigravity User global - GitHub ref main",
         "Claude Code User global - GitHub ref main",
         "Codex User global - GitHub ref main",
         "Gemini CLI User global - GitHub ref main",
@@ -8750,3 +8882,1100 @@ def test_gemini_docs_and_news_fragment_cover_target() -> None:
     assert "GeminiSkillCommandHook" in authoring
     assert fragment.is_file()
     assert "Gemini CLI" in fragment.read_text()
+
+
+def test_installs_reinstalls_force_replaces_and_uninstalls_antigravity_repo_scope(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+
+    result = installer.install(["antigravity"], "repo", repo=repo)[0]
+
+    skill_dir = repo / ".agents" / "skills" / project.skill_name
+    rule_path = repo / ".agents" / "rules" / f"{project.skill_name}.md"
+    assert result.agent == "antigravity"
+    assert result.scope == "dir"
+    assert result.repo_target is True
+    assert result.skill_dir == skill_dir
+    assert result.hook_path == rule_path
+    assert result.runtime_hook_path is None
+    assert (skill_dir / "SKILL.md").is_file()
+    assert not (repo / ".codex").exists()
+    assert not (repo / ".claude").exists()
+    assert not (repo / ".gemini").exists()
+    assert not (repo / "AGENTS.md").exists()
+    assert not (repo / "CLAUDE.md").exists()
+    assert not (repo / "GEMINI.md").exists()
+    rule_text = rule_path.read_text()
+    assert rule_text.startswith("---\ntrigger: always_on\n---\n")
+    assert project.marker_start in rule_text
+    assert f"Activate the `{project.skill_name}` skill" in rule_text
+    assert project.marker_end in rule_text
+
+    # Reinstall updates block without duplicating YAML frontmatter
+    reinstalled = installer.install(["antigravity"], "repo", repo=repo)[0]
+    assert reinstalled.status == "installed"
+    assert reinstalled.version_change == "same"
+    assert rule_path.read_text().count("trigger: always_on") == 1
+
+    # Uninstall deletes ASI-created rule file and empty .agents directories
+    removed = installer.uninstall(["antigravity"], "repo", repo=repo)[0]
+    assert removed.status == "removed"
+    assert not skill_dir.exists()
+    assert not rule_path.exists()
+    assert not (repo / ".agents").exists()
+
+    # User content added to an ASI-created rule file is preserved on uninstall
+    installer.install(["antigravity"], "repo", repo=repo)
+    rule_path.write_text(rule_path.read_text() + "\n# User Notes\nKeep me.\n")
+    installer.uninstall(["antigravity"], "repo", repo=repo)
+    remaining = rule_path.read_text()
+    assert remaining.startswith("---\ntrigger: always_on\n---\n")
+    assert "# User Notes\nKeep me." in remaining
+    assert project.marker_start not in remaining
+
+    # Unowned skill directory requires --force
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Unowned\n")
+    with pytest.raises(InstallerError, match="unowned skill directory"):
+        installer.install(["antigravity"], "repo", repo=repo)
+    forced = installer.install(["antigravity"], "repo", repo=repo, force=True)[0]
+    assert forced.status == "installed"
+    assert read_install_manifest(project, skill_dir)["agent"] == "antigravity"
+
+
+def test_installs_and_uninstalls_antigravity_global_scope(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    home = tmp_path / "home"
+    installer = Installer(project)
+
+    default_result = installer.install(["antigravity"], "global", home=home)[0]
+    expected_home = home / ".gemini" / "config"
+    assert default_result.skill_dir == expected_home / "skills" / project.skill_name
+    assert default_result.hook_path == expected_home / "rules" / f"{project.skill_name}.md"
+    assert (default_result.skill_dir / "SKILL.md").is_file()
+    assert default_result.hook_path.read_text().startswith("---\ntrigger: always_on\n---\n")
+
+    installer.uninstall(["antigravity"], "global", home=home)
+    assert not (home / ".gemini").exists()
+
+    custom_home = tmp_path / "antigravity-home"
+    custom_result = installer.install(
+        ["antigravity"], "global", antigravity_home=custom_home
+    )[0]
+    assert custom_result.skill_dir == custom_home / "skills" / project.skill_name
+    assert custom_result.hook_path == custom_home / "rules" / f"{project.skill_name}.md"
+
+    installer.uninstall(["antigravity"], "global", antigravity_home=custom_home)
+    assert not custom_home.exists()
+
+
+@pytest.mark.parametrize(
+    ("target", "scope"),
+    [("dir", "dir"), ("global", "global"), ("custom", "global")],
+)
+@pytest.mark.parametrize(
+    "removal_order",
+    [("skill-one", "skill-two"), ("skill-two", "skill-one")],
+)
+def test_antigravity_sibling_installs_share_directory_ownership(
+    tmp_path: Path,
+    target: str,
+    scope: str,
+    removal_order: tuple[str, str],
+) -> None:
+    base_project = make_project(tmp_path)
+    projects = {
+        name: replace(base_project, skill_name=name)
+        for name in ("skill-one", "skill-two")
+    }
+
+    if target == "dir":
+        repo = make_repo(tmp_path / "repo")
+        target_kwargs = {"repo": repo}
+        cleanup_root = repo / ".agents"
+        agent_root = cleanup_root
+    elif target == "global":
+        home = tmp_path / "home"
+        target_kwargs = {"home": home}
+        cleanup_root = home / ".gemini"
+        agent_root = home / ".gemini" / "config"
+    else:
+        custom_home = tmp_path / "antigravity-home"
+        target_kwargs = {"antigravity_home": custom_home}
+        cleanup_root = custom_home
+        agent_root = custom_home
+
+    installed = {
+        name: Installer(project).install(
+            ["antigravity"], scope, **target_kwargs
+        )[0]
+        for name, project in projects.items()
+    }
+    manifests = {
+        name: read_install_manifest(projects[name], result.skill_dir)
+        for name, result in installed.items()
+    }
+    skill_one_dirs = set(manifests["skill-one"]["created_dirs"])
+    skill_two_dirs = set(manifests["skill-two"]["created_dirs"])
+    assert skill_one_dirs <= skill_two_dirs
+
+    for index, name in enumerate(removal_order):
+        remaining_name = removal_order[1 - index]
+        Installer(projects[name]).uninstall(
+            ["antigravity"], scope, **target_kwargs
+        )
+
+        assert not installed[name].skill_dir.exists()
+        assert not installed[name].hook_path.exists()
+        if index == 0:
+            assert installed[remaining_name].skill_dir.exists()
+            assert installed[remaining_name].hook_path.exists()
+            assert cleanup_root.exists()
+
+    assert not cleanup_root.exists()
+    assert not (agent_root / "skills").exists()
+    assert not (agent_root / "rules").exists()
+
+
+def test_antigravity_sibling_uninstall_preserves_preexisting_directories_and_content(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    skill_one = replace(project, skill_name="skill-one")
+    skill_two = replace(project, skill_name="skill-two")
+    repo = make_repo(tmp_path / "repo")
+    agent_root = repo / ".agents"
+    rules_dir = agent_root / "rules"
+    rules_dir.mkdir(parents=True)
+    user_file = rules_dir / "user-notes.md"
+    user_file.write_text("Keep this user content.\n")
+
+    installed_one = Installer(skill_one).install(
+        ["antigravity"], "dir", repo=repo
+    )[0]
+    installed_two = Installer(skill_two).install(
+        ["antigravity"], "dir", repo=repo
+    )[0]
+
+    Installer(skill_one).uninstall(["antigravity"], "dir", repo=repo)
+    Installer(skill_two).uninstall(["antigravity"], "dir", repo=repo)
+
+    assert not installed_one.skill_dir.exists()
+    assert not installed_two.skill_dir.exists()
+    assert not installed_one.hook_path.exists()
+    assert not installed_two.hook_path.exists()
+    assert agent_root.is_dir()
+    assert rules_dir.is_dir()
+    assert user_file.read_text() == "Keep this user content.\n"
+    assert not (agent_root / "skills").exists()
+
+
+@pytest.mark.parametrize("target", ["dir", "global", "custom"])
+def test_antigravity_rejects_incompatible_existing_rule_activation(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    project = make_project(tmp_path)
+    installer = Installer(project)
+    if target == "dir":
+        repo = make_repo(tmp_path / "repo")
+        kwargs = {"repo": repo}
+        scope = "dir"
+        rule_path = repo / ".agents" / "rules" / f"{project.skill_name}.md"
+    elif target == "global":
+        home = tmp_path / "home"
+        kwargs = {"home": home}
+        scope = "global"
+        rule_path = (
+            home / ".gemini" / "config" / "rules" / f"{project.skill_name}.md"
+        )
+    else:
+        home = tmp_path / "antigravity-home"
+        kwargs = {"antigravity_home": home}
+        scope = "global"
+        rule_path = home / "rules" / f"{project.skill_name}.md"
+    rule_path.parent.mkdir(parents=True)
+    original = "---\ntrigger: manual\n---\n\n# User rule\nKeep this.\n"
+    rule_path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(InstallerError, match="incompatible trigger"):
+        installer.install(["antigravity"], scope, **kwargs)
+
+    assert rule_path.read_text(encoding="utf-8") == original
+    assert not (rule_path.parent.parent / "skills" / project.skill_name).exists()
+
+
+def test_antigravity_reinstall_rejects_activation_edit_without_partial_changes(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+    result = installer.install(["antigravity"], "dir", repo=repo)[0]
+    rule_path = result.hook_path
+    rule_path.write_text(
+        rule_path.read_text(encoding="utf-8").replace(
+            "trigger: always_on", "trigger: manual"
+        ),
+        encoding="utf-8",
+    )
+    original_skill = result.skill_dir / "SKILL.md"
+    original_skill_bytes = original_skill.read_bytes()
+    original_rule_bytes = rule_path.read_bytes()
+
+    with pytest.raises(InstallerError, match="incompatible trigger"):
+        installer.install(["antigravity"], "dir", repo=repo)
+
+    assert original_skill.read_bytes() == original_skill_bytes
+    assert rule_path.read_bytes() == original_rule_bytes
+
+
+@pytest.mark.parametrize("operation", ["install", "reinstall", "uninstall"])
+def test_antigravity_invalid_utf8_rule_api_returns_installer_error(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+    rule_path = repo / ".agents" / "rules" / f"{project.skill_name}.md"
+    invalid_rule = b"---\ntrigger: always_on\n---\n\nUser \xff\n"
+
+    if operation == "uninstall":
+        installer.install(["antigravity"], "dir", repo=repo)
+        skill_dir = repo / ".agents" / "skills" / project.skill_name
+        manifest_path = skill_dir / f".{project.skill_name}-install.json"
+        before_skill = (skill_dir / "SKILL.md").read_bytes()
+        before_manifest = manifest_path.read_bytes()
+        rule_path.write_bytes(invalid_rule)
+        with pytest.raises(InstallerError, match="failed to read rule file as UTF-8"):
+            installer.uninstall(["antigravity"], "dir", repo=repo)
+        assert (skill_dir / "SKILL.md").read_bytes() == before_skill
+        assert manifest_path.read_bytes() == before_manifest
+    elif operation == "reinstall":
+        result = installer.install(["antigravity"], "dir", repo=repo)[0]
+        before_skill = (result.skill_dir / "SKILL.md").read_bytes()
+        before_manifest = (result.skill_dir / f".{project.skill_name}-install.json").read_bytes()
+        rule_path.write_bytes(invalid_rule)
+        with pytest.raises(InstallerError, match="failed to read Antigravity rule file"):
+            installer.install(["antigravity"], "dir", repo=repo)
+        assert (result.skill_dir / "SKILL.md").read_bytes() == before_skill
+        assert (result.skill_dir / f".{project.skill_name}-install.json").read_bytes() == before_manifest
+    else:
+        rule_path.parent.mkdir(parents=True)
+        rule_path.write_bytes(invalid_rule)
+        with pytest.raises(InstallerError, match="failed to read Antigravity rule file"):
+            installer.install(["antigravity"], "dir", repo=repo)
+
+    assert rule_path.read_bytes() == invalid_rule
+
+
+def test_shared_uninstall_planner_invalid_utf8_rule_returns_installer_error(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+    result = installer.install(["codex"], "dir", repo=repo)[0]
+    rule_path = result.hook_path
+    before_skill = (result.skill_dir / "SKILL.md").read_bytes()
+    before_manifest = (result.skill_dir / f".{project.skill_name}-install.json").read_bytes()
+    invalid_rule = b"User \xff\n"
+    rule_path.write_bytes(invalid_rule)
+
+    with pytest.raises(InstallerError, match="failed to read rule file as UTF-8"):
+        installer.uninstall(["codex"], "dir", repo=repo)
+
+    assert rule_path.read_bytes() == invalid_rule
+    assert (result.skill_dir / "SKILL.md").read_bytes() == before_skill
+    assert (result.skill_dir / f".{project.skill_name}-install.json").read_bytes() == before_manifest
+
+
+@pytest.mark.parametrize("entrypoint", ["generic", "wrapper"])
+def test_antigravity_invalid_utf8_rule_no_ui_cli_returns_exit_one(
+    tmp_path: Path,
+    capsys,
+    entrypoint: str,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    source = None
+    if entrypoint == "generic":
+        source = tmp_path / "source"
+        make_skill(
+            source,
+            text=(
+                "---\nname: example-agent-skill\n"
+                "description: Example skill.\n---\n\nSkill.\n"
+            ),
+        )
+    rule_path = repo / ".agents" / "rules" / f"{project.skill_name}.md"
+    rule_path.parent.mkdir(parents=True)
+    invalid_rule = b"---\ntrigger: always_on\n---\n\nUser \xff\n"
+    rule_path.write_bytes(invalid_rule)
+    if entrypoint == "generic":
+        assert generic_main(
+            [
+                "--no-ui",
+                "install",
+                "--skill-path",
+                str(source),
+                "--copy",
+                "--agent",
+                "antigravity",
+                "--scope",
+                "dir",
+                "--target-dir",
+                str(repo),
+            ]
+        ) == 1
+    else:
+        assert main(
+            [
+                "--no-ui",
+                "install",
+                "--agent",
+                "antigravity",
+                "--scope",
+                "dir",
+                "--target-dir",
+                str(repo),
+            ],
+            project=project,
+        ) == 1
+    output = capsys.readouterr()
+    assert "failed to read Antigravity rule file" in output.err
+    assert str(rule_path) in output.err
+    assert rule_path.read_bytes() == invalid_rule
+    assert not (repo / ".agents" / "skills" / project.skill_name).exists()
+
+
+def test_antigravity_native_hooks_preserve_utf8_under_cp1252_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".agents" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    hooks_path.write_text(
+        json.dumps(
+            {"user-hook": {"SessionStart": [{"command": "echo café"}]}},
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    original_read_text = Path.read_text
+
+    def read_text_with_cp1252_default(path: Path, encoding=None, *args, **kwargs):
+        if encoding is None:
+            encoding = "cp1252"
+        return original_read_text(path, encoding, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_cp1252_default)
+    installer = Installer(project)
+    installer.install(["antigravity"], "dir", repo=repo)
+    installer.install(["antigravity"], "dir", repo=repo)
+    installer.uninstall(["antigravity"], "dir", repo=repo)
+
+    document = json.loads(hooks_path.read_text(encoding="utf-8"))
+    assert document["user-hook"]["SessionStart"][0]["command"] == "echo café"
+
+
+def test_antigravity_native_hooks_invalid_utf8_rolls_back(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".agents" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    original = b"{\n  \xff\n}\n"
+    hooks_path.write_bytes(original)
+
+    with pytest.raises(InstallerError, match="invalid Antigravity hooks JSON"):
+        Installer(project).install(["antigravity"], "dir", repo=repo)
+
+    assert hooks_path.read_bytes() == original
+    assert not (repo / ".agents" / "skills" / project.skill_name).exists()
+
+
+def test_antigravity_native_hook_write_failure_restores_utf8_bytes_under_cp1252_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".agents" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    original = (
+        json.dumps(
+            {"user-hook": {"SessionStart": [{"command": "echo café"}]}},
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    hooks_path.write_bytes(original)
+    original_read_text = Path.read_text
+
+    def read_text_with_cp1252_default(path: Path, encoding=None, *args, **kwargs):
+        if encoding is None:
+            encoding = "cp1252"
+        return original_read_text(path, encoding, *args, **kwargs)
+
+    from agent_skill_installer import installer as installer_module
+
+    original_apply = installer_module.apply_runtime_hook_plan
+
+    def apply_then_fail(*args, **kwargs) -> None:
+        original_apply(*args, **kwargs)
+        raise InstallerError("runtime hook write failed after hooks update")
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_cp1252_default)
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.apply_runtime_hook_plan", apply_then_fail
+    )
+
+    with pytest.raises(InstallerError, match="rolled back changes"):
+        Installer(project).install(["antigravity"], "dir", repo=repo)
+
+    assert hooks_path.read_bytes() == original
+    assert not (repo / ".agents" / "skills" / project.skill_name).exists()
+
+
+@pytest.mark.parametrize("configured_instructions", [False, True])
+def test_antigravity_rule_lifecycle_preserves_unicode_under_cp1252_default(
+    tmp_path: Path,
+    monkeypatch,
+    configured_instructions: bool,
+) -> None:
+    if configured_instructions:
+        project = project_with_config(
+            tmp_path,
+            """
+installer:
+  agents:
+    antigravity:
+      instructions:
+        title: Réglés
+        body: Utilise café workflows.
+""",
+            skill_name="unicode-instructions",
+        )
+    else:
+        project = replace(
+            make_project(tmp_path),
+            skill_name="unicode-description",
+            description="Use café workflows.",
+        )
+    repo = make_repo(tmp_path / "repo")
+    rule_path = repo / ".agents" / "rules" / f"{project.skill_name}.md"
+    rule_path.parent.mkdir(parents=True)
+    user_rule = "---\ntrigger: always_on\n---\n\n# Café user rule\n"
+    rule_path.write_bytes(user_rule.encode("utf-8"))
+    original_read_text = Path.read_text
+    original_write_text = Path.write_text
+
+    def read_text_with_cp1252_default(path: Path, encoding=None, *args, **kwargs):
+        if encoding is None:
+            encoding = "cp1252"
+        return original_read_text(path, encoding, *args, **kwargs)
+
+    def write_text_with_cp1252_default(
+        path: Path, data: str, encoding=None, *args, **kwargs
+    ):
+        if encoding is None:
+            encoding = "cp1252"
+        return original_write_text(path, data, encoding, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_cp1252_default)
+    monkeypatch.setattr(Path, "write_text", write_text_with_cp1252_default)
+    installer = Installer(project)
+    installer.install(["antigravity"], "dir", repo=repo)
+    first_text = rule_path.read_bytes().decode("utf-8")
+    assert "# Café user rule" in first_text
+    if configured_instructions:
+        assert "## Réglés" in first_text
+        assert "Utilise café workflows." in first_text
+    else:
+        assert "Use café workflows." in first_text
+
+    installer.install(["antigravity"], "dir", repo=repo)
+    installer.uninstall(["antigravity"], "dir", repo=repo)
+    assert rule_path.read_bytes().decode("utf-8") == user_rule
+
+
+@pytest.mark.parametrize("scope", ["repo", "global"])
+def test_antigravity_install_writes_native_runtime_hooks(
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      instructions:
+        title: Example Antigravity Skill
+        body: Use this configured Antigravity text.
+      hooks:
+        PreToolUse:
+          - matcher: run_command
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [gate, "with spaces"]
+                timeout: 15
+        PostToolUse:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [audit]
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [init]
+                timeout: 30
+""",
+    )
+    repo = make_repo(tmp_path / "repo with spaces")
+    antigravity_home = tmp_path / "antigravity home"
+
+    result = Installer(project).install(
+        ["antigravity"],
+        scope,
+        repo=repo if scope == "repo" else None,
+        antigravity_home=antigravity_home,
+    )[0]
+
+    hooks_path = (
+        repo / ".agents" / "hooks.json"
+        if scope == "repo"
+        else antigravity_home / "hooks.json"
+    )
+    rule_path = (
+        repo / ".agents" / "rules" / f"{project.skill_name}.md"
+        if scope == "repo"
+        else antigravity_home / "rules" / f"{project.skill_name}.md"
+    )
+    assert "Use this configured Antigravity text." in rule_path.read_text()
+    assert result.runtime_hook_path == hooks_path
+    assert result.skill_dir is not None
+    expected_entries = {
+        "PreToolUse": [
+            {
+                "matcher": "run_command",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": native_skill_command(
+                            result.skill_dir,
+                            "gate",
+                            "with spaces",
+                        ),
+                        "timeout": 15,
+                    }
+                ],
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": native_skill_command(result.skill_dir, "audit"),
+                    }
+                ],
+            }
+        ],
+        "SessionStart": [
+            {
+                "type": "command",
+                "command": native_skill_command(result.skill_dir, "init"),
+                "timeout": 30,
+            }
+        ],
+    }
+    assert json.loads(hooks_path.read_text()) == {
+        project.skill_name: expected_entries
+    }
+    manifest = read_install_manifest(project, result.skill_dir)
+    assert manifest["runtime_hooks"] == {
+        "format": "antigravity-hooks-json",
+        "path": str(hooks_path),
+        "created_file": True,
+        "hook_name": project.skill_name,
+        "entries": expected_entries,
+    }
+
+
+def test_antigravity_editable_skill_command_uses_installed_symlink_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.chdir(checkout)
+
+    result = Installer(project).install(
+        ["antigravity"],
+        "repo",
+        repo=repo,
+        editable=True,
+    )[0]
+
+    assert result.skill_dir is not None
+    assert result.skill_dir.is_symlink()
+    hooks = json.loads((repo / ".agents" / "hooks.json").read_text())
+    assert hooks[project.skill_name]["SessionStart"][0]["command"] == (
+        native_skill_command(result.skill_dir)
+    )
+
+
+def test_antigravity_runtime_hook_upgrade_and_uninstall_preserve_user_hooks(
+    tmp_path: Path,
+) -> None:
+    old_project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        PreToolUse:
+          - matcher: run_command
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [old]
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [start-old]
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".agents" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "lint-checker": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "edit_file",
+                            "hooks": [
+                                {"type": "command", "command": "./scripts/lint.sh"}
+                            ],
+                        }
+                    ]
+                },
+                old_project.skill_name: {
+                    "enabled": False,
+                    "Stop": [{"type": "command", "command": "./scripts/user-stop.sh"}],
+                },
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+    Installer(old_project).install(["antigravity"], "repo", repo=repo)
+
+    new_project = replace(
+        old_project,
+        version="2.0.0",
+        installer_config=load_installer_config_text(
+            """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        PreToolUse:
+          - matcher: run_command
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [new]
+"""
+        ),
+    )
+    Installer(new_project).install(["antigravity"], "repo", repo=repo)
+
+    upgraded = json.loads(hooks_path.read_text())
+    skill_dir = repo / ".agents" / "skills" / new_project.skill_name
+    assert upgraded == {
+        "lint-checker": {
+            "PostToolUse": [
+                {
+                    "matcher": "edit_file",
+                    "hooks": [{"type": "command", "command": "./scripts/lint.sh"}],
+                }
+            ]
+        },
+        new_project.skill_name: {
+            "enabled": False,
+            "Stop": [{"type": "command", "command": "./scripts/user-stop.sh"}],
+            "PreToolUse": [
+                {
+                    "matcher": "run_command",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": native_skill_command(skill_dir, "new"),
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+    Installer(new_project).uninstall(["antigravity"], "repo", repo=repo)
+
+    assert json.loads(hooks_path.read_text()) == {
+        "lint-checker": {
+            "PostToolUse": [
+                {
+                    "matcher": "edit_file",
+                    "hooks": [{"type": "command", "command": "./scripts/lint.sh"}],
+                }
+            ]
+        },
+        new_project.skill_name: {
+            "enabled": False,
+            "Stop": [{"type": "command", "command": "./scripts/user-stop.sh"}],
+        },
+    }
+
+
+def test_antigravity_uninstall_removes_asi_created_empty_hooks_file(
+    tmp_path: Path,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".agents" / "hooks.json"
+
+    Installer(project).install(["antigravity"], "repo", repo=repo)
+    assert hooks_path.is_file()
+
+    Installer(project).uninstall(["antigravity"], "repo", repo=repo)
+    assert not hooks_path.exists()
+    assert not (repo / ".agents").exists()
+
+
+def test_antigravity_does_not_claim_identical_preexisting_hook(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [shared]
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    hooks_path = repo / ".agents" / "hooks.json"
+    skill_dir = repo / ".agents" / "skills" / project.skill_name
+    hooks_path.parent.mkdir()
+    original = {
+        project.skill_name: {
+            "SessionStart": [
+                {
+                    "type": "command",
+                    "command": native_skill_command(skill_dir, "shared"),
+                }
+            ]
+        }
+    }
+    original_text = json.dumps(original, separators=(",", ":")) + "\n"
+    hooks_path.write_text(original_text)
+
+    Installer(project).install(["antigravity"], "repo", repo=repo)
+    manifest = read_install_manifest(project, skill_dir)
+    assert manifest["runtime_hooks"]["entries"] == {}
+    assert hooks_path.read_text() == original_text
+
+    Installer(project).uninstall(["antigravity"], "repo", repo=repo)
+    assert hooks_path.read_text() == original_text
+
+
+def test_antigravity_rejects_legacy_command_flat_matcher_reserved_key_and_invalid_json(
+    tmp_path: Path,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+
+    legacy_project = project_with_config(
+        tmp_path / "legacy",
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 hook.py
+""",
+    )
+    with pytest.raises(
+        InstallerError,
+        match="unsupported antigravity hook type.*packaged hooks must use type: skill-command",
+    ):
+        Installer(legacy_project).install(["antigravity"], "repo", repo=repo)
+    assert not (repo / ".agents").exists()
+
+    flat_matcher_project = project_with_config(
+        tmp_path / "flat-matcher",
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - matcher: startup
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    with pytest.raises(
+        InstallerError,
+        match="matcher is not supported for flat Antigravity event SessionStart",
+    ):
+        Installer(flat_matcher_project).install(["antigravity"], "repo", repo=repo)
+    assert not (repo / ".agents").exists()
+
+    reserved_project = project_with_config(
+        tmp_path / "reserved",
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        enabled:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    with pytest.raises(InstallerError, match="reserved Antigravity hooks key: enabled"):
+        Installer(reserved_project).install(["antigravity"], "repo", repo=repo)
+    assert not (repo / ".agents").exists()
+
+    valid_project = project_with_config(
+        tmp_path / "valid",
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    hooks_path = repo / ".agents" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text("{not json\n")
+    with pytest.raises(InstallerError, match="invalid Antigravity hooks JSON"):
+        Installer(valid_project).install(["antigravity"], "repo", repo=repo)
+    assert hooks_path.read_text() == "{not json\n"
+    assert not (repo / ".agents" / "skills").exists()
+    assert not (repo / ".agents" / "rules").exists()
+
+
+def test_antigravity_cli_no_ui_install_verbose_and_uninstall(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        PreToolUse:
+          - matcher: run_command
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "my-workspace")
+
+    install_code = main(
+        [
+            "--no-ui",
+            "--verbose",
+            "install",
+            "--agent",
+            "antigravity",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert install_code == 0
+    assert (
+        "Installed example-agent-skill 1.2.3 to Antigravity repo (my-workspace):"
+        in output.out
+    )
+    assert "Review the installed Antigravity hooks in hooks.json." in output.out
+    assert (
+        f"  hook:  {repo / '.agents' / 'rules' / f'{project.skill_name}.md'}"
+        in output.out
+    )
+    assert f"  runtime hooks: {repo / '.agents' / 'hooks.json'}" in output.out
+
+    uninstall_code = main(
+        [
+            "--no-ui",
+            "uninstall",
+            "--agent",
+            "antigravity",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        project=project,
+    )
+    uninstall_output = capsys.readouterr()
+    assert uninstall_code == 0
+    assert (
+        "Removed example-agent-skill 1.2.3 from Antigravity repo (my-workspace):"
+        in uninstall_output.out
+    )
+    assert not (repo / ".agents").exists()
+
+
+@pytest.mark.parametrize("agent", ["codex", "antigravity"])
+@pytest.mark.parametrize("repo_target", [False, True])
+def test_selected_directory_uninstall_uses_install_root(
+    tmp_path: Path, agent: str, repo_target: bool
+) -> None:
+    from agent_skill_installer import __main__ as generic_cli
+
+    project = make_project(tmp_path)
+    target = tmp_path / "directory"
+    target.mkdir()
+    if repo_target:
+        (target / ".git").mkdir()
+    installed = Installer(project).install(
+        [agent], "dir", repo=target, repo_target=repo_target
+    )[0]
+    status = next(
+        s for s in Installer(project).discover_managed_installations(repo=target)
+        if s.agent == agent
+    )
+    args = Namespace(command="uninstall", uninstall_statuses=[status], repo=target)
+    generic_cli.ensure_arg_defaults(args)
+
+    preview = generic_cli.build_uninstall_command_for_statuses(args, [status])
+    assert preview is not None
+    parts = shlex.split(preview)
+    assert parts[parts.index("--target-dir") + 1] == str(target)
+    results = generic_cli.run_uninstall(args)
+
+    assert results[0].status == "removed"
+    assert not installed.skill_dir.exists()
+    assert not installed.hook_path.exists()
+
+
+def test_antigravity_docs_and_news_fragment_cover_target() -> None:
+    root = Path(__file__).parents[2]
+    readme = (root / "README.md").read_text()
+    installing = (root / "docs" / "installing-skills.md").read_text()
+    authoring = (root / "docs" / "authoring-skills.md").read_text()
+    fragment = root / "news" / "47.feature"
+
+    assert "Antigravity" in readme
+    assert ".agents/skills/<skill_name>" in installing
+    assert ".agents/rules/<skill_name>.md" in installing
+    assert ".agents/hooks.json" in installing
+    assert "~/.gemini/config/skills/<skill_name>" in installing
+    assert "--antigravity-home" in installing
+    assert "AntigravityAgentConfig" in authoring
+    assert "AntigravitySkillCommandHook" in authoring
+    assert fragment.is_file()
+    assert "Antigravity" in fragment.read_text()

@@ -303,3 +303,100 @@ installer:
     )
     with pytest.raises(InstallerConfigError, match="installer.agents.gemini.version"):
         load_installer_config(bad_version)
+
+
+def test_loads_antigravity_agent_config_and_hooks(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path / "agent-skill-installer.yaml",
+        """
+installer:
+  version: 1
+  shared:
+    instructions:
+      discoverability:
+        title: Review Workflow
+        body: Use review workflow for code reviews.
+  agents:
+    antigravity:
+      version: 1
+      requires:
+        antigravity: ">=1.0.0"
+      instructions: ${installer.shared.instructions.discoverability}
+      hooks:
+        PreToolUse:
+          - matcher: run_command
+            hooks:
+              - type: skill-command
+                executable: scripts/gate.py
+                args: [check]
+                timeout: 15
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/init.py
+                timeout: 30
+      hooks_direct:
+        FutureEvent:
+          - hooks:
+              - type: skill-command
+                executable: scripts/future.py
+                futureField: accepted here
+""",
+    )
+
+    config = load_installer_config(config_path)
+
+    antigravity = config.installer.agents.antigravity
+    assert antigravity is not None
+    assert antigravity.version == 1
+    assert antigravity.requires.antigravity == ">=1.0.0"
+    assert antigravity.instructions is not None
+    assert antigravity.instructions.title == "Review Workflow"
+    assert antigravity.instructions.body == "Use review workflow for code reviews."
+    pre_tool = antigravity.hooks["PreToolUse"][0]
+    assert pre_tool.matcher == "run_command"
+    assert pre_tool.hooks[0].executable == "scripts/gate.py"
+    assert pre_tool.hooks[0].args == ["check"]
+    assert pre_tool.hooks[0].timeout == 15
+    assert antigravity.hooks["SessionStart"][0].hooks[0].executable == "scripts/init.py"
+    assert (
+        antigravity.hooks_direct["FutureEvent"][0]["hooks"][0]["futureField"]
+        == "accepted here"
+    )
+
+
+def test_rejects_unknown_antigravity_hook_field_and_unsupported_version(
+    tmp_path: Path,
+) -> None:
+    bad_field = write_config(
+        tmp_path / "bad-antigravity-field.yaml",
+        """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        PreToolUse:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                statusMessage: codex-only field
+""",
+    )
+    with pytest.raises(InstallerConfigError) as error:
+        load_installer_config(bad_field)
+    assert "installer.agents.antigravity.hooks.PreToolUse" in str(error.value)
+    assert "statusMessage" in str(error.value)
+
+    bad_version = write_config(
+        tmp_path / "bad-antigravity-version.yaml",
+        """
+installer:
+  agents:
+    antigravity:
+      version: 2
+""",
+    )
+    with pytest.raises(
+        InstallerConfigError, match="installer.agents.antigravity.version"
+    ):
+        load_installer_config(bad_version)
