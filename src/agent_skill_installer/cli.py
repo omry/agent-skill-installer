@@ -43,6 +43,7 @@ TARGET_ALL = "all"
 AGENT_LABELS = {
     "codex": "Codex",
     "claude": "Claude Code",
+    "gemini": "Gemini CLI",
 }
 SCOPE_LABELS = {
     "dir": "Directory",
@@ -2001,11 +2002,24 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
             help="Claude Code home directory for global scope. Defaults to ~/.claude.",
         )
         subparser.add_argument(
+            "--gemini-home",
+            type=Path,
+            help="Gemini CLI home directory for global scope. Defaults to ~/.gemini.",
+        )
+        subparser.add_argument(
             "--home",
             type=Path,
             help=argparse.SUPPRESS,
         )
         if command == "install":
+            subparser.add_argument(
+                "--enable-gemini-hooks",
+                action="store_true",
+                help=(
+                    "Enable Gemini runtime hooks. Non-interactive installs skip "
+                    "new Gemini hooks unless this flag is set."
+                ),
+            )
             subparser.add_argument(
                 "--force",
                 action="store_true",
@@ -2242,6 +2256,7 @@ def build_no_ui_command(
     repo: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> str | None:
     if isinstance(args, str):
         args = argparse.Namespace(command=args, verbose=False)
@@ -2281,6 +2296,7 @@ def build_no_ui_command(
                     repo=repo,
                     codex_home=codex_home,
                     claude_home=claude_home,
+                    gemini_home=gemini_home,
                 )
                 for target_scope, target_repo_target in target_groups
             ]
@@ -2333,6 +2349,8 @@ def build_no_ui_command(
     if bool(getattr(args, "verbose", False)):
         parts.append("--verbose")
     if command == "install":
+        if getattr(args, "enable_gemini_hooks", False):
+            parts.append("--enable-gemini-hooks")
         if bool(getattr(args, "force", False)):
             parts.append("--force")
         if editable:
@@ -2361,6 +2379,11 @@ def build_no_ui_command(
         if claude_home is not None
         else getattr(args, "claude_home", None)
     )
+    gemini_home = (
+        gemini_home
+        if gemini_home is not None
+        else getattr(args, "gemini_home", None)
+    )
 
     if scope == "dir" and repo is not None:
         parts.extend(["--target-dir", repo])
@@ -2370,6 +2393,8 @@ def build_no_ui_command(
             parts.extend(["--codex-home", codex_home])
         if "claude" in selected_agents and claude_home is not None:
             parts.extend(["--claude-home", claude_home])
+        if "gemini" in selected_agents and gemini_home is not None:
+            parts.extend(["--gemini-home", gemini_home])
 
     return quote_command(parts)
 
@@ -2455,12 +2480,15 @@ def agent_home_path(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> Path:
     base_home = (home or Path.home()).expanduser()
     if agent == "codex":
         return (codex_home or base_home / ".codex").expanduser()
     if agent == "claude":
         return (claude_home or base_home / ".claude").expanduser()
+    if agent == "gemini":
+        return (gemini_home or base_home / ".gemini").expanduser()
     raise UsageError(f"unknown agent target: {agent}")
 
 
@@ -2472,6 +2500,7 @@ def installation_scope_choice_label(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
         return "Directory"
@@ -2499,6 +2528,7 @@ def installation_scope_choice_description(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
         return "Install files into an explicit directory; automatic discovery is not implied"
@@ -2510,6 +2540,7 @@ def installation_scope_choice_description(
                     home=home,
                     codex_home=codex_home,
                     claude_home=claude_home,
+                    gemini_home=gemini_home,
                 )
             )
             for agent in agents
@@ -2527,6 +2558,7 @@ def installed_statuses_by_target(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> dict[InstallationTarget, InstallationStatus]:
     return {
         (status.agent, status.scope, status.repo_target): status
@@ -2536,6 +2568,7 @@ def installed_statuses_by_target(
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
         if status.status == "installed"
     }
@@ -2551,6 +2584,7 @@ def installation_option_choices(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> list[dict[str, object]]:
     if command == "install":
         choices = [
@@ -2562,6 +2596,7 @@ def installation_option_choices(
                     home=home,
                     codex_home=codex_home,
                     claude_home=claude_home,
+                    gemini_home=gemini_home,
                 ),
                 "description": installation_scope_choice_description(
                     "global",
@@ -2570,6 +2605,7 @@ def installation_option_choices(
                     home=home,
                     codex_home=codex_home,
                     claude_home=claude_home,
+                    gemini_home=gemini_home,
                 ),
                 "value": "global",
                 "kind": "scope",
@@ -2585,6 +2621,7 @@ def installation_option_choices(
                         home=home,
                         codex_home=codex_home,
                         claude_home=claude_home,
+                        gemini_home=gemini_home,
                     ),
                     "description": installation_scope_choice_description(
                         "repo",
@@ -2593,6 +2630,7 @@ def installation_option_choices(
                         home=home,
                         codex_home=codex_home,
                         claude_home=claude_home,
+                        gemini_home=gemini_home,
                     ),
                     "value": "repo",
                     "kind": "scope",
@@ -2607,6 +2645,7 @@ def installation_option_choices(
                     home=home,
                     codex_home=codex_home,
                     claude_home=claude_home,
+                    gemini_home=gemini_home,
                 ),
                 "description": installation_scope_choice_description(
                     SPECIFIC_DIRECTORY_VALUE,
@@ -2615,6 +2654,7 @@ def installation_option_choices(
                     home=home,
                     codex_home=codex_home,
                     claude_home=claude_home,
+                    gemini_home=gemini_home,
                 ),
                 "value": SPECIFIC_DIRECTORY_VALUE,
                 "kind": "scope",
@@ -2629,6 +2669,7 @@ def installation_option_choices(
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
         if command == "uninstall"
         else {}
@@ -2690,6 +2731,7 @@ def normalize_installation_targets(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> list[InstallationTarget]:
     if isinstance(selected_options, str):
         selected_options = [selected_options]
@@ -2705,6 +2747,7 @@ def normalize_installation_targets(
                 home=home,
                 codex_home=codex_home,
                 claude_home=claude_home,
+                gemini_home=gemini_home,
             )
             if choice.get("kind") == "scope"
         ]
@@ -2735,6 +2778,7 @@ def normalize_installation_targets(
             home=home,
             codex_home=codex_home,
             claude_home=claude_home,
+            gemini_home=gemini_home,
         )
         if choice.get("kind", "target") == "target"
     ]
@@ -2768,6 +2812,7 @@ def installation_summary_text(
     home: Path | None = None,
     codex_home: Path | None = None,
     claude_home: Path | None = None,
+    gemini_home: Path | None = None,
 ) -> str:
     statuses = inspect_installations(
         project,
@@ -2775,6 +2820,7 @@ def installation_summary_text(
         home=home,
         codex_home=codex_home,
         claude_home=claude_home,
+        gemini_home=gemini_home,
     )
     by_target = {}
     for status in statuses:
@@ -2783,8 +2829,16 @@ def installation_summary_text(
         by_target[(status.agent, scope, repo_target)] = status
 
     lines: list[str] = []
-    repo_statuses = [by_target[(agent, "dir", True)] for agent in AGENTS]
-    global_statuses = [by_target[(agent, "global", False)] for agent in AGENTS]
+    repo_statuses = [
+        by_target[(agent, "dir", True)]
+        for agent in AGENTS
+        if (agent, "dir", True) in by_target
+    ]
+    global_statuses = [
+        by_target[(agent, "global", False)]
+        for agent in AGENTS
+        if (agent, "global", False) in by_target
+    ]
 
     repo_available = any(status.status != "unavailable" for status in repo_statuses)
     repo_installed = [
@@ -2891,6 +2945,7 @@ def complete_with_ui(
             home=getattr(args, "home", None),
             codex_home=getattr(args, "codex_home", None),
             claude_home=getattr(args, "claude_home", None),
+            gemini_home=getattr(args, "gemini_home", None),
         )
 
     def final_submit_label() -> str:
@@ -2922,6 +2977,7 @@ def complete_with_ui(
                     "repo",
                     "codex_home",
                     "claude_home",
+                    "gemini_home",
                 ],
                 lambda: prompter.select(
                     f"What would you like to do with {project.skill_name}?",
@@ -3063,6 +3119,7 @@ def complete_with_ui(
                         "repo",
                         "codex_home",
                         "claude_home",
+                        "gemini_home",
                     ],
                     lambda: prompter.checkbox(
                         f"Select agents for {project.skill_name}",
@@ -3098,6 +3155,7 @@ def complete_with_ui(
                 home=getattr(args, "home", None),
                 codex_home=getattr(args, "codex_home", None),
                 claude_home=getattr(args, "claude_home", None),
+                gemini_home=getattr(args, "gemini_home", None),
             )
             if not option_choices:
                 raise UsageError(
@@ -3124,6 +3182,7 @@ def complete_with_ui(
                     home=getattr(args, "home", None),
                     codex_home=getattr(args, "codex_home", None),
                     claude_home=getattr(args, "claude_home", None),
+                    gemini_home=getattr(args, "gemini_home", None),
                 )
                 return build_no_ui_command(
                     project,
@@ -3134,7 +3193,14 @@ def complete_with_ui(
 
             if args.command == "install":
                 selected_options = prompt_step(
-                    ["targets", "repo_target", "repo", "codex_home", "claude_home"],
+                    [
+                        "targets",
+                        "repo_target",
+                        "repo",
+                        "codex_home",
+                        "claude_home",
+                        "gemini_home",
+                    ],
                     lambda: prompter.select(
                         f"Install location for {project.skill_name}",
                         option_choices,
@@ -3145,7 +3211,14 @@ def complete_with_ui(
             else:
                 default_options = default_installation_option_values(selected_agents)
                 selected_options = prompt_step(
-                    ["targets", "repo_target", "repo", "codex_home", "claude_home"],
+                    [
+                        "targets",
+                        "repo_target",
+                        "repo",
+                        "codex_home",
+                        "claude_home",
+                        "gemini_home",
+                    ],
                     lambda: prompter.checkbox(
                         f"Select {project.skill_name} installations",
                         option_choices,
@@ -3197,6 +3270,7 @@ def complete_with_ui(
                 home=getattr(args, "home", None),
                 codex_home=getattr(args, "codex_home", None),
                 claude_home=getattr(args, "claude_home", None),
+                gemini_home=getattr(args, "gemini_home", None),
             )
             args.targets = targets
             args.repo_target = repo_target_arg_from_targets(targets)
@@ -3246,6 +3320,8 @@ def complete_with_ui(
         args.codex_home = None
     if not hasattr(args, "claude_home"):
         args.claude_home = None
+    if not hasattr(args, "gemini_home"):
+        args.gemini_home = None
     if not hasattr(args, "repo_target"):
         args.repo_target = False
     if not hasattr(args, "repo"):
@@ -3264,6 +3340,8 @@ def complete_with_ui(
         args.github_path = None
     if not hasattr(args, "verbose"):
         args.verbose = False
+    if not hasattr(args, "enable_gemini_hooks"):
+        args.enable_gemini_hooks = False
     return args
 
 
@@ -3420,7 +3498,10 @@ def print_results(results: Sequence[InstallResult], *, verbose: bool = False) ->
     for result in results:
         print(format_status_line(result, color=color))
         if result.action == "install" and result.runtime_hook_path is not None:
-            print("  Review and trust the installed Codex hooks with /hooks.")
+            if result.agent == "codex":
+                print("  Review and trust the installed Codex hooks with /hooks.")
+            elif result.agent == "gemini":
+                print("  Review the installed Gemini CLI hooks with /hooks.")
         if not verbose:
             continue
         print(f"  skill: {result.skill_dir}")
@@ -3469,6 +3550,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 home=args.home,
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
+                gemini_home=getattr(args, "gemini_home", None),
                 force=args.force,
                 editable=args.editable,
                 pypi=args.pypi,
@@ -3476,6 +3558,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 github_url=args.github_url,
                 github_ref=args.github_ref,
                 github_path=args.github_path,
+                enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
             )
         if args.command == "uninstall":
             return installer.uninstall(
@@ -3486,6 +3569,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 home=args.home,
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
+                gemini_home=getattr(args, "gemini_home", None),
             )
         raise UsageError(f"unknown command: {args.command}")
 
@@ -3508,6 +3592,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     home=args.home,
                     codex_home=args.codex_home,
                     claude_home=args.claude_home,
+                    gemini_home=getattr(args, "gemini_home", None),
                     force=args.force,
                     editable=args.editable,
                     pypi=args.pypi,
@@ -3515,6 +3600,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     github_url=args.github_url,
                     github_ref=args.github_ref,
                     github_path=args.github_path,
+                    enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
                 )
             )
         elif args.command == "uninstall":
@@ -3527,6 +3613,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     home=args.home,
                     codex_home=args.codex_home,
                     claude_home=args.claude_home,
+                    gemini_home=getattr(args, "gemini_home", None),
                 )
             )
         else:
@@ -3578,6 +3665,8 @@ def prepare_args(args: argparse.Namespace) -> None:
         args.codex_home = None
     if not hasattr(args, "claude_home"):
         args.claude_home = None
+    if not hasattr(args, "gemini_home"):
+        args.gemini_home = None
     if not hasattr(args, "editable") or args.editable is None:
         args.editable = False
     if not hasattr(args, "pypi") or args.pypi is None:
