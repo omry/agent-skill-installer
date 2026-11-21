@@ -96,6 +96,13 @@ def preserve_terminal_state():
             pass
 
 
+def expand_prompt_path(value: str, fallback: Path) -> Path:
+    try:
+        return Path(value).expanduser() if value.strip() else fallback
+    except (RuntimeError, ValueError):
+        return Path(value)
+
+
 def focus_prompt_action(app, focused_id: str | None, button_type, offset: int) -> None:
     try:
         current_index = ACTION_BUTTON_IDS.index(focused_id or "")
@@ -144,6 +151,7 @@ class Prompter(Protocol):
         command_preview_builder: CommandPreviewBuilder | None = None,
         summary: str | None = None,
         summary_builder: CommandPreviewBuilder | None = None,
+        validator: PromptValidator | None = None,
         submit_label: str = DEFAULT_SUBMIT_LABEL,
     ) -> Path:
         ...
@@ -273,7 +281,7 @@ class TextualPrompter:
         if result is None:
             raise KeyboardInterrupt
         value = str(result).strip()
-        return Path(value).expanduser() if value else default
+        return expand_prompt_path(value, default)
 
     def text(
         self,
@@ -969,7 +977,7 @@ def make_textual_checkbox_app(
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
                 yield PromptSelectionList(*selections, id="choices")
-                yield Static("", id="error")
+                yield Static("", id="error", markup=False)
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
                     yield PromptButton("Back (ESC)", id="back")
@@ -1245,7 +1253,7 @@ def run_textual_path(
             with Vertical(id="dialog"):
                 yield Static(message, id="message")
                 yield PromptInput(value=str(default), id="path")
-                yield Static("", id="error")
+                yield Static("", id="error", markup=False)
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
                     yield PromptButton("Back (ESC)", id="back")
@@ -1296,7 +1304,7 @@ def run_textual_path(
         def update_command_preview(self, value: str) -> None:
             if command_preview_builder is None:
                 return
-            path = Path(value).expanduser() if value.strip() else default
+            path = expand_prompt_path(value, default)
             self.current_command_preview = command_preview_builder(path)
             current_summary = (
                 summary_builder(path)
@@ -1317,7 +1325,7 @@ def run_textual_path(
         def update_installation_summary(self, value: str) -> None:
             if summary_builder is None:
                 return
-            path = Path(value).expanduser() if value.strip() else default
+            path = expand_prompt_path(value, default)
             update_installation_summary_display(
                 self,
                 summary_builder(path),
@@ -1683,7 +1691,7 @@ def make_textual_version_app(
                 )
                 if option_values:
                     yield VersionOptions(*option_values, id="version-options")
-                yield Static("", id="error")
+                yield Static("", id="error", markup=False)
                 with Horizontal(id="actions"):
                     yield PromptButton(submit_label, id="continue", variant="primary")
                     yield PromptButton("Back (ESC)", id="back")
