@@ -207,3 +207,99 @@ installer:
 
     assert config.installer.payload.include == ["SKILL.md", "bin/**"]
     assert config.installer.payload.exclude == ["bin/cache/**"]
+
+
+def test_loads_gemini_agent_config_and_hooks(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path / "agent-skill-installer.yaml",
+        """
+installer:
+  version: 1
+  shared:
+    instructions:
+      discoverability:
+        title: Memory Workflow
+        body: Use memory workflow for session snapshots.
+  agents:
+    gemini:
+      version: 1
+      requires:
+        gemini_cli: ">=0.20.0"
+      instructions: ${installer.shared.instructions.discoverability}
+      hooks:
+        PreCompress:
+          - matcher: "*"
+            sequential: true
+            hooks:
+              - type: skill-command
+                executable: scripts/save_memory.py
+                args: [snapshot]
+                name: save-memory
+                timeout: 15000
+                description: Save session memory before compression
+      hooks_direct:
+        FutureGeminiEvent:
+          - hooks:
+              - type: skill-command
+                executable: scripts/future.py
+                futureField: accepted here
+""",
+    )
+
+    config = load_installer_config(config_path)
+
+    gemini = config.installer.agents.gemini
+    assert gemini is not None
+    assert gemini.version == 1
+    assert gemini.requires.gemini_cli == ">=0.20.0"
+    assert gemini.instructions is not None
+    assert gemini.instructions.title == "Memory Workflow"
+    assert gemini.instructions.body == "Use memory workflow for session snapshots."
+    group = gemini.hooks["PreCompress"][0]
+    assert group.matcher == "*"
+    assert group.sequential is True
+    hook = group.hooks[0]
+    assert hook.type == "skill-command"
+    assert hook.executable == "scripts/save_memory.py"
+    assert hook.args == ["snapshot"]
+    assert hook.name == "save-memory"
+    assert hook.timeout == 15000
+    assert hook.description == "Save session memory before compression"
+    assert gemini.hooks_direct["FutureGeminiEvent"][0]["hooks"][0]["futureField"] == (
+        "accepted here"
+    )
+
+
+def test_rejects_unknown_gemini_hook_field_and_unsupported_version(
+    tmp_path: Path,
+) -> None:
+    bad_field = write_config(
+        tmp_path / "bad-field.yaml",
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        BeforeTool:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                statusMessage: codex-only field
+""",
+    )
+    with pytest.raises(InstallerConfigError) as error:
+        load_installer_config(bad_field)
+    assert "installer.agents.gemini.hooks.BeforeTool" in str(error.value)
+    assert "statusMessage" in str(error.value)
+
+    bad_version = write_config(
+        tmp_path / "bad-version.yaml",
+        """
+installer:
+  agents:
+    gemini:
+      version: 2
+""",
+    )
+    with pytest.raises(InstallerConfigError, match="installer.agents.gemini.version"):
+        load_installer_config(bad_version)

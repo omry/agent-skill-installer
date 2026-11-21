@@ -19,12 +19,21 @@ from .codex import (
     materialize_codex_hooks,
 )
 from .common import AgentInstructions
+from .gemini import (
+    GeminiAgentConfig,
+    GeminiHookMatcher,
+    GeminiHooks,
+    GeminiRequires,
+    GeminiSkillCommandHook,
+    materialize_gemini_hooks,
+)
 
 
 @dataclass
 class AgentConfigs:
     codex: CodexAgentConfig | None = None
     claude: ClaudeAgentConfig | None = None
+    gemini: GeminiAgentConfig | None = None
 
 
 __all__ = [
@@ -40,6 +49,12 @@ __all__ = [
     "CodexHooks",
     "CodexRequires",
     "CodexSkillCommandHook",
+    "GeminiAgentConfig",
+    "GeminiHookMatcher",
+    "GeminiHooks",
+    "GeminiRequires",
+    "GeminiSkillCommandHook",
     "materialize_claude_hooks",
     "materialize_codex_hooks",
+    "materialize_gemini_hooks",
 ]

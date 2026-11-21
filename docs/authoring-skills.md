@@ -42,7 +42,7 @@ frontmatter is real YAML metadata delimited by `---`; it is not a Markdown
 comment. If present, it must parse as a YAML mapping. The installer validates
 the frontmatter before installing or replacing a skill, so syntax errors such
 as an unquoted `: ` inside a plain scalar fail early instead of producing a
-skill that Codex or Claude Code cannot load.
+skill that Codex, Claude Code, or Gemini CLI cannot load.
 
 The installer reads only `name`, `description`, and `version`:
 
@@ -69,8 +69,8 @@ for their own skill discovery, so published Codex skills should include valid
 ## Optional Installer Config
 
 `agent-skill-installer.yaml` is optional. Put it next to `SKILL.md` when you
-want to customize the discoverability block written to `AGENTS.md` or
-`CLAUDE.md`, or install supported agent runtime hooks.
+want to customize the discoverability block written to `AGENTS.md`,
+`CLAUDE.md`, or `GEMINI.md`, or install supported agent runtime hooks.
 
 ```yaml
 installer:
@@ -93,19 +93,34 @@ installer:
       instructions:
         title: My Skill
         body: Use this skill when working on my project workflows.
+    gemini:
+      instructions:
+        title: My Skill
+        body: Use this skill when working on my project workflows.
+      hooks:
+        SessionStart:
+          - matcher: startup
+            hooks:
+              - type: skill-command
+                executable: scripts/my-skill-helper
+                args: [prepare]
+                name: my-skill-prepare
+                timeout: 30000
+                description: Preparing My Skill
 ```
 
 When this file is omitted, the installer writes a default discoverability block
 using the skill name and description. The default trigger text is `$<skill_name>`
-for Codex and `/<skill_name>` for Claude Code.
+for Codex, `/<skill_name>` for Claude Code, and skill activation by name
+(`Activate the \`<skill_name>\` skill...`) for Gemini CLI.
 
 ### Trigger Names
 
-A skill answers to exactly one trigger, derived from its name: `$<skill_name>`
-for Codex and `/<skill_name>` for Claude Code. There is no alias field, so
-writing a different trigger into an `instructions` body does not register it.
-An authored body is copied verbatim, so keep any trigger it mentions in sync
-with the skill name by hand.
+A skill answers to its skill name: `$<skill_name>` for Codex, `/<skill_name>`
+for Claude Code, and `activate_skill` by skill name for Gemini CLI. There is no
+alias field, so writing a different trigger into an `instructions` body does not
+register it. An authored body is copied verbatim, so keep any trigger it
+mentions in sync with the skill name by hand.
 
 ### Payload File Selection
 
@@ -189,6 +204,7 @@ class InstallerRoot:
 class AgentConfigs:
     codex: CodexAgentConfig | None = None
     claude: ClaudeAgentConfig | None = None
+    gemini: GeminiAgentConfig | None = None
 
 @dataclass
 class CodexAgentConfig:
@@ -204,6 +220,14 @@ class ClaudeAgentConfig:
     requires: ClaudeRequires = field(default_factory=ClaudeRequires)
     instructions: AgentInstructions | None = None
     hooks: ClaudeHooks = field(default_factory=dict)
+    hooks_direct: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class GeminiAgentConfig:
+    version: int = 1
+    requires: GeminiRequires = field(default_factory=GeminiRequires)
+    instructions: AgentInstructions | None = None
+    hooks: GeminiHooks = field(default_factory=dict)
     hooks_direct: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -242,6 +266,23 @@ class ClaudeHookMatcher:
     hooks: list[ClaudeHook] = field(default_factory=list)
 
 ClaudeHooks = dict[str, list[ClaudeHookMatcher]]
+
+@dataclass
+class GeminiSkillCommandHook:
+    type: str = "skill-command"
+    executable: str
+    args: list[str] = field(default_factory=list)
+    name: str | None = None
+    timeout: int | None = None
+    description: str | None = None
+
+@dataclass
+class GeminiHookMatcher:
+    matcher: str | None = None
+    sequential: bool | None = None
+    hooks: list[GeminiSkillCommandHook] = field(default_factory=list)
+
+GeminiHooks = dict[str, list[GeminiHookMatcher]]
 ```
 
 The agent schemas live in separate modules because their matcher and handler
@@ -250,11 +291,17 @@ shared enum, so a new native event does not require an installer schema release.
 
 For Codex targets, `hooks` skill-command handlers are merged into the target's
 native `hooks.json`: `.codex/hooks.json` for a directory target and
-`~/.codex/hooks.json` for a global target. `hooks_direct` uses the same event
-mapping but permits additional native matcher and handler fields. Both forms
-require `type: skill-command`; legacy packaged `type: command` declarations are
+`~/.codex/hooks.json` for a global target. For Gemini CLI targets, `hooks`
+skill-command handlers are merged into the `hooks` object of the target's
+native `settings.json`: `.gemini/settings.json` for a directory target and
+`~/.gemini/settings.json` for a global target. `hooks_direct` uses the same
+event mapping but permits additional native matcher and handler fields. Both
+forms require `type: skill-command`; legacy packaged `type: command` declarations are
 rejected with a migration error rather than reinterpreted. Existing top-level
 settings, events, and matcher groups are preserved.
+Gemini's native line and block comments in `settings.json` are also preserved
+when ASI updates its owned hook groups.
+In Gemini CLI, hook `timeout` values are in milliseconds.
 
 `executable` is a normalized POSIX-style path relative to the installed skill
 root. It must name a regular file in the final staged payload. Absolute paths,
@@ -280,12 +327,14 @@ owner is gone. An identical group that already existed before installation is
 treated as user-owned and is not removed later.
 
 Codex still requires the user to review and trust new or changed hooks with
-`/hooks`; installation never grants trust automatically. Claude hook declarations
-are parsed against the Claude-specific schema, but runtime installation is not
-yet supported and fails without changing the target.
+`/hooks`; installation never grants trust automatically. Gemini CLI hooks can
+also be reviewed with `/hooks`. Claude hook declarations are parsed against the
+Claude-specific schema, but runtime installation is not yet supported and fails
+without changing the target.
 
-This support manages standalone native `hooks.json` entries only. Packaging and
-installing Codex plugin-provided hooks or MCP servers is tracked separately in
+This support manages standalone native `hooks.json` (Codex) and `settings.json`
+`hooks` (Gemini CLI) entries only. Packaging and installing Codex
+plugin-provided hooks or MCP servers is tracked separately in
 [issue #14](https://github.com/omry/agent-skill-installer/issues/14).
 
 You can check a config file directly from Python:

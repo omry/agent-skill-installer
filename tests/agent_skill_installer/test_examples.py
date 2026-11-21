@@ -262,3 +262,50 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
         in uninstall.stdout
     )
     assert not skill_dir.exists()
+
+    gemini_install = run_example(
+        [
+            sys.executable,
+            str(script),
+            "install",
+            "--agent",
+            "gemini",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+    assert gemini_install.returncode == 0, gemini_install.stderr
+    assert (
+        "Installed api-demo-agent-skill 0.1.0 to Gemini CLI repo:"
+        in gemini_install.stdout
+    )
+    gemini_skill_dir = repo / ".gemini" / "skills" / "api-demo-agent-skill"
+    assert "API Demo Agent Skill" in gemini_skill_dir.joinpath("SKILL.md").read_text()
+    assert "<!-- API-DEMO-AGENT-SKILL-DISCOVERABILITY-START -->" in repo.joinpath(
+        "GEMINI.md"
+    ).read_text()
+
+    gemini_uninstall = run_example(
+        [
+            sys.executable,
+            str(script),
+            "uninstall",
+            "--agent",
+            "gemini",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        pythonpath=pythonpath,
+    )
+    assert gemini_uninstall.returncode == 0, gemini_uninstall.stderr
+    assert (
+        "Removed api-demo-agent-skill 0.1.0 from Gemini CLI repo:"
+        in gemini_uninstall.stdout
+    )
+    assert not gemini_skill_dir.exists()
+    assert not repo.joinpath("GEMINI.md").exists()
