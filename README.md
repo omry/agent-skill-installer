@@ -6,7 +6,7 @@
 | Status | [![CI](https://github.com/omry/agent-skill-installer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/omry/agent-skill-installer/actions/workflows/ci.yml) [![Publish](https://github.com/omry/agent-skill-installer/actions/workflows/publish.yml/badge.svg)](https://github.com/omry/agent-skill-installer/actions/workflows/publish.yml) |
 | Docs and support | [![Zulip chat](https://img.shields.io/badge/chat-Zulip-2e77d0?logo=zulip)](https://hydra-framework.zulipchat.com/#narrow/channel/agent-skill-installer) |
 
-`agent-skill-installer` installs agent skills for Codex and Claude Code from
+`agent-skill-installer` installs agent skills for Codex, Claude Code, and Gemini CLI from
 local skill directories, GitHub repositories, or PyPI wheels. It supports
 directory and global install targets, can assert directory targets are Git or
 Sapling repositories with `--repo`, writes discoverability blocks into the agent
