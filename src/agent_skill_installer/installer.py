@@ -59,7 +59,7 @@ PYPI_METADATA_TIMEOUT_SECONDS = 2.0
 PYPI_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 GITHUB_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 DEFAULT_GITHUB_REF = "main"
-AGENTS = ("codex", "claude", "gemini")
+AGENTS = ("codex", "claude", "gemini", "antigravity")
 SCOPES = ("dir", "global")
 INSTALLER_METADATA_FILE_NAMES = frozenset({CONFIG_FILE_NAME})
 
@@ -149,6 +149,8 @@ class SkillProject:
             return agents.claude
         if agent == "gemini":
             return agents.gemini
+        if agent == "antigravity":
+            return agents.antigravity
         raise InstallerError(f"unknown agent target: {agent}")
 
     def hook_block(self, agent: str) -> str:
@@ -162,7 +164,7 @@ class SkillProject:
             )
         if agent in self.hook_blocks:
             return self.hook_blocks[agent]
-        if agent == "gemini":
+        if agent in {"gemini", "antigravity"}:
             return (
                 f"{self.marker_start}\n"
                 f"## {self.skill_name} Discoverability\n\n"
@@ -302,6 +304,7 @@ class TargetSpec:
     hook_block: str
     marker_start: str
     marker_end: str
+    hook_frontmatter: str | None = None
 
 
 @dataclass(frozen=True)
@@ -389,6 +392,7 @@ class RuntimeHookPlan:
     previous_owned_entries: dict[str, list[dict[str, object]]]
     created_file: bool
     format: str = "codex-hooks-json"
+    hook_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -438,6 +442,7 @@ class Installer:
         codex_home: Path | None = None,
         claude_home: Path | None = None,
         gemini_home: Path | None = None,
+        antigravity_home: Path | None = None,
         force: bool = False,
         editable: bool = False,
         pypi: bool = False,
@@ -457,6 +462,7 @@ class Installer:
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
             force=force,
             editable=editable,
             pypi=pypi,
@@ -478,6 +484,7 @@ class Installer:
         codex_home: Path | None = None,
         claude_home: Path | None = None,
         gemini_home: Path | None = None,
+        antigravity_home: Path | None = None,
     ) -> list[InstallResult]:
         return uninstall(
             self.project,
@@ -489,6 +496,7 @@ class Installer:
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
 
     def discover_managed_installations(
@@ -499,6 +507,7 @@ class Installer:
         codex_home: Path | None = None,
         claude_home: Path | None = None,
         gemini_home: Path | None = None,
+        antigravity_home: Path | None = None,
     ) -> list[InstallationStatus]:
         return discover_managed_installations(
             self.project,
@@ -507,6 +516,7 @@ class Installer:
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
 
     def inspect_installations(
@@ -517,6 +527,7 @@ class Installer:
         codex_home: Path | None = None,
         claude_home: Path | None = None,
         gemini_home: Path | None = None,
+        antigravity_home: Path | None = None,
     ) -> list[InstallationStatus]:
         return inspect_installations(
             self.project,
@@ -525,6 +536,7 @@ class Installer:
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
 
     def published_pypi_versions(
@@ -1114,6 +1126,9 @@ def resolve_agent_home(
     return resolve_home(default_user_home) / default_name
 
 
+ANTIGRAVITY_RULE_FRONTMATTER = "---\ntrigger: always_on\n---"
+
+
 def target_spec(
     project: SkillProject,
     agent: str,
@@ -1125,6 +1140,7 @@ def target_spec(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> TargetSpec:
     if agent not in AGENTS:
         raise InstallerError(f"unknown agent target: {agent}")
@@ -1159,19 +1175,30 @@ def target_spec(
             "hook_file": "GEMINI.md",
             "runtime_hook_file": "settings.json",
         },
+        "antigravity": {
+            "default_home": ".gemini/config",
+            "repo_dir": ".agents",
+            "hook_file": None,
+            "runtime_hook_file": "hooks.json",
+        },
     }
     layout = layouts[agent]
     override_homes = {
         "codex": codex_home,
         "claude": claude_home,
         "gemini": gemini_home,
+        "antigravity": antigravity_home,
     }
     override_home = override_homes[agent]
     runtime_hook_file = layout["runtime_hook_file"]
     default_home = layout["default_home"]
     repo_dir = layout["repo_dir"]
     hook_file = layout["hook_file"]
-    assert default_home is not None and repo_dir is not None and hook_file is not None
+    assert default_home is not None and repo_dir is not None
+
+    hook_frontmatter = (
+        ANTIGRAVITY_RULE_FRONTMATTER if agent == "antigravity" else None
+    )
 
     if scope == "global":
         agent_dir = resolve_agent_home(
@@ -1180,14 +1207,22 @@ def target_spec(
             default_name=default_home,
         )
         skill_dir = agent_dir / "skills" / project.skill_name
-        hook_path = agent_dir / hook_file
+        hook_path = (
+            agent_dir / "rules" / f"{project.skill_name}.md"
+            if agent == "antigravity"
+            else agent_dir / (hook_file or "")
+        )
         runtime_hook_path = (
             agent_dir / runtime_hook_file if runtime_hook_file is not None else None
         )
     else:
         assert repo_root is not None
         skill_dir = repo_root / repo_dir / "skills" / project.skill_name
-        hook_path = repo_root / hook_file
+        hook_path = (
+            repo_root / repo_dir / "rules" / f"{project.skill_name}.md"
+            if agent == "antigravity"
+            else repo_root / (hook_file or "")
+        )
         runtime_hook_path = (
             repo_root / repo_dir / runtime_hook_file
             if runtime_hook_file is not None
@@ -1204,6 +1239,7 @@ def target_spec(
         hook_block=project.hook_block(agent),
         marker_start=project.marker_start,
         marker_end=project.marker_end,
+        hook_frontmatter=hook_frontmatter,
     )
 
 
@@ -1358,6 +1394,7 @@ def discover_managed_installations(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> list[InstallationStatus]:
     statuses: list[InstallationStatus] = []
     seen: set[Path] = set()
@@ -1376,6 +1413,7 @@ def discover_managed_installations(
                         codex_home=codex_home,
                         claude_home=claude_home,
                         gemini_home=gemini_home,
+                        antigravity_home=antigravity_home,
                     )
                 except InstallerError:
                     continue
@@ -1398,6 +1436,7 @@ def inspect_installation(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> InstallationStatus:
     try:
         spec = target_spec(
@@ -1410,6 +1449,7 @@ def inspect_installation(
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
     except InstallerError as error:
         return InstallationStatus(
@@ -1471,6 +1511,7 @@ def inspect_installations(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> list[InstallationStatus]:
     return [
         inspect_installation(
@@ -1483,6 +1524,7 @@ def inspect_installations(
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
         for agent in AGENTS
         for scope in SCOPES
@@ -2284,16 +2326,73 @@ def remove_marked_block(
     return "\n\n".join(parts) + "\n", True
 
 
+def is_empty_hook_content(
+    text: str,
+    *,
+    hook_frontmatter: str | None = None,
+) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if hook_frontmatter is not None and stripped == hook_frontmatter.strip():
+        return True
+    return False
+
+
 def install_hook(spec: TargetSpec) -> None:
-    existing = spec.hook_path.read_text() if spec.hook_path.exists() else ""
-    spec.hook_path.write_text(
-        replace_marked_block(
-            existing,
-            spec.hook_block,
-            start_marker=spec.marker_start,
-            end_marker=spec.marker_end,
+    if spec.hook_path.exists():
+        existing = (
+            spec.hook_path.read_bytes().decode("utf-8")
+            if spec.agent == "antigravity"
+            else spec.hook_path.read_text(encoding="utf-8")
         )
+    else:
+        existing = ""
+    if not existing.strip() and spec.hook_frontmatter:
+        existing = spec.hook_frontmatter.rstrip() + "\n"
+    spec.hook_path.parent.mkdir(parents=True, exist_ok=True)
+    updated = replace_marked_block(
+        existing,
+        spec.hook_block,
+        start_marker=spec.marker_start,
+        end_marker=spec.marker_end,
     )
+    if spec.agent == "antigravity":
+        spec.hook_path.write_bytes(updated.encode("utf-8"))
+    else:
+        spec.hook_path.write_text(updated, encoding="utf-8")
+
+
+def validate_antigravity_rule_activation(spec: TargetSpec) -> None:
+    if spec.agent != "antigravity" or not spec.hook_path.exists():
+        return
+    try:
+        existing = spec.hook_path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise InstallerError(
+            f"failed to read Antigravity rule file {spec.hook_path}: {error}"
+        ) from error
+    if is_empty_hook_content(existing, hook_frontmatter=spec.hook_frontmatter):
+        return
+    frontmatter = skill_frontmatter(existing, spec.hook_path)
+    if frontmatter is None:
+        raise InstallerError(
+            "existing Antigravity rule must declare trigger: always_on: "
+            f"{spec.hook_path}"
+        )
+    try:
+        loaded = OmegaConf.create(frontmatter)
+        parsed = OmegaConf.to_container(loaded, resolve=False)
+    except (OmegaConfBaseException, YAMLError) as error:
+        raise InstallerError(
+            f"invalid Antigravity rule YAML frontmatter: {spec.hook_path}"
+        ) from error
+    if not isinstance(parsed, dict) or parsed.get("trigger") != "always_on":
+        trigger = parsed.get("trigger") if isinstance(parsed, dict) else None
+        raise InstallerError(
+            "existing Antigravity rule has incompatible trigger; "
+            f"expected always_on, found {trigger!r}: {spec.hook_path}"
+        )
 
 
 def plan_uninstall_hook(
@@ -2304,8 +2403,18 @@ def plan_uninstall_hook(
 ) -> tuple[str, bool] | None:
     if not spec.hook_path.exists():
         return None
+    try:
+        existing = (
+            spec.hook_path.read_bytes().decode("utf-8")
+            if spec.agent == "antigravity"
+            else spec.hook_path.read_text(encoding="utf-8")
+        )
+    except UnicodeDecodeError as error:
+        raise InstallerError(
+            f"failed to read rule file as UTF-8: {spec.hook_path}"
+        ) from error
     return remove_marked_block(
-        spec.hook_path.read_text(),
+        existing,
         start_marker=start_marker or spec.marker_start,
         end_marker=end_marker or spec.marker_end,
     )
@@ -2322,10 +2431,16 @@ def apply_uninstall_hook(
     updated, changed = plan
     if not changed:
         return False
-    if updated or not delete_if_empty:
-        spec.hook_path.write_text(updated)
-    else:
+    if delete_if_empty and is_empty_hook_content(
+        updated,
+        hook_frontmatter=spec.hook_frontmatter,
+    ):
         spec.hook_path.unlink()
+    else:
+        if spec.agent == "antigravity":
+            spec.hook_path.write_bytes(updated.encode("utf-8"))
+        else:
+            spec.hook_path.write_text(updated, encoding="utf-8")
     return True
 
 
@@ -2349,15 +2464,23 @@ def uninstall_hook(
 
 CODEX_RUNTIME_HOOK_FORMAT = "codex-hooks-json"
 GEMINI_RUNTIME_HOOK_FORMAT = "gemini-settings-json"
+ANTIGRAVITY_RUNTIME_HOOK_FORMAT = "antigravity-hooks-json"
 RUNTIME_HOOK_FORMATS = {
     "codex": CODEX_RUNTIME_HOOK_FORMAT,
     "gemini": GEMINI_RUNTIME_HOOK_FORMAT,
+    "antigravity": ANTIGRAVITY_RUNTIME_HOOK_FORMAT,
 }
 RUNTIME_HOOK_LABELS = {
     "codex": "Codex hooks",
     "gemini": "Gemini hooks",
+    "antigravity": "Antigravity hooks",
 }
 GEMINI_HOOK_RESERVED_KEYS = frozenset({"enabled", "disabled", "notifications"})
+ANTIGRAVITY_HOOK_RESERVED_KEYS = frozenset({"enabled"})
+ANTIGRAVITY_GROUPED_HOOK_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
+ANTIGRAVITY_FLAT_HOOK_EVENTS = frozenset(
+    {"SessionStart", "PreInvocation", "PostInvocation", "Stop"}
+)
 
 
 def _without_none(value: object) -> object:
@@ -2570,6 +2693,11 @@ def _validated_declared_hook_entries(
                 f"installer.agents.{agent}.{field_name} cannot declare reserved "
                 f"Gemini hooks key: {event}"
             )
+        if agent == "antigravity" and event in ANTIGRAVITY_HOOK_RESERVED_KEYS:
+            raise InstallerError(
+                f"installer.agents.{agent}.{field_name} cannot declare reserved "
+                f"Antigravity hooks key: {event}"
+            )
         if not isinstance(raw_groups, list):
             raise InstallerError(
                 f"installer.agents.{agent}.{field_name}.{event} must be a list"
@@ -2603,6 +2731,68 @@ def _validated_declared_hook_entries(
                         installed_skill_dir=installed_skill_dir,
                     )
                 )
+            if agent == "antigravity":
+                raw_matcher = raw_group.get("matcher")
+                if event in ANTIGRAVITY_FLAT_HOOK_EVENTS:
+                    if raw_matcher is not None:
+                        raise InstallerError(
+                            f"installer.agents.{agent}.{field_name}.{event}[{index}]"
+                            f".matcher is not supported for flat Antigravity event "
+                            f"{event}"
+                        )
+                    extra_keys = {
+                        key
+                        for key, value in raw_group.items()
+                        if key not in {"matcher", "hooks"} and value is not None
+                    }
+                    if extra_keys:
+                        raise InstallerError(
+                            f"installer.agents.{agent}.{field_name}.{event}[{index}] "
+                            f"cannot set group fields on flat Antigravity event "
+                            f"{event}: {', '.join(sorted(extra_keys))}"
+                        )
+                    for handler in native_handlers:
+                        cleaned = _without_none(handler)
+                        assert isinstance(cleaned, dict)
+                        try:
+                            json.dumps(cleaned)
+                        except (TypeError, ValueError) as error:
+                            raise InstallerError(
+                                f"{field_name} hook handler for {event} is not JSON "
+                                "serializable"
+                            ) from error
+                        _append_unique_hook_group(normalized, event, cleaned)
+                    continue
+                if event in ANTIGRAVITY_GROUPED_HOOK_EVENTS or raw_matcher is not None:
+                    matcher_value = "*" if raw_matcher is None else raw_matcher
+                    native_group = {
+                        **raw_group,
+                        "matcher": matcher_value,
+                        "hooks": native_handlers,
+                    }
+                    group = _without_none(native_group)
+                    assert isinstance(group, dict)
+                    try:
+                        json.dumps(group)
+                    except (TypeError, ValueError) as error:
+                        raise InstallerError(
+                            f"{field_name} hook group for {event} is not JSON "
+                            "serializable"
+                        ) from error
+                    _append_unique_hook_group(normalized, event, group)
+                    continue
+                for handler in native_handlers:
+                    cleaned = _without_none(handler)
+                    assert isinstance(cleaned, dict)
+                    try:
+                        json.dumps(cleaned)
+                    except (TypeError, ValueError) as error:
+                        raise InstallerError(
+                            f"{field_name} hook handler for {event} is not JSON "
+                            "serializable"
+                        ) from error
+                    _append_unique_hook_group(normalized, event, cleaned)
+                continue
             native_group = {**raw_group, "hooks": native_handlers}
             group = _without_none(native_group)
             assert isinstance(group, dict)
@@ -2944,6 +3134,48 @@ def read_runtime_hooks_document(
     return data
 
 
+def read_antigravity_hooks_document(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise InstallerError(f"invalid Antigravity hooks JSON: {path}") from error
+    except OSError as error:
+        raise InstallerError(
+            f"failed to read Antigravity hooks file {path}: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise InstallerError(
+            f"Antigravity hooks file must contain a JSON object: {path}"
+        )
+    for hook_name, spec in data.items():
+        if not isinstance(hook_name, str) or not isinstance(spec, dict):
+            raise InstallerError(
+                f"invalid Antigravity hook entry in {path}"
+            )
+        for key, value in spec.items():
+            if not isinstance(key, str):
+                raise InstallerError(
+                    f"invalid Antigravity hook event mapping for {hook_name} in {path}"
+                )
+            if key == "enabled":
+                if not isinstance(value, bool):
+                    raise InstallerError(
+                        f"invalid Antigravity hook setting for {hook_name}.enabled in {path}"
+                    )
+                continue
+            if not isinstance(value, list):
+                raise InstallerError(
+                    f"invalid Antigravity hook event mapping for {hook_name}.{key} in {path}"
+                )
+            if any(not isinstance(item, dict) for item in value):
+                raise InstallerError(
+                    f"invalid Antigravity hook handler for {hook_name}.{key} in {path}"
+                )
+    return data
+
+
 def read_codex_hooks_document(path: Path) -> dict[str, object]:
     return read_runtime_hooks_document(path, agent="codex")
 
@@ -2995,7 +3227,7 @@ def runtime_hook_manifest_record(
     manifest: dict[str, object] | None,
     *,
     source: Path | str,
-) -> tuple[Path, dict[str, list[dict[str, object]]], bool] | None:
+) -> tuple[Path, dict[str, list[dict[str, object]]], bool, str | None] | None:
     if manifest is None or manifest.get("runtime_hooks") is None:
         return None
     record = manifest.get("runtime_hooks")
@@ -3021,6 +3253,14 @@ def runtime_hook_manifest_record(
     raw_entries = record.get("entries")
     if not isinstance(raw_path, str) or not isinstance(raw_entries, dict):
         raise InstallerError(f"invalid runtime hook ownership in manifest: {source}")
+    hook_name: str | None = None
+    if record_format == ANTIGRAVITY_RUNTIME_HOOK_FORMAT:
+        raw_hook_name = record.get("hook_name")
+        if not isinstance(raw_hook_name, str) or not raw_hook_name:
+            raise InstallerError(
+                f"invalid runtime hook ownership in manifest: {source}"
+            )
+        hook_name = raw_hook_name
     entries: dict[str, list[dict[str, object]]] = {}
     for event, groups in raw_entries.items():
         if (
@@ -3032,7 +3272,7 @@ def runtime_hook_manifest_record(
                 f"invalid runtime hook ownership in manifest: {source}"
             )
         entries[event] = groups
-    return Path(raw_path), entries, record.get("created_file") is True
+    return Path(raw_path), entries, record.get("created_file") is True, hook_name
 
 
 def sibling_runtime_hook_ownership(
@@ -3040,6 +3280,7 @@ def sibling_runtime_hook_ownership(
     runtime_path: Path,
     *,
     exclude: Iterable[Path] = (),
+    hook_name: str | None = None,
 ) -> tuple[dict[str, list[dict[str, object]]], bool]:
     excluded = set(exclude)
     entries: dict[str, list[dict[str, object]]] = {}
@@ -3051,7 +3292,7 @@ def sibling_runtime_hook_ownership(
         record = runtime_hook_manifest_record(manifest, source=candidate)
         if record is None:
             continue
-        path, owned, record_created_file = record
+        path, owned, record_created_file, record_hook_name = record
         if (
             manifest.get("agent") != spec.agent
             or manifest.get("scope") != spec.scope
@@ -3059,6 +3300,8 @@ def sibling_runtime_hook_ownership(
         ):
             continue
         created_file = created_file or record_created_file
+        if hook_name is not None and record_hook_name != hook_name:
+            continue
         for event, groups in owned.items():
             for group in groups:
                 _append_unique_hook_group(entries, event, group)
@@ -3088,17 +3331,27 @@ def plan_runtime_hooks(
         return None
     runtime_path = spec.runtime_hook_path
     assert runtime_path is not None
+    hook_name = project.skill_name if spec.agent == "antigravity" else None
     if previous_record is None:
         previous_owned_entries: dict[str, list[dict[str, object]]] = {}
         previous_created_file = False
     else:
-        previous_path, previous_owned_entries, previous_created_file = previous_record
+        (
+            previous_path,
+            previous_owned_entries,
+            previous_created_file,
+            previous_hook_name,
+        ) = previous_record
         if previous_path != runtime_path:
             raise InstallerError(
                 "installed runtime hook path does not match the selected target: "
                 f"{previous_path} != {runtime_path}"
             )
-    preserve_existing_hooks = not enable_hooks and bool(previous_owned_entries)
+        if spec.agent == "antigravity" and previous_hook_name is not None:
+            hook_name = previous_hook_name
+    preserve_existing_hooks = (
+        spec.agent == "gemini" and not enable_hooks and bool(previous_owned_entries)
+    )
     if not enable_hooks:
         # Skipping consent for a new install must not disable hooks the user
         # explicitly enabled during an earlier install or upgrade.
@@ -3106,9 +3359,17 @@ def plan_runtime_hooks(
     if not desired_entries and not previous_owned_entries:
         return None
 
-    document = read_runtime_hooks_document(runtime_path, agent=spec.agent)
-    existing = document["hooks"]
-    assert isinstance(existing, dict)
+    if spec.agent == "antigravity":
+        assert hook_name is not None
+        document = read_antigravity_hooks_document(runtime_path)
+        existing_spec = document.get(hook_name, {})
+        assert isinstance(existing_spec, dict)
+        existing: dict[str, object] = existing_spec
+    else:
+        document = read_runtime_hooks_document(runtime_path, agent=spec.agent)
+        existing_hooks = document["hooks"]
+        assert isinstance(existing_hooks, dict)
+        existing = existing_hooks
     if preserve_existing_hooks:
         for event, groups in declared_runtime_hook_entries(
             project,
@@ -3133,6 +3394,7 @@ def plan_runtime_hooks(
         spec,
         runtime_path,
         exclude=excluded,
+        hook_name=hook_name,
     )
     owned_entries: dict[str, list[dict[str, object]]] = {}
     for event, groups in desired_entries.items():
@@ -3154,6 +3416,7 @@ def plan_runtime_hooks(
             previous_created_file or sibling_created_file or not runtime_path.exists()
         ),
         format=RUNTIME_HOOK_FORMATS[spec.agent],
+        hook_name=hook_name,
     )
 
 
@@ -3166,15 +3429,64 @@ def apply_runtime_hook_plan(
     if plan is None:
         return
     path_existed = plan.path.exists()
-    document = read_runtime_hooks_document(plan.path, agent=staged.spec.agent)
-    hooks = document["hooks"]
-    assert isinstance(hooks, dict)
-    changed = False
     sibling_owned, _ = sibling_runtime_hook_ownership(
         staged.spec,
         plan.path,
         exclude=[current_manifest],
+        hook_name=plan.hook_name,
     )
+    if staged.spec.agent == "antigravity":
+        assert plan.hook_name is not None
+        document = read_antigravity_hooks_document(plan.path)
+        changed = False
+        existing_spec = document.get(plan.hook_name)
+        if isinstance(existing_spec, dict):
+            for event, groups in plan.previous_owned_entries.items():
+                event_groups = existing_spec.get(event)
+                if not isinstance(event_groups, list):
+                    continue
+                for group in groups:
+                    if (
+                        group not in plan.desired_entries.get(event, [])
+                        and group not in sibling_owned.get(event, [])
+                        and group in event_groups
+                    ):
+                        event_groups.remove(group)
+                        changed = True
+                if not event_groups:
+                    existing_spec.pop(event, None)
+                    changed = True
+            if not existing_spec:
+                document.pop(plan.hook_name, None)
+                changed = True
+        if plan.desired_entries:
+            hook_spec = document.setdefault(plan.hook_name, {})
+            assert isinstance(hook_spec, dict)
+            for event, groups in plan.desired_entries.items():
+                event_groups = hook_spec.setdefault(event, [])
+                assert isinstance(event_groups, list)
+                for group in groups:
+                    if group not in event_groups:
+                        event_groups.append(group)
+                        changed = True
+        if plan.created_file and not document:
+            if plan.path.is_symlink():
+                if path_existed and changed:
+                    write_runtime_hooks_document(plan.path, document)
+            else:
+                plan.path.unlink(missing_ok=True)
+            return
+        if not path_existed and not document:
+            return
+        if not changed:
+            return
+        write_runtime_hooks_document(plan.path, document)
+        return
+
+    document = read_runtime_hooks_document(plan.path, agent=staged.spec.agent)
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    changed = False
     for event, groups in plan.previous_owned_entries.items():
         event_groups = hooks.get(event)
         if not isinstance(event_groups, list):
@@ -3234,22 +3546,60 @@ def uninstall_runtime_hooks(
     )
     if record is None:
         return None
-    runtime_path, owned_entries, created_file = record
+    runtime_path, owned_entries, created_file, hook_name = record
     if spec.runtime_hook_path is None or runtime_path != spec.runtime_hook_path:
         raise InstallerError(
             "installed runtime hook path does not match the selected target: "
             f"{runtime_path} != {spec.runtime_hook_path}"
         )
     path_existed = runtime_path.exists()
-    document = read_runtime_hooks_document(runtime_path, agent=spec.agent)
-    hooks = document["hooks"]
-    assert isinstance(hooks, dict)
-    changed = False
     sibling_owned, _ = sibling_runtime_hook_ownership(
         spec,
         runtime_path,
         exclude=[] if manifest_file is None else [manifest_file],
+        hook_name=hook_name,
     )
+    if spec.agent == "antigravity":
+        assert hook_name is not None
+        document = read_antigravity_hooks_document(runtime_path)
+        changed = False
+        existing_spec = document.get(hook_name)
+        if isinstance(existing_spec, dict):
+            for event, groups in owned_entries.items():
+                event_groups = existing_spec.get(event)
+                if not isinstance(event_groups, list):
+                    continue
+                for group in groups:
+                    if (
+                        group not in sibling_owned.get(event, [])
+                        and group in event_groups
+                    ):
+                        event_groups.remove(group)
+                        changed = True
+                if not event_groups:
+                    existing_spec.pop(event, None)
+                    changed = True
+            if not existing_spec:
+                document.pop(hook_name, None)
+                changed = True
+        if created_file and not document:
+            if runtime_path.is_symlink():
+                if path_existed and changed:
+                    write_runtime_hooks_document(runtime_path, document)
+            else:
+                runtime_path.unlink(missing_ok=True)
+        elif not path_existed and not document:
+            pass
+        elif not changed:
+            pass
+        else:
+            write_runtime_hooks_document(runtime_path, document)
+        return runtime_path
+
+    document = read_runtime_hooks_document(runtime_path, agent=spec.agent)
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    changed = False
     for event, groups in owned_entries.items():
         event_groups = hooks.get(event)
         if not isinstance(event_groups, list):
@@ -3385,12 +3735,15 @@ def write_manifest(
             for wheel in external_wheels
         ]
     if runtime_hooks is not None:
-        data["runtime_hooks"] = {
+        runtime_record: dict[str, object] = {
             "format": runtime_hooks.format,
             "path": str(runtime_hooks.path),
             "created_file": runtime_hooks.created_file,
             "entries": runtime_hooks.owned_entries,
         }
+        if runtime_hooks.hook_name is not None:
+            runtime_record["hook_name"] = runtime_hooks.hook_name
+        data["runtime_hooks"] = runtime_record
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
@@ -3414,6 +3767,7 @@ def sibling_created_ownership(
 ) -> tuple[list[Path], bool]:
     created_dirs: list[Path] = []
     created_hook_file = False
+    target_directories = set(spec.skill_dir.parents) | set(spec.hook_path.parents)
     current_manifest = spec.skill_dir / "scripts" / f".{skill_name}-install.json"
     current_sidecar = spec.skill_dir.parent / f".{skill_name}-install.json"
     for candidate in sibling_manifest_candidates(spec.skill_dir.parent):
@@ -3427,14 +3781,24 @@ def sibling_created_ownership(
             continue
         if data.get("agent") != spec.agent or data.get("scope") != spec.scope:
             continue
-        if data.get("hook_path") != str(spec.hook_path):
+        sibling_skill_dir = data.get("skill_dir")
+        if not isinstance(sibling_skill_dir, str):
             continue
-        if data.get("created_hook_file") is True:
+        sibling_skill_dir = Path(sibling_skill_dir)
+        if (
+            sibling_skill_dir == spec.skill_dir
+            or sibling_skill_dir.parent != spec.skill_dir.parent
+        ):
+            continue
+        if (
+            data.get("hook_path") == str(spec.hook_path)
+            and data.get("created_hook_file") is True
+        ):
             created_hook_file = True
         for path in data.get("created_dirs", []):
             if isinstance(path, str):
                 directory = Path(path)
-                if directory not in created_dirs:
+                if directory in target_directories and directory not in created_dirs:
                     created_dirs.append(directory)
     return created_dirs, created_hook_file
 
@@ -3544,6 +3908,7 @@ def stage_install_target(
         github_archive_path=github_archive_path,
         github_source=github_source,
     )
+    validate_antigravity_rule_activation(spec)
     if skill_exists and previous_manifest is None and not force:
         raise InstallerError(
             f"refusing to replace unowned skill directory: {spec.skill_dir}"
@@ -3644,6 +4009,9 @@ def stage_install_target(
             enable_hooks=enable_gemini_hooks or spec.agent != "gemini",
         )
 
+        for directory in missing_parent_dirs(spec.hook_path):
+            if directory not in staging_created_dirs:
+                staging_created_dirs.append(directory)
         remember_created_dirs(created_dirs, spec.hook_path)
         if installed_is_symlink:
             staged_sidecar_manifest_path = (
@@ -4042,6 +4410,7 @@ def install(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
     force: bool = False,
     editable: bool = False,
     pypi: bool = False,
@@ -4086,10 +4455,12 @@ def install(
                 codex_home=codex_home,
                 claude_home=claude_home,
                 gemini_home=gemini_home,
+                antigravity_home=antigravity_home,
             )
-            for directory in missing_parent_dirs(spec.skill_dir):
-                if directory not in created_dirs:
-                    created_dirs.append(directory)
+            for path in (spec.skill_dir, spec.hook_path):
+                for directory in missing_parent_dirs(path):
+                    if directory not in created_dirs:
+                        created_dirs.append(directory)
         try:
             for agent in selected_agents:
                 staged_installs.append(
@@ -4105,6 +4476,7 @@ def install(
                             codex_home=codex_home,
                             claude_home=claude_home,
                             gemini_home=gemini_home,
+                            antigravity_home=antigravity_home,
                         ),
                         force=force,
                         editable=editable,
@@ -4165,6 +4537,7 @@ def uninstall(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> list[InstallResult]:
     return [
         uninstall_target(
@@ -4179,6 +4552,7 @@ def uninstall(
                 codex_home=codex_home,
                 claude_home=claude_home,
                 gemini_home=gemini_home,
+                antigravity_home=antigravity_home,
             ),
         )
         for agent in normalize_agents(agents)

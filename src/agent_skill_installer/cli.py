@@ -44,6 +44,7 @@ AGENT_LABELS = {
     "codex": "Codex",
     "claude": "Claude Code",
     "gemini": "Gemini CLI",
+    "antigravity": "Antigravity",
 }
 SCOPE_LABELS = {
     "dir": "Directory",
@@ -2007,6 +2008,14 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
             help="Gemini CLI home directory for global scope. Defaults to ~/.gemini.",
         )
         subparser.add_argument(
+            "--antigravity-home",
+            type=Path,
+            help=(
+                "Antigravity home directory for global scope. "
+                "Defaults to ~/.gemini/config."
+            ),
+        )
+        subparser.add_argument(
             "--home",
             type=Path,
             help=argparse.SUPPRESS,
@@ -2257,6 +2266,7 @@ def build_no_ui_command(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> str | None:
     if isinstance(args, str):
         args = argparse.Namespace(command=args, verbose=False)
@@ -2297,6 +2307,7 @@ def build_no_ui_command(
                     codex_home=codex_home,
                     claude_home=claude_home,
                     gemini_home=gemini_home,
+                    antigravity_home=antigravity_home,
                 )
                 for target_scope, target_repo_target in target_groups
             ]
@@ -2384,6 +2395,11 @@ def build_no_ui_command(
         if gemini_home is not None
         else getattr(args, "gemini_home", None)
     )
+    antigravity_home = (
+        antigravity_home
+        if antigravity_home is not None
+        else getattr(args, "antigravity_home", None)
+    )
 
     if scope == "dir" and repo is not None:
         parts.extend(["--target-dir", repo])
@@ -2395,6 +2411,8 @@ def build_no_ui_command(
             parts.extend(["--claude-home", claude_home])
         if "gemini" in selected_agents and gemini_home is not None:
             parts.extend(["--gemini-home", gemini_home])
+        if "antigravity" in selected_agents and antigravity_home is not None:
+            parts.extend(["--antigravity-home", antigravity_home])
 
     return quote_command(parts)
 
@@ -2481,6 +2499,7 @@ def agent_home_path(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> Path:
     base_home = (home or Path.home()).expanduser()
     if agent == "codex":
@@ -2489,6 +2508,8 @@ def agent_home_path(
         return (claude_home or base_home / ".claude").expanduser()
     if agent == "gemini":
         return (gemini_home or base_home / ".gemini").expanduser()
+    if agent == "antigravity":
+        return (antigravity_home or base_home / ".gemini" / "config").expanduser()
     raise UsageError(f"unknown agent target: {agent}")
 
 
@@ -2501,6 +2522,7 @@ def installation_scope_choice_label(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
         return "Directory"
@@ -2529,6 +2551,7 @@ def installation_scope_choice_description(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> str:
     if scope == SPECIFIC_DIRECTORY_VALUE:
         return "Install files into an explicit directory; automatic discovery is not implied"
@@ -2541,6 +2564,7 @@ def installation_scope_choice_description(
                     codex_home=codex_home,
                     claude_home=claude_home,
                     gemini_home=gemini_home,
+                    antigravity_home=antigravity_home,
                 )
             )
             for agent in agents
@@ -2559,6 +2583,7 @@ def installed_statuses_by_target(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> dict[InstallationTarget, InstallationStatus]:
     return {
         (status.agent, status.scope, status.repo_target): status
@@ -2569,6 +2594,7 @@ def installed_statuses_by_target(
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
         if status.status == "installed"
     }
@@ -2585,6 +2611,7 @@ def installation_option_choices(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> list[dict[str, object]]:
     if command == "install":
         choices = [
@@ -2597,6 +2624,7 @@ def installation_option_choices(
                     codex_home=codex_home,
                     claude_home=claude_home,
                     gemini_home=gemini_home,
+                    antigravity_home=antigravity_home,
                 ),
                 "description": installation_scope_choice_description(
                     "global",
@@ -2606,6 +2634,7 @@ def installation_option_choices(
                     codex_home=codex_home,
                     claude_home=claude_home,
                     gemini_home=gemini_home,
+                    antigravity_home=antigravity_home,
                 ),
                 "value": "global",
                 "kind": "scope",
@@ -2622,6 +2651,7 @@ def installation_option_choices(
                         codex_home=codex_home,
                         claude_home=claude_home,
                         gemini_home=gemini_home,
+                        antigravity_home=antigravity_home,
                     ),
                     "description": installation_scope_choice_description(
                         "repo",
@@ -2631,6 +2661,7 @@ def installation_option_choices(
                         codex_home=codex_home,
                         claude_home=claude_home,
                         gemini_home=gemini_home,
+                        antigravity_home=antigravity_home,
                     ),
                     "value": "repo",
                     "kind": "scope",
@@ -2646,6 +2677,7 @@ def installation_option_choices(
                     codex_home=codex_home,
                     claude_home=claude_home,
                     gemini_home=gemini_home,
+                    antigravity_home=antigravity_home,
                 ),
                 "description": installation_scope_choice_description(
                     SPECIFIC_DIRECTORY_VALUE,
@@ -2655,6 +2687,7 @@ def installation_option_choices(
                     codex_home=codex_home,
                     claude_home=claude_home,
                     gemini_home=gemini_home,
+                    antigravity_home=antigravity_home,
                 ),
                 "value": SPECIFIC_DIRECTORY_VALUE,
                 "kind": "scope",
@@ -2670,6 +2703,7 @@ def installation_option_choices(
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
         if command == "uninstall"
         else {}
@@ -2732,6 +2766,7 @@ def normalize_installation_targets(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> list[InstallationTarget]:
     if isinstance(selected_options, str):
         selected_options = [selected_options]
@@ -2748,6 +2783,7 @@ def normalize_installation_targets(
                 codex_home=codex_home,
                 claude_home=claude_home,
                 gemini_home=gemini_home,
+                antigravity_home=antigravity_home,
             )
             if choice.get("kind") == "scope"
         ]
@@ -2779,6 +2815,7 @@ def normalize_installation_targets(
             codex_home=codex_home,
             claude_home=claude_home,
             gemini_home=gemini_home,
+            antigravity_home=antigravity_home,
         )
         if choice.get("kind", "target") == "target"
     ]
@@ -2813,6 +2850,7 @@ def installation_summary_text(
     codex_home: Path | None = None,
     claude_home: Path | None = None,
     gemini_home: Path | None = None,
+    antigravity_home: Path | None = None,
 ) -> str:
     statuses = inspect_installations(
         project,
@@ -2821,6 +2859,7 @@ def installation_summary_text(
         codex_home=codex_home,
         claude_home=claude_home,
         gemini_home=gemini_home,
+        antigravity_home=antigravity_home,
     )
     by_target = {}
     for status in statuses:
@@ -2946,6 +2985,7 @@ def complete_with_ui(
             codex_home=getattr(args, "codex_home", None),
             claude_home=getattr(args, "claude_home", None),
             gemini_home=getattr(args, "gemini_home", None),
+            antigravity_home=getattr(args, "antigravity_home", None),
         )
 
     def final_submit_label() -> str:
@@ -2978,6 +3018,7 @@ def complete_with_ui(
                     "codex_home",
                     "claude_home",
                     "gemini_home",
+                    "antigravity_home",
                 ],
                 lambda: prompter.select(
                     f"What would you like to do with {project.skill_name}?",
@@ -3120,6 +3161,7 @@ def complete_with_ui(
                         "codex_home",
                         "claude_home",
                         "gemini_home",
+                        "antigravity_home",
                     ],
                     lambda: prompter.checkbox(
                         f"Select agents for {project.skill_name}",
@@ -3156,6 +3198,7 @@ def complete_with_ui(
                 codex_home=getattr(args, "codex_home", None),
                 claude_home=getattr(args, "claude_home", None),
                 gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
             )
             if not option_choices:
                 raise UsageError(
@@ -3183,6 +3226,7 @@ def complete_with_ui(
                     codex_home=getattr(args, "codex_home", None),
                     claude_home=getattr(args, "claude_home", None),
                     gemini_home=getattr(args, "gemini_home", None),
+                    antigravity_home=getattr(args, "antigravity_home", None),
                 )
                 return build_no_ui_command(
                     project,
@@ -3200,6 +3244,7 @@ def complete_with_ui(
                         "codex_home",
                         "claude_home",
                         "gemini_home",
+                        "antigravity_home",
                     ],
                     lambda: prompter.select(
                         f"Install location for {project.skill_name}",
@@ -3218,6 +3263,7 @@ def complete_with_ui(
                         "codex_home",
                         "claude_home",
                         "gemini_home",
+                        "antigravity_home",
                     ],
                     lambda: prompter.checkbox(
                         f"Select {project.skill_name} installations",
@@ -3271,6 +3317,7 @@ def complete_with_ui(
                 codex_home=getattr(args, "codex_home", None),
                 claude_home=getattr(args, "claude_home", None),
                 gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
             )
             args.targets = targets
             args.repo_target = repo_target_arg_from_targets(targets)
@@ -3322,6 +3369,8 @@ def complete_with_ui(
         args.claude_home = None
     if not hasattr(args, "gemini_home"):
         args.gemini_home = None
+    if not hasattr(args, "antigravity_home"):
+        args.antigravity_home = None
     if not hasattr(args, "repo_target"):
         args.repo_target = False
     if not hasattr(args, "repo"):
@@ -3457,7 +3506,11 @@ def result_target_label(result: InstallResult) -> str:
     if result.scope == "global":
         return f"{agent} global"
     if result.scope == "dir":
-        directory_name = result.hook_path.parent.name
+        directory_name = (
+            result.skill_dir.parents[2].name
+            if len(result.skill_dir.parents) >= 3
+            else result.hook_path.parent.name
+        )
         if result.repo_target:
             if directory_name and directory_name != "repo":
                 return f"{agent} repo ({directory_name})"
@@ -3502,6 +3555,8 @@ def print_results(results: Sequence[InstallResult], *, verbose: bool = False) ->
                 print("  Review and trust the installed Codex hooks with /hooks.")
             elif result.agent == "gemini":
                 print("  Review the installed Gemini CLI hooks with /hooks.")
+            elif result.agent == "antigravity":
+                print("  Review the installed Antigravity hooks in hooks.json.")
         if not verbose:
             continue
         print(f"  skill: {result.skill_dir}")
@@ -3573,6 +3628,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
                 gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
                 force=args.force,
                 editable=args.editable,
                 pypi=args.pypi,
@@ -3592,6 +3648,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
                 gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
             )
         raise UsageError(f"unknown command: {args.command}")
 
@@ -3615,6 +3672,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     codex_home=args.codex_home,
                     claude_home=args.claude_home,
                     gemini_home=getattr(args, "gemini_home", None),
+                    antigravity_home=getattr(args, "antigravity_home", None),
                     force=args.force,
                     editable=args.editable,
                     pypi=args.pypi,
@@ -3636,6 +3694,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     codex_home=args.codex_home,
                     claude_home=args.claude_home,
                     gemini_home=getattr(args, "gemini_home", None),
+                    antigravity_home=getattr(args, "antigravity_home", None),
                 )
             )
         else:
@@ -3689,6 +3748,8 @@ def prepare_args(args: argparse.Namespace) -> None:
         args.claude_home = None
     if not hasattr(args, "gemini_home"):
         args.gemini_home = None
+    if not hasattr(args, "antigravity_home"):
+        args.antigravity_home = None
     if not hasattr(args, "editable") or args.editable is None:
         args.editable = False
     if not hasattr(args, "pypi") or args.pypi is None:

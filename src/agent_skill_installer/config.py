@@ -12,6 +12,11 @@ from omegaconf.errors import OmegaConfBaseException
 from .agent_configs import (
     AgentConfigs,
     AgentInstructions,
+    AntigravityAgentConfig,
+    AntigravityHookMatcher,
+    AntigravityHooks,
+    AntigravityRequires,
+    AntigravitySkillCommandHook,
     ClaudeAgentConfig,
     ClaudeHook,
     ClaudeHookMatcher,
@@ -27,6 +32,7 @@ from .agent_configs import (
     GeminiHooks,
     GeminiRequires,
     GeminiSkillCommandHook,
+    materialize_antigravity_hooks,
     materialize_claude_hooks,
     materialize_codex_hooks,
     materialize_gemini_hooks,
@@ -161,6 +167,11 @@ def _validate_supported_versions(config: InstallerConfig, path: Path | str) -> N
             f"unsupported installer.agents.gemini.version in {_display_path(path)}: "
             f"{agents.gemini.version}; supported versions: 1"
         )
+    if agents.antigravity is not None and agents.antigravity.version != 1:
+        raise InstallerConfigError(
+            f"unsupported installer.agents.antigravity.version in {_display_path(path)}: "
+            f"{agents.antigravity.version}; supported versions: 1"
+        )
 
 
 def _build_config(
@@ -198,6 +209,8 @@ def _build_config(
             materialize_claude_hooks(agents.claude)
         if agents.gemini is not None:
             materialize_gemini_hooks(agents.gemini)
+        if agents.antigravity is not None:
+            materialize_antigravity_hooks(agents.antigravity)
         _validate_supported_versions(config, source)
     return config
 
