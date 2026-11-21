@@ -6,8 +6,9 @@ import hashlib
 import importlib.util
 import json
 import os
-import shutil
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -18,7 +19,16 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from agent_skill_installer import __version__
-from agent_skill_installer.config import CONFIG_FILE_NAME, load_installer_config_text
+from agent_skill_installer.agent_configs.gemini import (
+    GeminiAgentConfig,
+    GeminiHookMatcher,
+    GeminiSkillCommandHook,
+)
+from agent_skill_installer.config import (
+    CONFIG_FILE_NAME,
+    InstallerConfig,
+    load_installer_config_text,
+)
 from agent_skill_installer.__main__ import (
     build_parser as build_generic_parser,
     complete_with_ui as complete_generic_with_ui,
@@ -57,6 +67,7 @@ from agent_skill_installer.installer import (
     Installer,
     InstallerError,
     SkillProject,
+    _gemini_json_without_comments,
     _native_command_line,
     copy_github_archive_skill,
     copy_pypi_wheel_skill,
@@ -68,6 +79,7 @@ from agent_skill_installer.installer import (
     manifest_path,
     parse_github_url,
     published_pypi_versions,
+    read_runtime_hooks_document,
     read_manifest as read_raw_manifest,
     run_pip_wheel,
 )
@@ -574,28 +586,34 @@ def test_global_scope_supports_per_agent_home_directories(tmp_path: Path) -> Non
     project = make_project(tmp_path)
     codex_home = tmp_path / "codex-alt"
     claude_home = tmp_path / "claude-alt"
+    gemini_home = tmp_path / "gemini-alt"
 
     Installer(project).install(
         ["all"],
         "global",
         codex_home=codex_home,
         claude_home=claude_home,
+        gemini_home=gemini_home,
     )
 
     assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (claude_home / "skills" / project.skill_name / "SKILL.md").exists()
+    assert (gemini_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (codex_home / "AGENTS.md").exists()
     assert (claude_home / "CLAUDE.md").exists()
+    assert (gemini_home / "GEMINI.md").exists()
 
     Installer(project).uninstall(
         ["all"],
         "global",
         codex_home=codex_home,
         claude_home=claude_home,
+        gemini_home=gemini_home,
     )
 
     assert not codex_home.exists()
     assert not claude_home.exists()
+    assert not gemini_home.exists()
 
 
 def test_install_rejects_invalid_skill_frontmatter_before_replacing_existing(
@@ -3265,6 +3283,63 @@ installer:
     assert not (repo / "AGENTS.md").exists()
 
 
+def test_gemini_runtime_hook_failure_restores_utf8_settings_bytes_under_cp1252_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    settings_path = repo / ".gemini" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    original_settings = (
+        '{\r\n  "theme": "Hebrew א",\r\n  "hooks": {}\r\n}\r\n'
+    ).encode("utf-8")
+    settings_path.write_bytes(original_settings)
+
+    original_read_text = Path.read_text
+
+    def read_text_with_cp1252_default(path: Path, encoding=None, *args, **kwargs):
+        if encoding is None:
+            encoding = "cp1252"
+        return original_read_text(path, encoding, *args, **kwargs)
+
+    from agent_skill_installer import installer as installer_module
+
+    original_apply = installer_module.apply_runtime_hook_plan
+    written_settings: list[bytes] = []
+
+    def apply_then_fail(*args, **kwargs) -> None:
+        original_apply(*args, **kwargs)
+        written_settings.append(settings_path.read_bytes())
+        raise InstallerError("runtime hook write failed after settings update")
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_cp1252_default)
+    monkeypatch.setattr(
+        "agent_skill_installer.installer.apply_runtime_hook_plan",
+        apply_then_fail,
+    )
+
+    with pytest.raises(InstallerError, match="rolled back changes"):
+        Installer(project).install(["gemini"], "repo", repo=repo)
+
+    assert written_settings and written_settings[0] != original_settings
+    assert settings_path.read_bytes() == original_settings
+    assert not (repo / ".gemini" / "skills" / project.skill_name).exists()
+    assert not (repo / "GEMINI.md").exists()
+
+
 def test_cli_no_ui_install_and_uninstall(tmp_path: Path, capsys) -> None:
     project = make_project(tmp_path)
     repo = make_repo(tmp_path / "repo")
@@ -3478,6 +3553,7 @@ def test_cli_no_ui_uses_per_agent_home_directories(
     project = make_project(tmp_path)
     codex_home = tmp_path / "codex-cli"
     claude_home = tmp_path / "claude-cli"
+    gemini_home = tmp_path / "gemini-cli"
 
     exit_code = main(
         [
@@ -3491,6 +3567,8 @@ def test_cli_no_ui_uses_per_agent_home_directories(
             str(codex_home),
             "--claude-home",
             str(claude_home),
+            "--gemini-home",
+            str(gemini_home),
         ],
         project=project,
     )
@@ -3502,8 +3580,13 @@ def test_cli_no_ui_uses_per_agent_home_directories(
         "Installed example-agent-skill 1.2.3 to Claude Code global:"
         in output.out
     )
+    assert (
+        "Installed example-agent-skill 1.2.3 to Gemini CLI global:"
+        in output.out
+    )
     assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
     assert (claude_home / "skills" / project.skill_name / "SKILL.md").exists()
+    assert (gemini_home / "skills" / project.skill_name / "SKILL.md").exists()
 
 
 def test_cli_no_ui_accepts_comma_separated_agents(
@@ -5197,11 +5280,11 @@ def test_generic_install_source_selection_summary_excludes_target(
     assert "Into" not in prompter.summaries[0]
     assert prompter.summaries[1] == (
         f"Installing skill from local path {source}\n"
-        "Into Codex Global, Claude Global"
+        "Into Codex Global, Claude Global, Gemini Global"
     )
     assert prompter.summaries[2] == (
         f"Installing a copy of skill from {source}\n"
-        "Into Codex Global, Claude Global"
+        "Into Codex Global, Claude Global, Gemini Global"
     )
 
 
@@ -5729,7 +5812,7 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
     assert args.package_name == project.package_name
     assert args.agent == "all"
     assert args.scope == "global"
-    assert len(args.uninstall_statuses) == 2
+    assert len(args.uninstall_statuses) == 3
     assert prompter.calls == [
         ("select", "What would you like to do?"),
         ("select", "Skills installed by Agent Skill Installer"),
@@ -5745,7 +5828,7 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
     assert prompter.choices[1] == [
         {
             "name": project.skill_name,
-            "description": "2 installed targets\nPackage: example-agent-skill",
+            "description": "3 installed targets\nPackage: example-agent-skill",
             "value": "0",
         }
     ]
@@ -5767,15 +5850,17 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
     ] == [
         "Claude Code User global - version 1.2.3",
         "Codex User global - version 1.2.3",
+        "Gemini CLI User global - version 1.2.3",
     ]
     assert prompter.previews[-1] == (
         "agent-skill-installer --no-ui uninstall "
         f"--skill-name {project.skill_name} --agent all --scope global"
     )
     results = run_generic_uninstall(args)
-    assert [result.status for result in results] == ["removed", "removed"]
+    assert [result.status for result in results] == ["removed", "removed", "removed"]
     assert not (home / ".codex" / "skills" / project.skill_name).exists()
     assert not (home / ".claude" / "skills" / project.skill_name).exists()
+    assert not (home / ".gemini" / "skills" / project.skill_name).exists()
 
 
 def test_generic_uninstall_target_labels_github_ref_as_source(
@@ -5828,6 +5913,7 @@ def test_generic_uninstall_target_labels_github_ref_as_source(
     ] == [
         "Claude Code User global - GitHub ref main",
         "Codex User global - GitHub ref main",
+        "Gemini CLI User global - GitHub ref main",
     ]
 
 
@@ -7752,3 +7838,800 @@ def test_wrapper_cli_editable_warns_from_checkout_not_bundle(
 
     assert exit_code == 0
     assert "declares name: checkout-name" in output.err
+
+
+def test_installs_reinstalls_force_replaces_and_uninstalls_gemini_repo_scope(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    installer = Installer(project)
+
+    result = installer.install(["gemini"], "repo", repo=repo)[0]
+
+    skill_dir = repo / ".gemini" / "skills" / project.skill_name
+    gemini_md = repo / "GEMINI.md"
+    assert result.agent == "gemini"
+    assert result.scope == "dir"
+    assert result.repo_target is True
+    assert result.skill_dir == skill_dir
+    assert result.hook_path == gemini_md
+    assert result.runtime_hook_path is None
+    assert (skill_dir / "SKILL.md").is_file()
+    assert not (repo / ".codex").exists()
+    assert not (repo / ".claude").exists()
+    assert not (repo / "AGENTS.md").exists()
+    assert not (repo / "CLAUDE.md").exists()
+    hook_text = gemini_md.read_text()
+    assert project.marker_start in hook_text
+    assert f"Activate the `{project.skill_name}` skill" in hook_text
+    assert project.marker_end in hook_text
+
+    # Reinstall updates in place
+    reinstalled = installer.install(["gemini"], "repo", repo=repo)[0]
+    assert reinstalled.status == "installed"
+    assert reinstalled.version_change == "same"
+
+    # Uninstall removes skill, GEMINI.md, and created .gemini directory
+    removed = installer.uninstall(["gemini"], "repo", repo=repo)[0]
+    assert removed.status == "removed"
+    assert not skill_dir.exists()
+    assert not gemini_md.exists()
+    assert not (repo / ".gemini").exists()
+
+    # Unowned skill directory requires --force
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Unowned\n")
+    with pytest.raises(InstallerError, match="unowned skill directory"):
+        installer.install(["gemini"], "repo", repo=repo)
+    forced = installer.install(["gemini"], "repo", repo=repo, force=True)[0]
+    assert forced.status == "installed"
+    assert read_install_manifest(project, skill_dir)["agent"] == "gemini"
+
+
+def test_installs_and_uninstalls_gemini_global_scope(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    gemini_home = tmp_path / "gemini-home"
+    installer = Installer(project)
+
+    result = installer.install(["gemini"], "global", gemini_home=gemini_home)[0]
+
+    skill_dir = gemini_home / "skills" / project.skill_name
+    assert result.skill_dir == skill_dir
+    assert result.hook_path == gemini_home / "GEMINI.md"
+    assert (skill_dir / "SKILL.md").is_file()
+    assert project.marker_start in (gemini_home / "GEMINI.md").read_text()
+
+    installer.uninstall(["gemini"], "global", gemini_home=gemini_home)
+    assert not gemini_home.exists()
+
+
+@pytest.mark.parametrize("scope", ["repo", "global"])
+def test_gemini_install_writes_native_runtime_hooks(
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      instructions:
+        title: Example Gemini Skill
+        body: Use this configured Gemini text.
+      hooks:
+        PreCompress:
+          - matcher: "*"
+            sequential: true
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [save, "with spaces"]
+                name: save-before-compress
+                timeout: 15000
+                description: Save session state before compression
+""",
+    )
+    repo = make_repo(tmp_path / "repo with spaces")
+    gemini_home = tmp_path / "gemini home"
+
+    result = Installer(project).install(
+        ["gemini"],
+        scope,
+        repo=repo if scope == "repo" else None,
+        gemini_home=gemini_home,
+    )[0]
+
+    settings_path = (
+        repo / ".gemini" / "settings.json"
+        if scope == "repo"
+        else gemini_home / "settings.json"
+    )
+    gemini_md = repo / "GEMINI.md" if scope == "repo" else gemini_home / "GEMINI.md"
+    assert "Use this configured Gemini text." in gemini_md.read_text()
+    assert result.runtime_hook_path == settings_path
+    assert result.skill_dir is not None
+    assert json.loads(settings_path.read_text()) == {
+        "hooks": {
+            "PreCompress": [
+                {
+                    "matcher": "*",
+                    "sequential": True,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": native_skill_command(
+                                result.skill_dir,
+                                "save",
+                                "with spaces",
+                            ),
+                            "name": "save-before-compress",
+                            "timeout": 15000,
+                            "description": "Save session state before compression",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    manifest = read_install_manifest(project, result.skill_dir)
+    assert manifest["runtime_hooks"] == {
+        "format": "gemini-settings-json",
+        "path": str(settings_path),
+        "created_file": True,
+        "entries": json.loads(settings_path.read_text())["hooks"],
+    }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX shell quoting")
+def test_gemini_command_preserves_literal_dollars_through_native_interpolation(
+    tmp_path: Path,
+) -> None:
+    args = [
+        "$HOME",
+        "${HOME}",
+        "$GEMINI_PROJECT_DIR",
+        "with spaces and 'quotes'",
+    ]
+    installer_config = InstallerConfig()
+    installer_config.installer.agents.gemini = GeminiAgentConfig(
+        hooks={
+            "SessionStart": [
+                GeminiHookMatcher(
+                    hooks=[
+                        GeminiSkillCommandHook(
+                            executable="scripts/tool.py",
+                            args=args,
+                        )
+                    ]
+                )
+            ]
+        }
+    )
+    project = replace(make_project(tmp_path), installer_config=installer_config)
+    repo = make_repo(tmp_path / "repo $HOME ${HOME} 'with spaces'")
+
+    result = Installer(project).install(["gemini"], "repo", repo=repo)[0]
+
+    settings = json.loads((repo / ".gemini" / "settings.json").read_text())
+    command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+    # Gemini resolves $NAME and ${NAME} in settings before shell parsing.
+    # Generated command fragments put each literal dollar inside single quotes,
+    # so neither the native resolver nor Gemini's project-dir substitution can
+    # change the executable or the declared argument values.
+    assert re.search(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]+\})", command) is None
+    assert "${GEMINI_PROJECT_DIR}" not in command
+    assert result.skill_dir is not None
+    assert shlex.split(command) == [
+        str(result.skill_dir / "scripts" / "tool.py"),
+        *args,
+    ]
+
+
+def test_gemini_editable_skill_command_uses_installed_symlink_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    checkout = make_skill_checkout(tmp_path / "checkout")
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.chdir(checkout)
+
+    result = Installer(project).install(
+        ["gemini"],
+        "repo",
+        repo=repo,
+        editable=True,
+    )[0]
+
+    assert result.skill_dir is not None
+    assert result.skill_dir.is_symlink()
+    settings = json.loads((repo / ".gemini" / "settings.json").read_text())
+    assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        native_skill_command(result.skill_dir)
+    )
+
+
+def test_gemini_runtime_hook_upgrade_and_uninstall_preserve_user_settings_and_hooks(
+    tmp_path: Path,
+) -> None:
+    old_project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        BeforeTool:
+          - matcher: write_file
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [old]
+                name: example-guard
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    settings_path = repo / ".gemini" / "settings.json"
+    settings_path.parent.mkdir()
+    settings_path.write_text(
+        "// Keep this line comment.\n"
+        "{\n"
+        '  "theme": "Default",\n'
+        "  /* Keep this block comment\n"
+        "     across lines. */\n"
+        '  "label": "https://example.test/a/*not a comment*/ and // text",\n'
+        '  "hooksConfig": {"enabled": true, "notifications": true},\n'
+        '  "hooks": {\n'
+        "    // Keep the user hook comment.\n"
+        '    "disabled": ["other-hook"],\n'
+        '    "AfterTool": [\n'
+        '      {"matcher": "*", "hooks": [{"type": "command", '
+        '"command": "python3 user.py"}]}\n'
+        "    ]\n"
+        "  }\n"
+        "}\n"
+    )
+
+    Installer(old_project).install(["gemini"], "repo", repo=repo)
+
+    new_project = replace(
+        old_project,
+        version="2.0.0",
+        installer_config=load_installer_config_text(
+            """
+installer:
+  agents:
+    gemini:
+      hooks:
+        BeforeTool:
+          - matcher: write_file
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [new]
+                name: example-guard
+"""
+        ),
+    )
+    Installer(new_project).install(["gemini"], "repo", repo=repo)
+
+    upgraded = read_runtime_hooks_document(settings_path, agent="gemini")
+    upgraded_text = settings_path.read_text()
+    assert "// Keep this line comment." in upgraded_text
+    assert "/* Keep this block comment\n     across lines. */" in upgraded_text
+    assert "https://example.test/a/*not a comment*/ and // text" in upgraded_text
+    assert "// Keep the user hook comment." in upgraded_text
+    skill_dir = repo / ".gemini" / "skills" / new_project.skill_name
+    assert upgraded["theme"] == "Default"
+    assert upgraded["label"] == "https://example.test/a/*not a comment*/ and // text"
+    assert upgraded["hooksConfig"] == {"enabled": True, "notifications": True}
+    assert upgraded["hooks"] == {
+        "disabled": ["other-hook"],
+        "AfterTool": [
+            {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": "python3 user.py"}],
+            }
+        ],
+        "BeforeTool": [
+            {
+                "matcher": "write_file",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": native_skill_command(skill_dir, "new"),
+                        "name": "example-guard",
+                    }
+                ],
+            }
+        ],
+    }
+
+    Installer(new_project).uninstall(["gemini"], "repo", repo=repo)
+
+    uninstalled = read_runtime_hooks_document(settings_path, agent="gemini")
+    uninstalled_text = settings_path.read_text()
+    assert "// Keep this line comment." in uninstalled_text
+    assert "/* Keep this block comment\n     across lines. */" in uninstalled_text
+    assert "https://example.test/a/*not a comment*/ and // text" in uninstalled_text
+    assert "// Keep the user hook comment." in uninstalled_text
+    assert uninstalled == {
+        "theme": "Default",
+        "label": "https://example.test/a/*not a comment*/ and // text",
+        "hooksConfig": {"enabled": True, "notifications": True},
+        "hooks": {
+            "disabled": ["other-hook"],
+            "AfterTool": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": "python3 user.py"}],
+                }
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+@pytest.mark.parametrize("comments", [False, True])
+def test_gemini_install_upgrade_uninstall_preserves_native_unicode_separators(
+    tmp_path: Path,
+    monkeypatch,
+    separator: str,
+    comments: bool,
+) -> None:
+    unrelated_key = f"user{separator}setting"
+    unrelated_value = f"retained{separator}value"
+    generated_key = f"metadata{separator}key"
+    generated_value = f"hook{separator}metadata"
+
+    def project_config(argument: str) -> str:
+        return f'''\
+installer:
+  agents:
+    gemini:
+      hooks_direct:
+        BeforeTool:
+          - matcher: write_file
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [{json.dumps(argument)}]
+                name: separator-regression
+                {json.dumps(generated_key)}: {json.dumps(generated_value)}
+'''
+
+    old_argument = f"old{separator}argument"
+    new_argument = f"new{separator}argument"
+    old_project = project_with_config(tmp_path, project_config(old_argument))
+    new_project = replace(
+        old_project,
+        version="2.0.0",
+        installer_config=load_installer_config_text(project_config(new_argument)),
+    )
+    repo = make_repo(tmp_path / "repo")
+    settings_path = repo / ".gemini" / "settings.json"
+    settings_path.parent.mkdir()
+
+    top_comments = (
+        "// Keep the top-level line comment.\n"
+        "/* Keep the top-level block comment. */\n"
+        if comments
+        else ""
+    )
+    hook_comments = (
+        "    // Keep the user hook line comment.\n"
+        "    /* Keep the user hook block comment. */\n"
+        if comments
+        else ""
+    )
+    user_hook = [
+        {"matcher": "*", "hooks": [{"type": "command", "command": "python3 user.py"}]}
+    ]
+    settings_path.write_text(
+        top_comments
+        + "{\n"
+        + f"  {json.dumps(unrelated_key, ensure_ascii=False)}: "
+        + f"{json.dumps(unrelated_value, ensure_ascii=False)},\n"
+        + '  "hooks": {\n'
+        + hook_comments
+        + f'    "AfterTool": {json.dumps(user_hook, ensure_ascii=False)}\n'
+        + "  }\n"
+        + "}\n",
+        encoding="utf-8",
+    )
+
+    node = shutil.which("node")
+
+    def assert_settings(expected_argument: str | None) -> None:
+        settings_text = settings_path.read_text(encoding="utf-8")
+        document = read_runtime_hooks_document(settings_path, agent="gemini")
+        assert document[unrelated_key] == unrelated_value
+        assert document["hooks"]["AfterTool"] == user_hook
+        if expected_argument is None:
+            assert "BeforeTool" not in document["hooks"]
+        else:
+            managed_hook = document["hooks"]["BeforeTool"][0]["hooks"][0]
+            assert managed_hook[generated_key] == generated_value
+            command = managed_hook["command"]
+            if os.name == "nt":
+                command = base64.b64decode(command.split()[-1]).decode("utf-16-le")
+            assert expected_argument in command
+        if comments:
+            assert "// Keep the top-level line comment." in settings_text
+            assert "/* Keep the top-level block comment. */" in settings_text
+            assert "// Keep the user hook line comment." in settings_text
+            assert "/* Keep the user hook block comment. */" in settings_text
+
+        strict_json = _gemini_json_without_comments(settings_text)
+        if node is None:
+            assert json.loads(strict_json) == document
+            return
+        real_run = subprocess.run
+
+        def run_with_cp1252_default(*args, **kwargs):
+            if kwargs.get("text") and kwargs.get("encoding") is None:
+                kwargs["encoding"] = "cp1252"
+            return real_run(*args, **kwargs)
+
+        with monkeypatch.context() as context:
+            context.setattr(subprocess, "run", run_with_cp1252_default)
+            native_parse = subprocess.run(
+                [
+                    node,
+                    "-e",
+                    "process.stdout.write(JSON.stringify(JSON.parse(require('fs').readFileSync(0, 'utf8'))))",
+                ],
+                input=strict_json,
+                capture_output=True,
+                check=True,
+                text=True,
+                encoding="utf-8",
+            )
+        assert json.loads(native_parse.stdout) == document
+
+    Installer(old_project).install(["gemini"], "repo", repo=repo)
+    assert_settings(old_argument)
+
+    Installer(new_project).install(["gemini"], "repo", repo=repo)
+    assert_settings(new_argument)
+
+    Installer(new_project).uninstall(["gemini"], "repo", repo=repo)
+    assert_settings(None)
+
+
+def test_noninteractive_gemini_install_can_skip_runtime_hooks(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - matcher: '*'
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                name: test-hook
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    Installer(project).install(
+        ["gemini"], "repo", repo=repo, enable_gemini_hooks=False
+    )
+
+    settings_path = repo / ".gemini" / "settings.json"
+    assert not settings_path.exists()
+
+
+def test_noninteractive_gemini_install_enables_hooks_explicitly(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - matcher: '*'
+            hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                name: test-hook
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    Installer(project).install(
+        ["gemini"], "repo", repo=repo, enable_gemini_hooks=True
+    )
+
+    settings_path = repo / ".gemini" / "settings.json"
+    assert settings_path.exists()
+    assert read_runtime_hooks_document(settings_path, agent="gemini")["hooks"]
+
+
+def test_gemini_uninstall_removes_asi_created_empty_settings_file(
+    tmp_path: Path,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    settings_path = repo / ".gemini" / "settings.json"
+
+    Installer(project).install(["gemini"], "repo", repo=repo)
+    assert settings_path.is_file()
+
+    Installer(project).uninstall(["gemini"], "repo", repo=repo)
+    assert not settings_path.exists()
+    assert not (repo / ".gemini").exists()
+
+
+def test_gemini_uninstall_preserves_comment_added_to_created_settings_file(
+    tmp_path: Path,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    settings_path = repo / ".gemini" / "settings.json"
+
+    Installer(project).install(["gemini"], "repo", repo=repo)
+    installed_settings = settings_path.read_text().replace(
+        '"SessionStart": [',
+        '"SessionStart": [\n            // User annotation added after installation.\n',
+    )
+    settings_path.write_text(
+        "// User added this after installation.\n" + installed_settings
+    )
+
+    Installer(project).uninstall(["gemini"], "repo", repo=repo)
+
+    assert settings_path.is_file()
+    assert "// User added this after installation." in settings_path.read_text()
+    assert "// User annotation added after installation." in settings_path.read_text()
+    assert read_runtime_hooks_document(settings_path, agent="gemini") == {"hooks": {}}
+
+
+def test_gemini_does_not_claim_identical_preexisting_hook(tmp_path: Path) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+                args: [shared]
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+    settings_path = repo / ".gemini" / "settings.json"
+    skill_dir = repo / ".gemini" / "skills" / project.skill_name
+    settings_path.parent.mkdir()
+    original = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": native_skill_command(skill_dir, "shared"),
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    original_text = json.dumps(original, separators=(",", ":")) + "\n"
+    settings_path.write_text(original_text)
+
+    Installer(project).install(["gemini"], "repo", repo=repo)
+    manifest = read_install_manifest(project, skill_dir)
+    assert manifest["runtime_hooks"]["entries"] == {}
+    assert settings_path.read_text() == original_text
+
+    Installer(project).uninstall(["gemini"], "repo", repo=repo)
+    assert settings_path.read_text() == original_text
+
+
+def test_gemini_rejects_legacy_command_reserved_keys_and_invalid_settings(
+    tmp_path: Path,
+) -> None:
+    repo = make_repo(tmp_path / "repo")
+
+    legacy_project = project_with_config(
+        tmp_path / "legacy",
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: command
+                command: python3 hook.py
+""",
+    )
+    with pytest.raises(
+        InstallerError,
+        match="unsupported gemini hook type.*packaged hooks must use type: skill-command",
+    ):
+        Installer(legacy_project).install(["gemini"], "repo", repo=repo)
+    assert not (repo / ".gemini").exists()
+    assert not (repo / "GEMINI.md").exists()
+
+    reserved_project = project_with_config(
+        tmp_path / "reserved",
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        disabled:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    with pytest.raises(InstallerError, match="reserved Gemini hooks key: disabled"):
+        Installer(reserved_project).install(["gemini"], "repo", repo=repo)
+    assert not (repo / ".gemini").exists()
+
+    valid_project = project_with_config(
+        tmp_path / "valid",
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    settings_path = repo / ".gemini" / "settings.json"
+    settings_path.parent.mkdir()
+    settings_path.write_text("{not json\n")
+    with pytest.raises(InstallerError, match="invalid Gemini hooks JSON"):
+        Installer(valid_project).install(["gemini"], "repo", repo=repo)
+    assert settings_path.read_text() == "{not json\n"
+    assert not (repo / ".gemini" / "skills").exists()
+    assert not (repo / "GEMINI.md").exists()
+
+    for non_native_json in (
+        '{"theme": "Default",}',
+        "{theme: 'Default'}",
+        "{'theme': 'Default'}",
+        '{"theme": NaN}',
+    ):
+        settings_path.write_text(non_native_json)
+        with pytest.raises(InstallerError, match="invalid Gemini hooks JSON"):
+            Installer(valid_project).install(["gemini"], "repo", repo=repo)
+        assert settings_path.read_text() == non_native_json
+        assert not (repo / ".gemini" / "skills").exists()
+        assert not (repo / "GEMINI.md").exists()
+
+
+def test_gemini_cli_no_ui_install_verbose_and_uninstall(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        PreCompress:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    repo = make_repo(tmp_path / "repo")
+
+    install_code = main(
+        [
+            "--no-ui",
+            "--verbose",
+            "install",
+            "--enable-gemini-hooks",
+            "--agent",
+            "gemini",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        project=project,
+    )
+    output = capsys.readouterr()
+
+    assert install_code == 0
+    assert "Installed example-agent-skill 1.2.3 to Gemini CLI repo:" in output.out
+    assert "Review the installed Gemini CLI hooks with /hooks." in output.out
+    assert f"  hook:  {repo / 'GEMINI.md'}" in output.out
+    assert f"  runtime hooks: {repo / '.gemini' / 'settings.json'}" in output.out
+
+    uninstall_code = main(
+        [
+            "--no-ui",
+            "uninstall",
+            "--agent",
+            "gemini",
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ],
+        project=project,
+    )
+    uninstall_output = capsys.readouterr()
+    assert uninstall_code == 0
+    assert (
+        "Removed example-agent-skill 1.2.3 from Gemini CLI repo:"
+        in uninstall_output.out
+    )
+    assert not (repo / ".gemini").exists()
+    assert not (repo / "GEMINI.md").exists()
+
+
+def test_gemini_docs_and_news_fragment_cover_target() -> None:
+    root = Path(__file__).parents[2]
+    readme = (root / "README.md").read_text()
+    installing = (root / "docs" / "installing-skills.md").read_text()
+    authoring = (root / "docs" / "authoring-skills.md").read_text()
+    fragment = root / "news" / "3.feature"
+
+    assert "Gemini CLI" in readme
+    assert ".gemini/skills/<skill_name>" in installing
+    assert "GEMINI.md" in installing
+    assert ".gemini/settings.json" in installing
+    assert "--gemini-home" in installing
+    assert "GeminiAgentConfig" in authoring
+    assert "GeminiSkillCommandHook" in authoring
+    assert fragment.is_file()
+    assert "Gemini CLI" in fragment.read_text()

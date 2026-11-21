@@ -120,6 +120,7 @@ TARGET_FIELDS = [
     "repo",
     "codex_home",
     "claude_home",
+    "gemini_home",
 ]
 UNINSTALL_FIELDS = [
     "skill_name",
@@ -185,6 +186,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Replace an existing unowned skill directory.",
+    )
+    install.add_argument(
+        "--enable-gemini-hooks",
+        action="store_true",
+        help=(
+            "Enable Gemini runtime hooks. Non-interactive installs skip new "
+            "Gemini hooks unless this flag is set."
+        ),
     )
     install.add_argument(
         "--skill-name",
@@ -289,7 +298,7 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent",
         metavar="AGENT[,AGENT...]",
-        help="Agent integration to target: codex, claude, or all.",
+        help="Agent integration to target: codex, claude, gemini, or all.",
     )
     parser.add_argument(
         "--scope",
@@ -318,6 +327,11 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
         "--claude-home",
         type=Path,
         help="Claude Code home directory for global scope. Defaults to ~/.claude.",
+    )
+    parser.add_argument(
+        "--gemini-home",
+        type=Path,
+        help="Gemini CLI home directory for global scope. Defaults to ~/.gemini.",
     )
     parser.add_argument("--home", type=Path, help=argparse.SUPPRESS)
 
@@ -464,12 +478,15 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
             parts.extend(["--codex-home", args.codex_home])
         if getattr(args, "claude_home", None) is not None:
             parts.extend(["--claude-home", args.claude_home])
+        if getattr(args, "gemini_home", None) is not None:
+            parts.extend(["--gemini-home", args.gemini_home])
     return quote_command(parts)
 
 
 def ensure_arg_defaults(args: argparse.Namespace) -> None:
     for name, value in {
         "force": False,
+        "enable_gemini_hooks": False,
         "skill_name": None,
         "description": None,
         "pypi_package": None,
@@ -490,6 +507,7 @@ def ensure_arg_defaults(args: argparse.Namespace) -> None:
         "repo": None,
         "codex_home": None,
         "claude_home": None,
+        "gemini_home": None,
         "home": None,
         "verbose": False,
         "package_name": None,
@@ -886,11 +904,10 @@ def install_target_label(
     repo: object | None = None,
     repo_target: bool = False,
 ) -> str:
-    label = (
-        "Claude"
-        if agent_name == "claude"
-        else AGENT_LABELS.get(agent_name, agent_name)
-    )
+    label = {
+        "claude": "Claude",
+        "gemini": "Gemini",
+    }.get(agent_name, AGENT_LABELS.get(agent_name, agent_name))
     if scope == "dir":
         repo_path = target_repo_path(args, repo)
         kind = "repository" if repo_target else "directory"
@@ -1455,6 +1472,7 @@ def matching_uninstall_statuses(args: argparse.Namespace) -> list[InstallationSt
         home=getattr(args, "home", None),
         codex_home=getattr(args, "codex_home", None),
         claude_home=getattr(args, "claude_home", None),
+        gemini_home=getattr(args, "gemini_home", None),
     )
     skill_name = getattr(args, "skill_name", None)
     if skill_name is not None:
@@ -2962,6 +2980,7 @@ def stage_project_for_targets(
     pypi_version: str | None = None,
     pypi_wheel_path: Path | None = None,
     transaction_created_dirs: Iterable[Path] = (),
+    enable_gemini_hooks: bool = False,
 ) -> list[StagedInstall]:
     validate_install_source_selection(
         editable=editable_source_dir is not None,
@@ -2982,6 +3001,7 @@ def stage_project_for_targets(
                 home=args.home,
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
+                gemini_home=getattr(args, "gemini_home", None),
             ),
             force=args.force,
             editable_source_dir=editable_source_dir,
@@ -2991,6 +3011,7 @@ def stage_project_for_targets(
             github_source=github_source,
             github_archive_path=github_archive_path,
             transaction_created_dirs=transaction_created_dirs,
+            enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
         )
         for agent in normalize_agents([args.agent])
     ]
@@ -3012,6 +3033,7 @@ def validate_install_plan(
                 home=args.home,
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
+                gemini_home=getattr(args, "gemini_home", None),
             )
             key = (agent, args.scope, spec.skill_dir)
             if key in seen_targets:
@@ -3053,6 +3075,7 @@ def transaction_created_dirs(
                 home=args.home,
                 codex_home=args.codex_home,
                 claude_home=args.claude_home,
+                gemini_home=getattr(args, "gemini_home", None),
             )
             for directory in missing_parent_dirs(spec.skill_dir):
                 if directory not in created_dirs:
@@ -3276,6 +3299,7 @@ def run_uninstall(args: argparse.Namespace) -> list[InstallResult]:
         home=args.home,
         codex_home=args.codex_home,
         claude_home=args.claude_home,
+        gemini_home=getattr(args, "gemini_home", None),
     )
 
 
