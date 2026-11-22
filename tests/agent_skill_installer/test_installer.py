@@ -273,6 +273,30 @@ def make_skill_wheel(
     return path
 
 
+def make_corrupt_deflate_skill_wheel(path: Path, project: SkillProject) -> Path:
+    bundled_skill_path = project.bundled_skill_path or "skill"
+    prefix = PurePosixPath(project.import_name, bundled_skill_path).as_posix()
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as wheel:
+        wheel.writestr(f"{prefix}/SKILL.md", "wheel skill\n" * 1024)
+        wheel.writestr(f"{project.import_name}/__init__.py", "__version__ = '9.9.9'\n")
+        wheel.writestr(
+            f"{project.import_name}-{project.version}.dist-info/METADATA",
+            "Metadata-Version: 2.1\n"
+            f"Name: {project.package_name}\n"
+            f"Version: {project.version}\n",
+        )
+
+    with zipfile.ZipFile(path) as wheel:
+        info = wheel.getinfo(f"{prefix}/SKILL.md")
+    compressed_data_start = (
+        info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+    )
+    data = bytearray(path.read_bytes())
+    data[compressed_data_start : compressed_data_start + 3] = b"\xff\xff\xff"
+    path.write_bytes(data)
+    return path
+
+
 def patch_generic_pypi_build(
     monkeypatch,
     wheel: Path,
@@ -3592,11 +3616,11 @@ def test_cli_no_ui_uses_per_agent_home_directories(
         in output.out
     )
     assert (
-        "Installed example-agent-skill 1.2.3 to Gemini CLI global:"
+        "Installed example-agent-skill 1.2.3 to Gemini CLI (experimental) global:"
         in output.out
     )
     assert (
-        "Installed example-agent-skill 1.2.3 to Antigravity global:"
+        "Installed example-agent-skill 1.2.3 to Antigravity (experimental) global:"
         in output.out
     )
     assert (codex_home / "skills" / project.skill_name / "SKILL.md").exists()
@@ -5370,11 +5394,13 @@ def test_generic_install_source_selection_summary_excludes_target(
     assert "Into" not in prompter.summaries[0]
     assert prompter.summaries[1] == (
         f"Installing skill from local path {source}\n"
-        "Into Codex Global, Claude Global, Gemini Global, Antigravity Global"
+        "Into Codex Global, Claude Global, Gemini (experimental) Global, "
+        "Antigravity (experimental) Global"
     )
     assert prompter.summaries[2] == (
         f"Installing a copy of skill from {source}\n"
-        "Into Codex Global, Claude Global, Gemini Global, Antigravity Global"
+        "Into Codex Global, Claude Global, Gemini (experimental) Global, "
+        "Antigravity (experimental) Global"
     )
 
 
@@ -5638,6 +5664,45 @@ def test_generic_complete_with_ui_reprompts_for_invalid_wheel_file(
     complete_generic_with_ui(args, prompter)
 
     assert args.wheel_file == wheel
+    assert getattr(args, "_validated_wheel_project").skill_name == project.skill_name
+
+
+def test_generic_complete_with_ui_reprompts_for_corrupt_deflate_wheel(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    corrupt_wheel = make_corrupt_deflate_skill_wheel(
+        tmp_path / "corrupt.whl",
+        project,
+    )
+    valid_wheel = make_skill_wheel(
+        tmp_path / "valid.whl",
+        project,
+    )
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "wheel",
+        corrupt_wheel,
+        valid_wheel,
+        ["codex"],
+        "repo",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.wheel_file == valid_wheel
     assert getattr(args, "_validated_wheel_project").skill_name == project.skill_name
 
 
@@ -5973,10 +6038,10 @@ def test_generic_complete_with_ui_selects_installed_uninstall_target(
         choice["name"].strip()
         for choice in prompter.choices[2][2:]
     ] == [
-        "Antigravity User global - version 1.2.3",
+        "Antigravity (experimental) User global - version 1.2.3",
         "Claude Code User global - version 1.2.3",
         "Codex User global - version 1.2.3",
-        "Gemini CLI User global - version 1.2.3",
+        "Gemini CLI (experimental) User global - version 1.2.3",
     ]
     assert prompter.previews[-1] == (
         "agent-skill-installer --no-ui uninstall "
@@ -6043,10 +6108,10 @@ def test_generic_uninstall_target_labels_github_ref_as_source(
         choice["name"].strip()
         for choice in prompter.choices[1][2:]
     ] == [
-        "Antigravity User global - GitHub ref main",
+        "Antigravity (experimental) User global - GitHub ref main",
         "Claude Code User global - GitHub ref main",
         "Codex User global - GitHub ref main",
-        "Gemini CLI User global - GitHub ref main",
+        "Gemini CLI (experimental) User global - GitHub ref main",
     ]
 
 
@@ -8499,6 +8564,110 @@ installer:
     assert (repo / ".gemini" / "settings.json").exists() == enabled
 
 
+@pytest.mark.parametrize("generic", [False, True])
+@pytest.mark.parametrize(
+    ("terminal", "no_ui", "opt_in", "answer", "enabled"),
+    [
+        (True, False, False, "yes", True),
+        (True, False, False, "no", False),
+        (False, False, False, None, False),
+        (True, True, False, None, False),
+        (False, True, True, None, True),
+    ],
+)
+def test_antigravity_cli_hook_consent(
+    tmp_path: Path,
+    monkeypatch,
+    generic,
+    terminal,
+    no_ui,
+    opt_in,
+    answer,
+    enabled,
+) -> None:
+    config_text = """
+installer:
+  agents:
+    antigravity:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+"""
+    project = project_with_config(tmp_path, config_text)
+    monkeypatch.setattr("agent_skill_installer.cli.running_on_tty", lambda: terminal)
+    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: terminal)
+    prompts = []
+
+    def consent(prompt):
+        assert answer is not None, "non-interactive install must not prompt"
+        prompts.append(prompt)
+        return answer
+
+    monkeypatch.setattr("builtins.input", consent)
+    repo = make_repo(tmp_path / "repo")
+    argv = ["--no-ui"] if no_ui else []
+    argv += [
+        "install",
+        "--agent",
+        "antigravity",
+        "--scope",
+        "repo",
+        "--target-dir",
+        str(repo),
+    ]
+    if generic:
+        source = make_skill(tmp_path / "source")
+        (source / CONFIG_FILE_NAME).write_text(config_text)
+        argv += ["--skill-path", str(source), "--copy"]
+    if opt_in:
+        argv.append("--enable-antigravity-hooks")
+    if generic:
+        result = generic_main(argv)
+    else:
+        result = main(argv, project=project)
+
+    assert result == 0
+    assert bool(prompts) == (answer is not None)
+    assert (repo / ".agents" / "hooks.json").exists() == enabled
+
+
+@pytest.mark.parametrize("generic", [False, True])
+def test_gemini_cli_does_not_prompt_without_hook_declarations(
+    tmp_path: Path,
+    monkeypatch,
+    generic: bool,
+) -> None:
+    project = make_project(tmp_path)
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.setattr("agent_skill_installer.cli.running_on_tty", lambda: True)
+    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: True)
+
+    def unexpected_prompt(_prompt):
+        raise AssertionError("hook consent must not be requested without hooks")
+
+    monkeypatch.setattr("builtins.input", unexpected_prompt)
+    argv = [
+        "install",
+        "--agent",
+        "gemini",
+        "--scope",
+        "dir",
+        "--target-dir",
+        str(repo),
+    ]
+    if generic:
+        source = make_skill(tmp_path / "source")
+        argv += ["--skill-path", str(source), "--copy"]
+        result = generic_main(argv)
+    else:
+        result = main(argv, project=project)
+
+    assert result == 0
+    assert not (repo / ".gemini" / "settings.json").exists()
+
+
 def test_noninteractive_gemini_install_can_skip_runtime_hooks(tmp_path: Path) -> None:
     project = project_with_config(
         tmp_path,
@@ -8613,6 +8782,52 @@ installer:
         Installer(second).install(
             ["gemini"], "repo", repo=repo, enable_gemini_hooks=False
         )
+
+
+def test_skipping_gemini_hook_consent_removes_removed_commands_on_upgrade(
+    tmp_path: Path,
+) -> None:
+    original = project_with_config(
+        tmp_path,
+        """
+installer:
+  agents:
+    gemini:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""",
+    )
+    successor_source = make_skill(tmp_path / "successor-skill")
+    (successor_source / "scripts" / "tool.py").unlink()
+    successor = replace(
+        original,
+        version="2.0.0",
+        bundled_skill_source=successor_source,
+        installer_config=load_installer_config_text("installer: {}\n"),
+    )
+    repo = make_repo(tmp_path / "repo")
+    settings_path = repo / ".gemini" / "settings.json"
+
+    Installer(original).install(
+        ["gemini"], "repo", repo=repo, enable_gemini_hooks=True
+    )
+    assert settings_path.is_file()
+    installed_skill = repo / ".gemini" / "skills" / original.skill_name
+    command = json.loads(settings_path.read_text())["hooks"]["SessionStart"][0][
+        "hooks"
+    ][0]["command"]
+    assert command == native_skill_command(installed_skill)
+
+    Installer(successor).install(
+        ["gemini"], "repo", repo=repo, enable_gemini_hooks=False
+    )
+
+    assert not settings_path.exists()
+    installed_skill = repo / ".gemini" / "skills" / successor.skill_name
+    assert not (installed_skill / "scripts" / "tool.py").exists()
 
 
 def test_gemini_uninstall_removes_asi_created_empty_settings_file(
@@ -8839,7 +9054,10 @@ installer:
     output = capsys.readouterr()
 
     assert install_code == 0
-    assert "Installed example-agent-skill 1.2.3 to Gemini CLI repo:" in output.out
+    assert (
+        "Installed example-agent-skill 1.2.3 to Gemini CLI (experimental) repo:"
+        in output.out
+    )
     assert "Review the installed Gemini CLI hooks with /hooks." in output.out
     assert f"  hook:  {repo / 'GEMINI.md'}" in output.out
     assert f"  runtime hooks: {repo / '.gemini' / 'settings.json'}" in output.out
@@ -8860,7 +9078,7 @@ installer:
     uninstall_output = capsys.readouterr()
     assert uninstall_code == 0
     assert (
-        "Removed example-agent-skill 1.2.3 from Gemini CLI repo:"
+        "Removed example-agent-skill 1.2.3 from Gemini CLI (experimental) repo:"
         in uninstall_output.out
     )
     assert not (repo / ".gemini").exists()
@@ -9885,6 +10103,7 @@ installer:
             "--no-ui",
             "--verbose",
             "install",
+            "--enable-antigravity-hooks",
             "--agent",
             "antigravity",
             "--scope",
@@ -9898,7 +10117,7 @@ installer:
 
     assert install_code == 0
     assert (
-        "Installed example-agent-skill 1.2.3 to Antigravity repo (my-workspace):"
+        "Installed example-agent-skill 1.2.3 to Antigravity (experimental) repo (my-workspace):"
         in output.out
     )
     assert "Review the installed Antigravity hooks in hooks.json." in output.out
@@ -9924,7 +10143,7 @@ installer:
     uninstall_output = capsys.readouterr()
     assert uninstall_code == 0
     assert (
-        "Removed example-agent-skill 1.2.3 from Antigravity repo (my-workspace):"
+        "Removed example-agent-skill 1.2.3 from Antigravity (experimental) repo (my-workspace):"
         in uninstall_output.out
     )
     assert not (repo / ".agents").exists()

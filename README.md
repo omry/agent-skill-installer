@@ -15,14 +15,19 @@ upgrade or uninstall skills it owns.
 
 ### Agent targets
 
+Gemini CLI and Antigravity integrations are **experimental**. Antigravity has
+had limited manual testing; Gemini CLI has not yet had manual testing. Verify
+the installed skills, discoverability, and hooks in the agent before relying
+on them.
+
 Use one target, a comma-separated list, or `--agent all`:
 
 | Target | Directory discovery | Global discovery | Runtime hooks |
 | --- | --- | --- | --- |
 | `codex` | `.codex/skills` and `AGENTS.md` | `~/.codex/skills` and `~/.codex/AGENTS.md` | `.codex/hooks.json` |
 | `claude` | `.claude/skills` and `CLAUDE.md` | `~/.claude/skills` and `~/.claude/CLAUDE.md` | Not installed |
-| `gemini` | `.gemini/skills` and `GEMINI.md` | `~/.gemini/skills` and `~/.gemini/GEMINI.md` | `.gemini/settings.json` |
-| `antigravity` | `.agents/skills` and `.agents/rules/*.md` | `~/.gemini/config/skills` and `~/.gemini/config/rules/*.md` | `.agents/hooks.json` |
+| `gemini` (experimental) | `.gemini/skills` and `GEMINI.md` | `~/.gemini/skills` and `~/.gemini/GEMINI.md` | `.gemini/settings.json` |
+| `antigravity` (experimental) | `.agents/skills` and `.agents/rules/*.md` | `~/.gemini/config/skills` and `~/.gemini/config/rules/*.md` | `.agents/hooks.json` |
 
 The complete path matrix, target-home overrides, hook behavior, and uninstall
 ownership rules are in [Installing Skills](docs/installing-skills.md). Skill

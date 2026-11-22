@@ -13,12 +13,15 @@ The same skill payload can target all four runtimes. Keep the shared
 instructions in `SKILL.md`; use `agent-skill-installer.yaml` only when a target
 needs different discoverability text or native hook fields.
 
+Gemini CLI and Antigravity integrations are **experimental**. See
+[Installing Skills](installing-skills.md) for their testing status.
+
 | Target | Default activation text | Instruction file or rule | Hook representation |
 | --- | --- | --- | --- |
 | Codex | `$<skill_name>` | `AGENTS.md` | Native `hooks.json` |
 | Claude Code | `/<skill_name>` | `CLAUDE.md` | Parsed only; runtime install is unsupported |
-| Gemini CLI | Activate by skill name | `GEMINI.md` | `settings.json` `hooks` |
-| Antigravity | Activate by skill name | Per-skill `trigger: always_on` rule | Native `hooks.json` |
+| Gemini CLI (experimental) | Activate by skill name | `GEMINI.md` | `settings.json` `hooks` |
+| Antigravity (experimental) | Activate by skill name | Per-skill `trigger: always_on` rule | Native `hooks.json` |
 
 Use the per-agent sections in the metadata below only for fields that differ
 between runtimes. A hook declaration that is valid for one target is not
