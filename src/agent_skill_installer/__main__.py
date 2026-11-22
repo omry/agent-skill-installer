@@ -611,7 +611,10 @@ def preview_skill_path() -> Path:
 
 def local_summary_path(path: Path | None) -> Path:
     source_path = path or default_skill_path()
-    return source_path.expanduser().resolve()
+    try:
+        return source_path.expanduser().resolve()
+    except (RuntimeError, ValueError):
+        return source_path
 
 
 def preview_command(
@@ -800,7 +803,10 @@ def install_source_summary(
         )
         if path_value is None:
             return "Installing from a local wheel file"
-        wheel_path = Path(str(path_value)).expanduser()
+        try:
+            wheel_path = Path(str(path_value)).expanduser()
+        except (RuntimeError, ValueError):
+            wheel_path = Path(str(path_value))
         return f"Installing from local wheel file {wheel_path}"
     if selected_source == "local":
         path_value = (
@@ -1640,8 +1646,8 @@ def complete_install_with_ui(
         if args.wheel_file is None:
             def validate_wheel_path(value: str) -> str | None:
                 validation_args = copy_args(args)
-                validation_args.wheel_file = Path(value).expanduser()
                 try:
+                    validation_args.wheel_file = Path(value).expanduser()
                     validate_wheel_file(validation_args)
                 except (
                     InstallerError,
@@ -1649,6 +1655,8 @@ def complete_install_with_ui(
                     UsageError,
                     OSError,
                     UnicodeError,
+                    RuntimeError,
+                    ValueError,
                 ) as error:
                     return str(error)
                 return None
@@ -1733,8 +1741,8 @@ def complete_install_with_ui(
         if args.skill_path is None:
             def validate_local_path(value: str) -> str | None:
                 validation_args = copy_args(args)
-                validation_args.skill_path = Path(value).expanduser()
                 try:
+                    validation_args.skill_path = Path(value).expanduser()
                     read_local_projects(validation_args)
                 except (
                     InstallerError,
@@ -1742,6 +1750,8 @@ def complete_install_with_ui(
                     UsageError,
                     OSError,
                     UnicodeError,
+                    RuntimeError,
+                    ValueError,
                 ) as error:
                     return str(error)
                 return None

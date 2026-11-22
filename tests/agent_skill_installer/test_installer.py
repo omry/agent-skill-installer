@@ -34,6 +34,7 @@ from agent_skill_installer.__main__ import (
     complete_with_ui as complete_generic_with_ui,
     load_recent_github_urls,
     install_source_choices as generic_install_source_choices,
+    install_decision_summary,
     load_recent_pypi_packages,
     main as generic_main,
     recent_installations_path,
@@ -50,6 +51,7 @@ from agent_skill_installer.cli import (
     build_no_ui_command,
     command_preview_classes,
     complete_with_ui,
+    expand_prompt_path,
     format_status_line,
     install_source_choices,
     installation_option_choices,
@@ -4290,7 +4292,7 @@ def test_textual_version_validator_blocks_invalid_value() -> None:
 
     def validate(value: str) -> str | None:
         if value == "missing-package":
-            return "PyPI package not found: missing-package"
+            return "unexpected field in config.[/broken]"
         return None
 
     app = make_textual_version_app(
@@ -4314,7 +4316,7 @@ def test_textual_version_validator_blocks_invalid_value() -> None:
 
             assert app.return_value is None
             assert str(app.query_one("#error", Static).content) == (
-                "PyPI package not found: missing-package"
+                "unexpected field in config.[/broken]"
             )
 
             package_input.value = "valid-package"
@@ -4323,6 +4325,43 @@ def test_textual_version_validator_blocks_invalid_value() -> None:
     asyncio.run(run_scenario())
 
     assert app.return_value == "valid-package"
+
+
+def test_prompt_path_with_unknown_user_does_not_raise() -> None:
+    fallback = Path("/tmp/default-source")
+    value = "~definitely-no-such-user/skill"
+
+    assert expand_prompt_path(value, fallback) == Path(value)
+    assert expand_prompt_path("\x00", fallback) == Path("\x00")
+
+
+def test_install_summary_handles_unknown_user_paths() -> None:
+    args = Namespace(
+        skill_path=None,
+        wheel_file=None,
+        github_url=None,
+        github_path=None,
+        pypi_package=None,
+        skill_name=None,
+        editable=None,
+    )
+    unknown = Path("~definitely-no-such-user/skill")
+
+    local = install_decision_summary(
+        args,
+        command="install",
+        source="local",
+        skill_path=unknown,
+    )
+    wheel = install_decision_summary(
+        args,
+        command="install",
+        source="wheel",
+        wheel_file=unknown,
+    )
+
+    assert "definitely-no-such-user" in local
+    assert "definitely-no-such-user" in wheel
 
 
 class ScriptedPrompter:
@@ -5564,6 +5603,41 @@ def test_generic_complete_with_ui_selects_wheel_file(
     assert (
         repo / ".codex" / "skills" / project.skill_name / "SKILL.md"
     ).read_text() == "wheel skill\n"
+
+
+def test_generic_complete_with_ui_reprompts_for_invalid_wheel_file(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    wheel = make_skill_wheel(
+        tmp_path / "example_agent_skill-1.2.3-py3-none-any.whl",
+        project,
+    )
+    repo = make_repo(tmp_path / "repo")
+    args = Namespace(
+        command=None,
+        agent=None,
+        scope=None,
+        repo=repo,
+        codex_home=None,
+        claude_home=None,
+        home=None,
+        no_ui=False,
+        verbose=False,
+    )
+    prompter = ScriptedPrompter(
+        "install",
+        "wheel",
+        tmp_path / "missing.whl",
+        wheel,
+        ["codex"],
+        "repo",
+    )
+
+    complete_generic_with_ui(args, prompter)
+
+    assert args.wheel_file == wheel
+    assert getattr(args, "_validated_wheel_project").skill_name == project.skill_name
 
 
 def test_generic_complete_with_ui_requires_pypi_package_without_recent_default(
