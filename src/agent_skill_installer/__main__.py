@@ -25,6 +25,7 @@ from .cli import (
     TextualPrompter,
     UsageError as CliUsageError,
     codex_hook_consent,
+    replacement_consent,
     antigravity_hook_consent,
     agent_arg_from_values,
     gemini_hook_consent,
@@ -64,6 +65,7 @@ from .installer import (
     normalize_agents,
     parse_github_url,
     read_manifest,
+    replacement_installation,
     remove_created_dirs,
     running_on_tty,
     stage_install_target,
@@ -187,6 +189,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser("install", help="Install a skill.")
     add_target_args(install)
+    install.add_argument(
+        "--replace-skill", metavar="OLD",
+        help="Replace this explicitly named ASI-managed installation after confirmation.",
+    )
+    install.add_argument(
+        "--confirm-replacement", action="store_true",
+        help="Confirm removal of the installation named by --replace-skill.",
+    )
     install.add_argument(
         "--force",
         action="store_true",
@@ -454,6 +464,10 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
             parts.append("--enable-gemini-hooks")
         if getattr(args, "enable_antigravity_hooks", False):
             parts.append("--enable-antigravity-hooks")
+        if getattr(args, "replace_skill", None) is not None:
+            parts.extend(["--replace-skill", args.replace_skill])
+        if getattr(args, "confirm_replacement", False):
+            parts.append("--confirm-replacement")
         if getattr(args, "force", False):
             parts.append("--force")
         if getattr(args, "skill_path", None) is not None:
@@ -3101,35 +3115,42 @@ def stage_project_for_targets(
         if "antigravity" in normalize_agents([args.agent])
         else False
     )
-    return [
-        stage_install_target(
-            project,
-            target_spec(
-                project,
-                agent,
-                args.scope,
-                repo_target=args.repo_target,
-                repo=repo,
-                home=args.home,
-                codex_home=args.codex_home,
-                claude_home=args.claude_home,
-                gemini_home=getattr(args, "gemini_home", None),
-                antigravity_home=getattr(args, "antigravity_home", None),
-            ),
-            force=args.force,
-            editable_source_dir=editable_source_dir,
-            external_wheel_source_dir=external_wheel_source_dir,
-            pypi_version=pypi_version,
-            pypi_wheel_path=pypi_wheel_path,
-            github_source=github_source,
-            github_archive_path=github_archive_path,
-            transaction_created_dirs=transaction_created_dirs,
-            enable_codex_hooks=enable_codex_hooks,
-            enable_gemini_hooks=enable_gemini_hooks,
-            enable_antigravity_hooks=enable_antigravity_hooks,
-        )
-        for agent in normalize_agents([args.agent])
-    ]
+    staged: list[StagedInstall] = []
+    try:
+        for agent in normalize_agents([args.agent]):
+            staged.append(
+                stage_install_target(
+                    project,
+                    target_spec(
+                        project,
+                        agent,
+                        args.scope,
+                        repo_target=args.repo_target,
+                        repo=repo,
+                        home=args.home,
+                        codex_home=args.codex_home,
+                        claude_home=args.claude_home,
+                        gemini_home=getattr(args, "gemini_home", None),
+                        antigravity_home=getattr(args, "antigravity_home", None),
+                    ),
+                    force=args.force,
+                    editable_source_dir=editable_source_dir,
+                    external_wheel_source_dir=external_wheel_source_dir,
+                    pypi_version=pypi_version,
+                    pypi_wheel_path=pypi_wheel_path,
+                    github_source=github_source,
+                    github_archive_path=github_archive_path,
+                    transaction_created_dirs=transaction_created_dirs,
+                    replace_skill=getattr(args, "replace_skill", None),
+                    enable_codex_hooks=enable_codex_hooks,
+                    enable_gemini_hooks=enable_gemini_hooks,
+                    enable_antigravity_hooks=enable_antigravity_hooks,
+                )
+            )
+    except (Exception, KeyboardInterrupt):
+        cleanup_staged_installs(staged)
+        raise
+    return staged
 
 
 def validate_install_plan(
@@ -3150,6 +3171,17 @@ def validate_install_plan(
                 claude_home=args.claude_home,
                 gemini_home=getattr(args, "gemini_home", None),
                 antigravity_home=getattr(args, "antigravity_home", None),
+            )
+            replacement_source = (
+                project.bundled_skill_source
+                if getattr(args, "editable", None) is not False
+                else None
+            )
+            replacement_installation(
+                project,
+                spec,
+                getattr(args, "replace_skill", None),
+                source_dir=replacement_source,
             )
             key = (agent, args.scope, spec.skill_dir)
             if key in seen_targets:
@@ -3252,7 +3284,10 @@ def install_projects_for_targets(
     pypi_wheel_path: Path | None = None,
 ) -> list[InstallResult]:
     normalize_args_scope(args)
+    if getattr(args, "replace_skill", None) is not None and len(projects) != 1:
+        raise InstallerError("--replace-skill requires exactly one selected source skill")
     validate_install_plan(projects, args)
+    replacement_consent(args, projects[0].skill_name)
     emit_install_plan_warnings(projects, args)
     created_dirs = transaction_created_dirs(projects, args)
     staged_installs: list[StagedInstall] = []

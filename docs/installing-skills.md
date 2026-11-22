@@ -236,6 +236,34 @@ frontmatter as-is, so the installed skill keeps the declared name
 Use `--description` to override the default discoverability text when the skill
 does not provide its own installer config.
 
+## Replace An Installed Skill Under A New Name
+
+To replace an existing installation, select exactly one source skill and name
+its old installation with `--replace-skill OLD`. Interactive CLI and text UI
+installs ask for confirmation, with No selected by default. Unattended installs
+must also pass `--confirm-replacement`:
+
+```bash
+agent-skill-installer --no-ui install \
+  --skill-path ./my-skill \
+  --skill-name new-name \
+  --replace-skill old-name --confirm-replacement \
+  --agent claude --scope global
+```
+
+ASI requires an existing manifest for the named old installation in every
+selected target, and an unused destination name. `--force` does not bypass
+these requirements. Replacement installs the new payload and removes the old
+skill directory or symlink, its recorded discoverability block, and its owned
+runtime hooks. User instructions and hooks remain. If the transaction fails,
+ASI restores the old installation. New runtime hooks still require the
+agent's normal hook approval.
+
+Source-selection options such as `--rename SRC:DST` choose the new install name;
+use `--replace-skill OLD` as well when retiring a previous installation. Without
+replacement, separate installation names remain separate installs. ASI does not
+infer an old installation from similar names or unowned Markdown blocks.
+
 ## Targets
 
 ### Target paths
