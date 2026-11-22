@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 import zlib
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib import resources
@@ -383,6 +383,7 @@ class StagedInstall:
     runtime_hooks: RuntimeHookPlan | None
     skill_exists: bool
     result: InstallResult
+    replacement: tuple[TargetSpec, dict[str, object], Path] | None = None
 
 
 @dataclass(frozen=True)
@@ -451,6 +452,7 @@ class Installer:
         github_url: str | None = None,
         github_ref: str | None = None,
         github_path: str | None = None,
+        replace_skill: str | None = None,
         enable_codex_hooks: bool = False,
         enable_gemini_hooks: bool = False,
         enable_antigravity_hooks: bool = False,
@@ -473,6 +475,7 @@ class Installer:
             github_url=github_url,
             github_ref=github_ref,
             github_path=github_path,
+            replace_skill=replace_skill,
             enable_codex_hooks=enable_codex_hooks,
             enable_gemini_hooks=enable_gemini_hooks,
             enable_antigravity_hooks=enable_antigravity_hooks,
@@ -3852,6 +3855,67 @@ def install_source_path(
     return None
 
 
+def replacement_installation(
+    project: SkillProject,
+    spec: TargetSpec,
+    old_name: str | None,
+    *,
+    source_dir: Path | None = None,
+) -> tuple[TargetSpec, dict[str, object], Path] | None:
+    if old_name is None:
+        return None
+    if (not old_name or old_name in {".", ".."} or "/" in old_name
+            or "\\" in old_name or old_name != old_name.strip()):
+        raise InstallerError(f"invalid replacement skill name: {old_name!r}")
+    if old_name == project.skill_name:
+        raise InstallerError("replacement requires different old and new skill names")
+    if spec.skill_dir.exists() or spec.skill_dir.is_symlink():
+        raise InstallerError(f"replacement destination already exists: {spec.skill_dir}")
+    old_project = replace(project, skill_name=old_name)
+    old_spec = replace(
+        spec, skill_dir=spec.skill_dir.parent / old_name,
+        hook_path=(spec.hook_path.with_name(f"{old_name}.md")
+                   if spec.agent == "antigravity" else spec.hook_path),
+        marker_start=old_project.marker_start, marker_end=old_project.marker_end,
+    )
+    if not (old_spec.skill_dir.exists() or old_spec.skill_dir.is_symlink()):
+        raise InstallerError(f"replacement skill is not installed: {old_spec.skill_dir}")
+    if source_dir is not None:
+        try:
+            source_dir.resolve().relative_to(old_spec.skill_dir.resolve())
+        except ValueError:
+            pass
+        else:
+            raise InstallerError(
+                "editable replacement source is inside the installation being retired; "
+                "use a separate source checkout"
+            )
+    candidates = manifest_path_candidates(old_project, old_spec.skill_dir)
+    manifest_file = next((path for path in candidates if path.is_file()), None)
+    if manifest_file is None:
+        raise InstallerError(f"refusing to replace unowned skill directory: {old_spec.skill_dir}")
+    manifest = read_manifest_file(manifest_file)
+    status = status_from_manifest(manifest, manifest_file)
+    if (status.skill_dir != old_spec.skill_dir or status.hook_path != old_spec.hook_path
+            or status.agent != spec.agent or status.scope != spec.scope
+            or status.repo_target != spec.repo_target or status.skill_name != old_name):
+        raise InstallerError(f"replacement manifest does not match selected target: {manifest_file}")
+    start, end = manifest.get("hook_marker_start"), manifest.get("hook_marker_end")
+    if not isinstance(start, str) or not start or not isinstance(end, str) or not end:
+        raise InstallerError(f"replacement manifest is missing discoverability markers: {manifest_file}")
+    old_spec = replace(old_spec, marker_start=start, marker_end=end)
+    plan_uninstall_hook(old_spec)
+    record = runtime_hook_manifest_record(manifest, source=manifest_file)
+    if record is not None and record[0] != old_spec.runtime_hook_path:
+        raise InstallerError(f"replacement runtime hook path does not match selected target: {manifest_file}")
+    if record is not None:
+        if spec.agent == "antigravity":
+            read_antigravity_hooks_document(record[0])
+        else:
+            read_runtime_hooks_document(record[0], agent=spec.agent)
+    return old_spec, manifest, manifest_file
+
+
 def stage_install_target(
     project: SkillProject,
     spec: TargetSpec,
@@ -3865,6 +3929,7 @@ def stage_install_target(
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
     transaction_created_dirs: Iterable[Path] = (),
+    replace_skill: str | None = None,
     enable_codex_hooks: bool = False,
     enable_gemini_hooks: bool = False,
     enable_antigravity_hooks: bool = False,
@@ -3911,6 +3976,12 @@ def stage_install_target(
         else local_checkout_skill_root(project)
         if editable
         else None
+    )
+    replacement = replacement_installation(
+        project,
+        spec,
+        replace_skill,
+        source_dir=source_dir,
     )
     if pypi_version is not None and pypi_wheel_path is None:
         raise InstallerError("missing PyPI wheel for requested install source")
@@ -4111,6 +4182,7 @@ def stage_install_target(
         runtime_hooks=runtime_hooks,
         skill_exists=skill_exists,
         result=result,
+        replacement=replacement,
     )
 
 
@@ -4157,27 +4229,36 @@ def recovery_error_details(errors: list[str]) -> str:
 
 def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[InstallResult]:
     staged_list = list(staged_installs)
+    claimed_paths = [item.spec.skill_dir for item in staged_list]
+    claimed_paths.extend(item.replacement[0].skill_dir for item in staged_list if item.replacement)
     backup_skill_dirs: dict[Path, Path] = {}
     backup_sidecar_manifest_paths: dict[Path, Path] = {}
     skill_swapped: set[Path] = set()
     sidecar_swapped: set[Path] = set()
-    hook_snapshots: dict[Path, bytes | None] = {}
+    hook_snapshots: dict[Path, tuple[bytes, int] | None] = {}
     staged_by_skill_dir = {staged.spec.skill_dir: staged for staged in staged_list}
     staged_by_sidecar = {staged.sidecar_manifest_path: staged for staged in staged_list}
 
     for staged in staged_list:
         snapshot_paths = [staged.spec.hook_path]
+        if staged.replacement is not None:
+            old_spec, _, _ = staged.replacement
+            snapshot_paths.append(old_spec.hook_path)
+            if old_spec.runtime_hook_path is not None:
+                snapshot_paths.append(old_spec.runtime_hook_path)
         if staged.runtime_hooks is not None:
             snapshot_paths.append(staged.runtime_hooks.path)
         for hook_path in snapshot_paths:
             if hook_path not in hook_snapshots:
                 hook_snapshots[hook_path] = (
-                    hook_path.read_bytes()
+                    (hook_path.read_bytes(), stat.S_IMODE(hook_path.stat().st_mode))
                     if hook_path.exists()
                     else None
                 )
 
     try:
+        if len(claimed_paths) != len(set(claimed_paths)):
+            raise InstallerError("replacement overlaps another install target")
         for staged in staged_list:
             if staged.skill_exists:
                 backup = unique_sibling_path(staged.spec.skill_dir, "previous")
@@ -4206,19 +4287,36 @@ def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[Ins
                 else staged.spec.skill_dir / staged.project.manifest_relative_path
             )
             apply_runtime_hook_plan(staged, current_manifest=current_manifest)
-    except Exception as install_error:
+
+        for staged in staged_list:
+            if staged.replacement is None:
+                continue
+            old_spec, old_manifest, old_manifest_file = staged.replacement
+            uninstall_runtime_hooks(old_spec, old_manifest, old_manifest_file)
+            if (old_spec.hook_path != staged.spec.hook_path
+                    or old_spec.marker_start != staged.spec.marker_start):
+                uninstall_hook(old_spec, delete_if_empty=bool(old_manifest.get("created_hook_file")))
+            backup = unique_sibling_path(old_spec.skill_dir, "previous")
+            old_spec.skill_dir.rename(backup)
+            backup_skill_dirs[old_spec.skill_dir] = backup
+            if old_manifest_file.parent == old_spec.skill_dir.parent:
+                backup = unique_sibling_path(old_manifest_file, "previous")
+                old_manifest_file.rename(backup)
+                backup_sidecar_manifest_paths[old_manifest_file] = backup
+    except (Exception, KeyboardInterrupt) as install_error:
         rollback_errors: list[str] = []
         for hook_path, hook_text in hook_snapshots.items():
             def restore_hook(
                 hook_path: Path = hook_path,
-                hook_text: bytes | None = hook_text,
+                hook_text: tuple[bytes, int] | None = hook_text,
             ) -> None:
                 if hook_text is None:
                     if hook_path.exists():
                         hook_path.unlink()
                 else:
                     hook_path.parent.mkdir(parents=True, exist_ok=True)
-                    hook_path.write_bytes(hook_text)
+                    hook_path.write_bytes(hook_text[0])
+                    hook_path.chmod(hook_text[1])
 
             record_recovery_error(
                 rollback_errors,
@@ -4295,6 +4393,8 @@ def commit_staged_installs(staged_installs: Iterable[StagedInstall]) -> list[Ins
                 f"{recovery_error_details(rollback_errors)}. "
                 f"Original error: {install_error}"
             ) from install_error
+        if isinstance(install_error, KeyboardInterrupt):
+            raise
         raise InstallerError(
             f"install failed; rolled back changes: {install_error}"
         ) from install_error
@@ -4341,6 +4441,7 @@ def install_target(
     pypi_wheel_path: Path | None = None,
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
+    replace_skill: str | None = None,
     enable_codex_hooks: bool = False,
     enable_gemini_hooks: bool = False,
     enable_antigravity_hooks: bool = False,
@@ -4356,6 +4457,7 @@ def install_target(
         pypi_wheel_path=pypi_wheel_path,
         github_source=github_source,
         github_archive_path=github_archive_path,
+        replace_skill=replace_skill,
         enable_codex_hooks=enable_codex_hooks,
         enable_gemini_hooks=enable_gemini_hooks,
         enable_antigravity_hooks=enable_antigravity_hooks,
@@ -4445,6 +4547,7 @@ def install(
     github_url: str | None = None,
     github_ref: str | None = None,
     github_path: str | None = None,
+    replace_skill: str | None = None,
     enable_codex_hooks: bool = False,
     enable_gemini_hooks: bool = False,
     enable_antigravity_hooks: bool = False,
@@ -4512,6 +4615,7 @@ def install(
                         pypi_version=pypi_version_override or pypi_version,
                         pypi_wheel_path=pypi_wheel_path,
                         github_source=github_source,
+                        replace_skill=replace_skill,
                         enable_codex_hooks=enable_codex_hooks,
                         enable_gemini_hooks=enable_gemini_hooks,
                         enable_antigravity_hooks=enable_antigravity_hooks,

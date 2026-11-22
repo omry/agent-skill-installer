@@ -149,3 +149,15 @@ installer.published_pypi_versions()
 
 See [`examples/demo-installer/`](../examples/demo-installer/) for a wrapper CLI
 and [`examples/api-install/`](../examples/api-install/) for direct API usage.
+
+## Replace An Installed Skill
+
+`Installer(project).install(..., replace_skill="old-name")` explicitly authorizes
+replacement of that ASI-managed installation by `project.skill_name` in the
+selected targets. API calls do not prompt. The old name must differ from the
+new name, every selected target must contain the old owned installation, and
+the destination must be unused. Runtime-hook approval remains separate.
+
+Wrapper CLIs accept `--replace-skill OLD`. Interactive CLI and text UI installs
+ask for confirmation; unattended installs also require `--confirm-replacement`.
+See [replacement behavior and examples](installing-skills.md#replace-an-installed-skill-under-a-new-name).
