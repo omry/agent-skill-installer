@@ -413,8 +413,7 @@ jobs:
               --method GET \
               "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
               -f filter=all \
-              -f per_page=100 \
-              --jq '
+              -f per_page=100 | jq -r '
                 [.[].jobs[] |
                   select(.name == "Build and verify distributions")] |
                 if any(.[];

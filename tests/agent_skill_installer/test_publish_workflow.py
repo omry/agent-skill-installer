@@ -1,4 +1,11 @@
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import textwrap
+
+import pytest
 
 
 WORKFLOW = Path(__file__).parents[2] / ".github/workflows/publish.yml"
@@ -59,12 +66,54 @@ def test_publish_waits_for_successful_build_from_the_same_run() -> None:
     assert "github.run_id" in publish
     assert "--paginate" in publish
     assert "--slurp" in publish
+    assert "-f per_page=100 | jq -r '" in publish
     assert "-f filter=all" in publish
     assert '[.[].jobs[] |' in publish
     assert 'select(.name == "Build and verify distributions")' in publish
     assert 'any(.[];' in publish
     assert "completed:success" in publish
     assert "completed:*" in publish
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release job uses a POSIX shell")
+@pytest.mark.parametrize("conclusion", ["success", "failure"])
+def test_release_wait_executes_paginated_job_filter(tmp_path, conclusion) -> None:
+    if shutil.which("jq") is None:
+        pytest.skip("release runner's jq is unavailable")
+    workflow = WORKFLOW.read_text()
+    step = workflow.split("      - name: Wait for release validation\n", 1)[1]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+    script = script.replace("${{ github.repository }}", "omry/agent-skill-installer")
+    script = script.replace("${{ github.run_id }}", "123")
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(json.dumps([
+        {"jobs": [{"name": "Unrelated job", "status": "in_progress"}]},
+        {"jobs": [{"name": "Build and verify distributions",
+                   "status": "completed", "conclusion": conclusion}]},
+    ]))
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        "for arg do\n"
+        "  if [ \"$arg\" = --jq ]; then\n"
+        "    echo 'gh rejects --slurp combined with --jq' >&2\n"
+        "    exit 2\n"
+        "  fi\n"
+        "done\n"
+        "cat \"$ASI_RELEASE_JOBS_FIXTURE\"\n"
+    )
+    gh.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+             "ASI_RELEASE_JOBS_FIXTURE": str(fixture)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == (0 if conclusion == "success" else 1), result.stderr
+    if conclusion == "failure":
+        assert "release validation did not pass (completed:failure)" in result.stdout
 
 
 def test_publish_wait_covers_the_workflow_job_lifetime() -> None:
