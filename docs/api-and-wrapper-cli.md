@@ -114,6 +114,13 @@ installer.install(["claude"], "repo")
 installer.uninstall(["codex"], "global")
 ```
 
+Runtime hooks are opt-in for Codex, Gemini CLI, and Antigravity. Pass
+`enable_codex_hooks=True`, `enable_gemini_hooks=True`, or
+`enable_antigravity_hooks=True` when installing a project that declares hooks
+for that agent. All three default to `False`, matching non-interactive CLI
+installs. Interactive CLI and text UI installs ask for approval with No as
+the default. Codex also requires its native `/hooks` trust review.
+
 The `bundled_skill_path` value is explicit: in the example above, bundled
 installs read skill files from `your_skill_package/skill` inside the project
 package. Tests or development tools can point `bundled_skill_source` at a

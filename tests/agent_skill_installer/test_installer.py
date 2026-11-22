@@ -2406,6 +2406,7 @@ installer:
         scope,
         repo=repo if scope == "repo" else None,
         codex_home=codex_home,
+        enable_codex_hooks=True,
     )[0]
 
     hooks_path = (
@@ -2471,6 +2472,7 @@ installer:
         "repo",
         repo=repo,
         editable=True,
+        enable_codex_hooks=True,
     )[0]
 
     assert result.skill_dir is not None
@@ -2513,7 +2515,7 @@ installer:
     repo = make_repo(tmp_path / "repo")
 
     with pytest.raises(InstallerError, match=message):
-        Installer(project).install(["codex"], "repo", repo=repo)
+        Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert not (repo / ".codex").exists()
     assert not (repo / "AGENTS.md").exists()
@@ -2547,7 +2549,7 @@ installer:
     repo = make_repo(tmp_path / "repo")
 
     with pytest.raises(InstallerError, match=message):
-        Installer(project).install(["codex"], "repo", repo=repo)
+        Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert not (repo / ".codex").exists()
 
@@ -2573,7 +2575,7 @@ installer:
     (project.bundled_skill_source / "scripts" / "tool.py").chmod(0o644)
     repo = make_repo(tmp_path / "repo")
 
-    result = Installer(project).install(["codex"], "repo", repo=repo)[0]
+    result = Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)[0]
 
     assert result.skill_dir is not None
     assert os.access(result.skill_dir / "scripts" / "tool.py", os.X_OK)
@@ -2608,7 +2610,7 @@ installer:
     monkeypatch.chdir(checkout)
 
     with pytest.raises(InstallerError, match="editable install on POSIX"):
-        Installer(project).install(["codex"], "repo", repo=repo, editable=True)
+        Installer(project).install(["codex"], "repo", repo=repo, editable=True, enable_codex_hooks=True)
 
     assert not os.access(executable, os.X_OK)
     assert not (repo / ".codex").exists()
@@ -2645,6 +2647,7 @@ installer:
             "repo",
             repo=repo,
             editable=True,
+            enable_codex_hooks=True,
         )
 
     assert not (repo / ".codex").exists()
@@ -2672,7 +2675,7 @@ installer:
         InstallerError,
         match="packaged hooks must use type: skill-command",
     ):
-        Installer(project).install(["codex"], "repo", repo=repo)
+        Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert not (repo / ".codex").exists()
 
@@ -2702,7 +2705,7 @@ installer:
         InstallerError,
         match=rf"{field} is not valid for type: skill-command",
     ):
-        Installer(project).install(["codex"], "repo", repo=repo)
+        Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert not (repo / ".codex").exists()
     assert not (repo / "AGENTS.md").exists()
@@ -2765,6 +2768,7 @@ installer:
         "repo",
         repo=repo,
         pypi_version="2.0.0",
+        enable_codex_hooks=True,
     )[0]
 
     assert result.skill_dir is not None
@@ -2795,7 +2799,7 @@ installer:
     )
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".codex" / "hooks.json"
-    Installer(old_project).install(["codex"], "repo", repo=repo)
+    Installer(old_project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     document = json.loads(hooks_path.read_text())
     document["userSetting"] = {"keep": True}
     document["hooks"]["UserPromptSubmit"] = [
@@ -2820,7 +2824,7 @@ installer:
 """
         ),
     )
-    Installer(new_project).install(["codex"], "repo", repo=repo)
+    Installer(new_project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     upgraded = json.loads(hooks_path.read_text())
     skill_dir = repo / ".codex" / "skills" / new_project.skill_name
@@ -2889,7 +2893,7 @@ installer:
     original_text = json.dumps(original, separators=(",", ":")) + "\n"
     hooks_path.write_text(original_text)
 
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     manifest = read_install_manifest(project, skill_dir)
     assert manifest["runtime_hooks"]["entries"] == {}
     assert hooks_path.read_text() == original_text
@@ -2930,7 +2934,7 @@ installer:
 
     monkeypatch.setattr("agent_skill_installer.installer.os.replace", record_replace)
 
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert len(replacements) == 1
     assert replacements[0][1] == hooks_path
@@ -2957,7 +2961,7 @@ installer:
 """,
     )
     repo = make_repo(tmp_path / "repo")
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     skill_dir = repo / ".codex" / "skills" / project.skill_name
     install_manifest = manifest_path(project, skill_dir)
     manifest = json.loads(install_manifest.read_text())
@@ -2993,7 +2997,7 @@ installer:
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".codex" / "hooks.json"
 
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     Installer(project).uninstall(["codex"], "repo", repo=repo)
 
     assert not hooks_path.exists()
@@ -3017,7 +3021,7 @@ installer:
 """,
     )
     repo = make_repo(tmp_path / "repo")
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     skill_dir = repo / ".codex" / "skills" / project.skill_name
     hooks_path = repo / ".codex" / "hooks.json"
     instruction_path = repo / "AGENTS.md"
@@ -3060,7 +3064,7 @@ installer:
     )
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".codex" / "hooks.json"
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     symlink_target = tmp_path / "user-managed-hooks.json"
     hooks_path.rename(symlink_target)
     hooks_path.symlink_to(symlink_target)
@@ -3077,7 +3081,7 @@ installer:
 """
             ),
         )
-        Installer(without_hooks).install(["codex"], "repo", repo=repo)
+        Installer(without_hooks).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     else:
         Installer(project).uninstall(["codex"], "repo", repo=repo)
 
@@ -3105,7 +3109,7 @@ installer:
     )
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".codex" / "hooks.json"
-    Installer(project).install(["codex"], "repo", repo=repo)
+    Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     without_hooks = replace(
         project,
@@ -3118,7 +3122,7 @@ installer:
 """
         ),
     )
-    result = Installer(without_hooks).install(["codex"], "repo", repo=repo)[0]
+    result = Installer(without_hooks).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)[0]
 
     assert result.runtime_hook_path is None
     assert not hooks_path.exists()
@@ -3149,8 +3153,8 @@ installer:
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".codex" / "hooks.json"
 
-    Installer(first).install(["codex"], "repo", repo=repo)
-    Installer(second).install(["codex"], "repo", repo=repo)
+    Installer(first).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
+    Installer(second).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     assert len(json.loads(hooks_path.read_text())["hooks"]["SessionStart"]) == 2
     Installer(first).uninstall(["codex"], "repo", repo=repo)
 
@@ -3184,8 +3188,8 @@ installer:
     )
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".codex" / "hooks.json"
-    Installer(first).install(["codex"], "repo", repo=repo)
-    Installer(second).install(["codex"], "repo", repo=repo)
+    Installer(first).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
+    Installer(second).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
     first_skill_dir = repo / ".codex" / "skills" / first.skill_name
     second_skill_dir = repo / ".codex" / "skills" / second.skill_name
     manifest_path(second, second_skill_dir).write_text("not json\n")
@@ -3239,7 +3243,7 @@ installer:
     repo = make_repo(tmp_path / "repo")
 
     with pytest.raises(InstallerError, match="unsupported codex hook type"):
-        Installer(project).install(["codex"], "repo", repo=repo)
+        Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert not (repo / ".codex").exists()
     assert not (repo / "AGENTS.md").exists()
@@ -3265,7 +3269,7 @@ installer:
     hooks_path.write_text("not json\n")
 
     with pytest.raises(InstallerError, match="invalid Codex hooks JSON"):
-        Installer(project).install(["codex"], "repo", repo=repo)
+        Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert hooks_path.read_text() == "not json\n"
     assert not (repo / ".codex" / "skills").exists()
@@ -3308,7 +3312,7 @@ installer:
     )
 
     with pytest.raises(InstallerError, match="rolled back changes"):
-        Installer(project).install(["codex"], "repo", repo=repo)
+        Installer(project).install(["codex"], "repo", repo=repo, enable_codex_hooks=True)
 
     assert hooks_path.read_text() == original
     assert not (repo / ".codex" / "skills" / project.skill_name).exists()
@@ -3364,7 +3368,7 @@ installer:
     )
 
     with pytest.raises(InstallerError, match="rolled back changes"):
-        Installer(project).install(["gemini"], "repo", repo=repo)
+        Installer(project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
 
     assert written_settings and written_settings[0] != original_settings
     assert settings_path.read_bytes() == original_settings
@@ -3528,6 +3532,7 @@ installer:
         [
             "--no-ui",
             "install",
+            "--enable-codex-hooks",
             "--verbose",
             "--agent",
             "codex",
@@ -8143,6 +8148,7 @@ installer:
         scope,
         repo=repo if scope == "repo" else None,
         gemini_home=gemini_home,
+        enable_gemini_hooks=True,
     )[0]
 
     settings_path = (
@@ -8214,7 +8220,7 @@ def test_gemini_command_preserves_literal_dollars_through_native_interpolation(
     project = replace(make_project(tmp_path), installer_config=installer_config)
     repo = make_repo(tmp_path / "repo $HOME ${HOME} 'with spaces'")
 
-    result = Installer(project).install(["gemini"], "repo", repo=repo)[0]
+    result = Installer(project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)[0]
 
     settings = json.loads((repo / ".gemini" / "settings.json").read_text())
     command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -8258,6 +8264,7 @@ installer:
         "repo",
         repo=repo,
         editable=True,
+        enable_gemini_hooks=True,
     )[0]
 
     assert result.skill_dir is not None
@@ -8309,7 +8316,7 @@ installer:
         "}\n"
     )
 
-    Installer(old_project).install(["gemini"], "repo", repo=repo)
+    Installer(old_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
 
     new_project = replace(
         old_project,
@@ -8330,7 +8337,7 @@ installer:
 """
         ),
     )
-    Installer(new_project).install(["gemini"], "repo", repo=repo)
+    Installer(new_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
 
     upgraded = read_runtime_hooks_document(settings_path, agent="gemini")
     upgraded_text = settings_path.read_text()
@@ -8506,135 +8513,14 @@ installer:
             )
         assert json.loads(native_parse.stdout) == document
 
-    Installer(old_project).install(["gemini"], "repo", repo=repo)
+    Installer(old_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     assert_settings(old_argument)
 
-    Installer(new_project).install(["gemini"], "repo", repo=repo)
+    Installer(new_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     assert_settings(new_argument)
 
     Installer(new_project).uninstall(["gemini"], "repo", repo=repo)
     assert_settings(None)
-
-
-@pytest.mark.parametrize("generic", [False, True])
-@pytest.mark.parametrize(
-    ("terminal", "no_ui", "opt_in", "answer", "enabled"),
-    [
-        (True, False, False, "yes", True),
-        (True, False, False, "no", False),
-        (False, False, False, None, False),
-        (True, True, False, None, False),
-        (False, True, True, None, True),
-    ],
-)
-def test_gemini_cli_hook_consent(
-    tmp_path: Path, monkeypatch, generic, terminal, no_ui, opt_in, answer, enabled
-) -> None:
-    config_text = """
-installer:
-  agents:
-    gemini:
-      hooks:
-        SessionStart:
-          - hooks:
-              - type: skill-command
-                executable: scripts/tool.py
-"""
-    project = project_with_config(tmp_path, config_text)
-    monkeypatch.setattr("agent_skill_installer.cli.running_on_tty", lambda: terminal)
-    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: terminal)
-    prompts = []
-
-    def consent(prompt):
-        assert answer is not None, "non-interactive install must not prompt"
-        prompts.append(prompt)
-        return answer
-
-    monkeypatch.setattr("builtins.input", consent)
-    repo = make_repo(tmp_path / "repo")
-    argv = ["--no-ui"] if no_ui else []
-    argv += ["install", "--agent", "gemini", "--scope", "repo", "--target-dir", str(repo)]
-    if opt_in:
-        argv.append("--enable-gemini-hooks")
-    if generic:
-        wheel = make_skill_wheel(tmp_path / "skill.whl", project, config_text=config_text)
-        argv += ["--wheel-file", str(wheel)]
-        result = generic_main(argv)
-    else:
-        result = main(argv, project=project)
-
-    assert result == 0
-    assert bool(prompts) == (answer is not None)
-    assert (repo / ".gemini" / "settings.json").exists() == enabled
-
-
-@pytest.mark.parametrize("generic", [False, True])
-@pytest.mark.parametrize(
-    ("terminal", "no_ui", "opt_in", "answer", "enabled"),
-    [
-        (True, False, False, "yes", True),
-        (True, False, False, "no", False),
-        (False, False, False, None, False),
-        (True, True, False, None, False),
-        (False, True, True, None, True),
-    ],
-)
-def test_antigravity_cli_hook_consent(
-    tmp_path: Path,
-    monkeypatch,
-    generic,
-    terminal,
-    no_ui,
-    opt_in,
-    answer,
-    enabled,
-) -> None:
-    config_text = """
-installer:
-  agents:
-    antigravity:
-      hooks:
-        SessionStart:
-          - hooks:
-              - type: skill-command
-                executable: scripts/tool.py
-"""
-    project = project_with_config(tmp_path, config_text)
-    monkeypatch.setattr("agent_skill_installer.cli.running_on_tty", lambda: terminal)
-    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: terminal)
-    prompts = []
-
-    def consent(prompt):
-        assert answer is not None, "non-interactive install must not prompt"
-        prompts.append(prompt)
-        return answer
-
-    monkeypatch.setattr("builtins.input", consent)
-    repo = make_repo(tmp_path / "repo")
-    argv = ["--no-ui"] if no_ui else []
-    argv += [
-        "install",
-        "--agent",
-        "antigravity",
-        "--scope",
-        "repo",
-        "--target-dir",
-        str(repo),
-    ]
-    if generic:
-        source = make_skill(tmp_path / "source")
-        (source / CONFIG_FILE_NAME).write_text(config_text)
-        argv += ["--skill-path", str(source), "--copy"]
-    if opt_in:
-        argv.append("--enable-antigravity-hooks")
-    if generic:
-        result = generic_main(argv)
-    else:
-        result = main(argv, project=project)
-
-    assert result == 0
-    assert bool(prompts) == (answer is not None)
-    assert (repo / ".agents" / "hooks.json").exists() == enabled
 
 
 @pytest.mark.parametrize("generic", [False, True])
@@ -8670,59 +8556,6 @@ def test_gemini_cli_does_not_prompt_without_hook_declarations(
 
     assert result == 0
     assert not (repo / ".gemini" / "settings.json").exists()
-
-
-def test_noninteractive_gemini_install_can_skip_runtime_hooks(tmp_path: Path) -> None:
-    project = project_with_config(
-        tmp_path,
-        """
-installer:
-  agents:
-    gemini:
-      hooks:
-        SessionStart:
-          - matcher: '*'
-            hooks:
-              - type: skill-command
-                executable: scripts/tool.py
-                name: test-hook
-""",
-    )
-    repo = make_repo(tmp_path / "repo")
-
-    Installer(project).install(
-        ["gemini"], "repo", repo=repo, enable_gemini_hooks=False
-    )
-
-    settings_path = repo / ".gemini" / "settings.json"
-    assert not settings_path.exists()
-
-
-def test_noninteractive_gemini_install_enables_hooks_explicitly(tmp_path: Path) -> None:
-    project = project_with_config(
-        tmp_path,
-        """
-installer:
-  agents:
-    gemini:
-      hooks:
-        SessionStart:
-          - matcher: '*'
-            hooks:
-              - type: skill-command
-                executable: scripts/tool.py
-                name: test-hook
-""",
-    )
-    repo = make_repo(tmp_path / "repo")
-
-    Installer(project).install(
-        ["gemini"], "repo", repo=repo, enable_gemini_hooks=True
-    )
-
-    settings_path = repo / ".gemini" / "settings.json"
-    assert settings_path.exists()
-    assert read_runtime_hooks_document(settings_path, agent="gemini")["hooks"]
 
 
 def test_skipping_gemini_hook_consent_preserves_existing_hooks(tmp_path: Path) -> None:
@@ -8853,7 +8686,7 @@ installer:
     repo = make_repo(tmp_path / "repo")
     settings_path = repo / ".gemini" / "settings.json"
 
-    Installer(project).install(["gemini"], "repo", repo=repo)
+    Installer(project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     assert settings_path.is_file()
 
     Installer(project).uninstall(["gemini"], "repo", repo=repo)
@@ -8880,7 +8713,7 @@ installer:
     repo = make_repo(tmp_path / "repo")
     settings_path = repo / ".gemini" / "settings.json"
 
-    Installer(project).install(["gemini"], "repo", repo=repo)
+    Installer(project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     installed_settings = settings_path.read_text().replace(
         '"SessionStart": [',
         '"SessionStart": [\n            // User annotation added after installation.\n',
@@ -8933,7 +8766,7 @@ installer:
     original_text = json.dumps(original, separators=(",", ":")) + "\n"
     settings_path.write_text(original_text)
 
-    Installer(project).install(["gemini"], "repo", repo=repo)
+    Installer(project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     manifest = read_install_manifest(project, skill_dir)
     assert manifest["runtime_hooks"]["entries"] == {}
     assert settings_path.read_text() == original_text
@@ -8964,7 +8797,7 @@ installer:
         InstallerError,
         match="unsupported gemini hook type.*packaged hooks must use type: skill-command",
     ):
-        Installer(legacy_project).install(["gemini"], "repo", repo=repo)
+        Installer(legacy_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     assert not (repo / ".gemini").exists()
     assert not (repo / "GEMINI.md").exists()
 
@@ -8982,7 +8815,7 @@ installer:
 """,
     )
     with pytest.raises(InstallerError, match="reserved Gemini hooks key: disabled"):
-        Installer(reserved_project).install(["gemini"], "repo", repo=repo)
+        Installer(reserved_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     assert not (repo / ".gemini").exists()
 
     valid_project = project_with_config(
@@ -9002,7 +8835,7 @@ installer:
     settings_path.parent.mkdir()
     settings_path.write_text("{not json\n")
     with pytest.raises(InstallerError, match="invalid Gemini hooks JSON"):
-        Installer(valid_project).install(["gemini"], "repo", repo=repo)
+        Installer(valid_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
     assert settings_path.read_text() == "{not json\n"
     assert not (repo / ".gemini" / "skills").exists()
     assert not (repo / "GEMINI.md").exists()
@@ -9015,7 +8848,7 @@ installer:
     ):
         settings_path.write_text(non_native_json)
         with pytest.raises(InstallerError, match="invalid Gemini hooks JSON"):
-            Installer(valid_project).install(["gemini"], "repo", repo=repo)
+            Installer(valid_project).install(["gemini"], "repo", repo=repo, enable_gemini_hooks=True)
         assert settings_path.read_text() == non_native_json
         assert not (repo / ".gemini" / "skills").exists()
         assert not (repo / "GEMINI.md").exists()
@@ -9514,8 +9347,8 @@ installer:
 
     monkeypatch.setattr(Path, "read_text", read_text_with_cp1252_default)
     installer = Installer(project)
-    installer.install(["antigravity"], "dir", repo=repo)
-    installer.install(["antigravity"], "dir", repo=repo)
+    installer.install(["antigravity"], "dir", repo=repo, enable_antigravity_hooks=True)
+    installer.install(["antigravity"], "dir", repo=repo, enable_antigravity_hooks=True)
     installer.uninstall(["antigravity"], "dir", repo=repo)
 
     document = json.loads(hooks_path.read_text(encoding="utf-8"))
@@ -9546,7 +9379,7 @@ installer:
     hooks_path.write_bytes(original)
 
     with pytest.raises(InstallerError, match="invalid Antigravity hooks JSON"):
-        Installer(project).install(["antigravity"], "dir", repo=repo)
+        Installer(project).install(["antigravity"], "dir", repo=repo, enable_antigravity_hooks=True)
 
     assert hooks_path.read_bytes() == original
     assert not (repo / ".agents" / "skills" / project.skill_name).exists()
@@ -9601,7 +9434,7 @@ installer:
     )
 
     with pytest.raises(InstallerError, match="rolled back changes"):
-        Installer(project).install(["antigravity"], "dir", repo=repo)
+        Installer(project).install(["antigravity"], "dir", repo=repo, enable_antigravity_hooks=True)
 
     assert hooks_path.read_bytes() == original
     assert not (repo / ".agents" / "skills" / project.skill_name).exists()
@@ -9712,6 +9545,7 @@ installer:
         scope,
         repo=repo if scope == "repo" else None,
         antigravity_home=antigravity_home,
+        enable_antigravity_hooks=True,
     )[0]
 
     hooks_path = (
@@ -9802,6 +9636,7 @@ installer:
         "repo",
         repo=repo,
         editable=True,
+        enable_antigravity_hooks=True,
     )[0]
 
     assert result.skill_dir is not None
@@ -9861,7 +9696,7 @@ installer:
         + "\n"
     )
 
-    Installer(old_project).install(["antigravity"], "repo", repo=repo)
+    Installer(old_project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
 
     new_project = replace(
         old_project,
@@ -9881,7 +9716,7 @@ installer:
 """
         ),
     )
-    Installer(new_project).install(["antigravity"], "repo", repo=repo)
+    Installer(new_project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
 
     upgraded = json.loads(hooks_path.read_text())
     skill_dir = repo / ".agents" / "skills" / new_project.skill_name
@@ -9948,7 +9783,7 @@ installer:
     repo = make_repo(tmp_path / "repo")
     hooks_path = repo / ".agents" / "hooks.json"
 
-    Installer(project).install(["antigravity"], "repo", repo=repo)
+    Installer(project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
     assert hooks_path.is_file()
 
     Installer(project).uninstall(["antigravity"], "repo", repo=repo)
@@ -9988,7 +9823,7 @@ installer:
     original_text = json.dumps(original, separators=(",", ":")) + "\n"
     hooks_path.write_text(original_text)
 
-    Installer(project).install(["antigravity"], "repo", repo=repo)
+    Installer(project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
     manifest = read_install_manifest(project, skill_dir)
     assert manifest["runtime_hooks"]["entries"] == {}
     assert hooks_path.read_text() == original_text
@@ -10019,7 +9854,7 @@ installer:
         InstallerError,
         match="unsupported antigravity hook type.*packaged hooks must use type: skill-command",
     ):
-        Installer(legacy_project).install(["antigravity"], "repo", repo=repo)
+        Installer(legacy_project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
     assert not (repo / ".agents").exists()
 
     flat_matcher_project = project_with_config(
@@ -10040,7 +9875,7 @@ installer:
         InstallerError,
         match="matcher is not supported for flat Antigravity event SessionStart",
     ):
-        Installer(flat_matcher_project).install(["antigravity"], "repo", repo=repo)
+        Installer(flat_matcher_project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
     assert not (repo / ".agents").exists()
 
     reserved_project = project_with_config(
@@ -10057,7 +9892,7 @@ installer:
 """,
     )
     with pytest.raises(InstallerError, match="reserved Antigravity hooks key: enabled"):
-        Installer(reserved_project).install(["antigravity"], "repo", repo=repo)
+        Installer(reserved_project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
     assert not (repo / ".agents").exists()
 
     valid_project = project_with_config(
@@ -10077,7 +9912,7 @@ installer:
     hooks_path.parent.mkdir()
     hooks_path.write_text("{not json\n")
     with pytest.raises(InstallerError, match="invalid Antigravity hooks JSON"):
-        Installer(valid_project).install(["antigravity"], "repo", repo=repo)
+        Installer(valid_project).install(["antigravity"], "repo", repo=repo, enable_antigravity_hooks=True)
     assert hooks_path.read_text() == "{not json\n"
     assert not (repo / ".agents" / "skills").exists()
     assert not (repo / ".agents" / "rules").exists()
@@ -10205,3 +10040,255 @@ def test_antigravity_docs_and_release_notes_cover_target() -> None:
     note = fragment.read_text() if fragment.is_file() else (root / "NEWS.md").read_text()
     assert fragment.is_file() or "/issues/47)" in note
     assert "Antigravity" in note
+
+
+HOOK_AGENTS = ("codex", "gemini", "antigravity")
+
+
+def consent_project(tmp_path: Path, agent: str):
+    config_text = f"""
+installer:
+  agents:
+    {agent}:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+"""
+    return project_with_config(tmp_path, config_text), config_text
+
+
+def runtime_hook_file(repo: Path, agent: str) -> Path:
+    return repo / {
+        "codex": ".codex/hooks.json",
+        "gemini": ".gemini/settings.json",
+        "antigravity": ".agents/hooks.json",
+    }[agent]
+
+
+@pytest.mark.parametrize("agent", HOOK_AGENTS)
+@pytest.mark.parametrize("generic", [False, True])
+@pytest.mark.parametrize(
+    ("terminal", "no_ui", "opt_in", "answer", "enabled"),
+    [
+        (True, False, False, "yes", True),
+        (True, False, False, "", False),
+        (True, False, False, "no", False),
+        (False, False, False, None, False),
+        (True, True, False, None, False),
+        (False, True, True, None, True),
+    ],
+)
+def test_cli_runtime_hook_consent(
+    tmp_path, monkeypatch, agent, generic, terminal, no_ui, opt_in, answer, enabled
+):
+    project, config_text = consent_project(tmp_path, agent)
+    monkeypatch.setattr("agent_skill_installer.cli.running_on_tty", lambda: terminal)
+    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: terminal)
+    prompts = []
+
+    def consent(prompt):
+        assert answer is not None, "non-interactive install must not prompt"
+        prompts.append(prompt)
+        return answer
+
+    monkeypatch.setattr("builtins.input", consent)
+    repo = make_repo(tmp_path / "repo")
+    argv = ["--no-ui"] if no_ui else []
+    argv += ["install", "--agent", agent, "--scope", "repo", "--target-dir", str(repo)]
+    if opt_in:
+        argv.append(f"--enable-{agent}-hooks")
+    if generic:
+        source = make_skill(tmp_path / "source")
+        (source / CONFIG_FILE_NAME).write_text(config_text)
+        argv += ["--skill-path", str(source), "--copy", "--all-src-skills"]
+        result = generic_main(argv)
+    else:
+        result = main(argv, project=project)
+    assert result == 0
+    assert bool(prompts) == (answer is not None)
+    assert runtime_hook_file(repo, agent).exists() == enabled
+
+
+@pytest.mark.parametrize("agent", HOOK_AGENTS)
+@pytest.mark.parametrize("generic", [False, True])
+@pytest.mark.parametrize("answer", ["no", "yes"])
+def test_tui_runtime_hook_consent(tmp_path, monkeypatch, agent, generic, answer):
+    project, config_text = consent_project(tmp_path, agent)
+    monkeypatch.setattr("agent_skill_installer.cli.running_on_tty", lambda: True)
+    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: pytest.fail("TUI must use its prompter"))
+    repo = make_repo(tmp_path / "repo")
+    prompter = ScriptedPrompter([agent], answer)
+    if generic:
+        source = make_skill(tmp_path / "source")
+        (source / CONFIG_FILE_NAME).write_text(config_text)
+        args = build_generic_parser().parse_args([
+            "install", "--skill-path", str(source), "--copy", "--all-src-skills",
+            "--scope", "repo", "--target-dir", str(repo),
+        ])
+        complete_generic_with_ui(args, prompter)
+        results = run_generic_install(args)
+    else:
+        args = build_parser(project).parse_args([
+            "install", "--scope", "repo", "--target-dir", str(repo),
+        ])
+        args.editable = False
+        complete_with_ui(project, args, prompter)
+        from agent_skill_installer.cli import run
+        results = run(project, args)
+    assert len(results) == 1
+    assert prompter.choices[-1][0]["value"] == "no"
+    assert runtime_hook_file(repo, agent).exists() == (answer == "yes")
+
+
+@pytest.mark.parametrize("agent", HOOK_AGENTS)
+@pytest.mark.parametrize("preexisting_target", [False, True])
+def test_multi_skill_hook_consent_cancellation_cleans_staging(
+    tmp_path: Path,
+    monkeypatch,
+    agent: str,
+    preexisting_target: bool,
+) -> None:
+    source = make_skill_collection(tmp_path / "source")
+    config_text = f"""
+installer:
+  agents:
+    {agent}:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+"""
+    for source_skill in source.iterdir():
+        (source_skill / CONFIG_FILE_NAME).write_text(config_text)
+
+    repo = make_repo(tmp_path / "repo")
+    agent_root = repo / {
+        "codex": ".codex",
+        "gemini": ".gemini",
+        "antigravity": ".agents",
+    }[agent]
+    skills_parent = agent_root / "skills"
+    preserved_file = skills_parent / "preexisting-install" / "sentinel.txt"
+    if preexisting_target:
+        preserved_file.parent.mkdir(parents=True)
+        preserved_file.write_text("keep this installation\n")
+
+    prompter = ScriptedPrompter("copy", "yes", KeyboardInterrupt())
+    monkeypatch.setattr("agent_skill_installer.cli.running_on_tty", lambda: True)
+    monkeypatch.setattr("agent_skill_installer.__main__.running_on_tty", lambda: True)
+
+    from agent_skill_installer import __main__ as generic_cli
+
+    monkeypatch.setattr(
+        generic_cli,
+        "TextualPrompter",
+        lambda _project: prompter,
+    )
+    original_stage = generic_cli.stage_selected_project_for_targets
+    staged_projects = []
+
+    def record_staging(project, *args, **kwargs):
+        staged = original_stage(project, *args, **kwargs)
+        staged_projects.extend(staged)
+        return staged
+
+    monkeypatch.setattr(
+        generic_cli,
+        "stage_selected_project_for_targets",
+        record_staging,
+    )
+    exit_code = generic_main(
+        [
+            "install",
+            "--skill-path",
+            str(source),
+            "--all-src-skills",
+            "--agent",
+            agent,
+            "--scope",
+            "repo",
+            "--target-dir",
+            str(repo),
+        ]
+    )
+
+    assert exit_code == 130
+    assert [staged.project.skill_name for staged in staged_projects] == ["skill-one"]
+    assert len(prompter.calls) == 3
+    assert not list(repo.rglob(".*.install-*"))
+    assert not (skills_parent / "skill-one").exists()
+    assert not (skills_parent / "skill-two").exists()
+    assert not runtime_hook_file(repo, agent).exists()
+    hook_paths = {
+        "codex": [repo / "AGENTS.md"],
+        "gemini": [repo / "GEMINI.md"],
+        "antigravity": [
+            agent_root / "rules" / "skill-one.md",
+            agent_root / "rules" / "skill-two.md",
+        ],
+    }[agent]
+    assert all(not path.exists() for path in hook_paths)
+    if preexisting_target:
+        assert preserved_file.read_text() == "keep this installation\n"
+    else:
+        assert not agent_root.exists()
+
+
+@pytest.mark.parametrize("agent", HOOK_AGENTS)
+@pytest.mark.parametrize("api", ["object", "function"])
+@pytest.mark.parametrize("approval", [None, False, True])
+def test_python_api_runtime_hooks_require_approval(tmp_path, agent, api, approval):
+    project, _ = consent_project(tmp_path, agent)
+    repo = make_repo(tmp_path / "repo")
+    kwargs = {} if approval is None else {f"enable_{agent}_hooks": approval}
+    if api == "object":
+        result = Installer(project).install([agent], "repo", repo=repo, **kwargs)[0]
+    else:
+        from agent_skill_installer.installer import install
+        result = install(project, [agent], "repo", repo=repo, **kwargs)[0]
+    assert (result.skill_dir / "SKILL.md").exists()
+    assert runtime_hook_file(repo, agent).exists() == (approval is True)
+
+
+@pytest.mark.parametrize("agent", HOOK_AGENTS)
+def test_upgrade_preserves_approved_hooks_and_requires_approval_for_changes(tmp_path, agent):
+    project, config_text = consent_project(tmp_path, agent)
+    repo = make_repo(tmp_path / "repo")
+    approval = {f"enable_{agent}_hooks": True}
+    Installer(project).install([agent], "repo", repo=repo, **approval)
+    hooks_path = runtime_hook_file(repo, agent)
+    before = hooks_path.read_bytes()
+    Installer(project).install([agent], "repo", repo=repo)
+    assert hooks_path.read_bytes() == before
+
+    changed = replace(project, installer_config=load_installer_config_text(
+        config_text.replace("executable: scripts/tool.py", "executable: scripts/tool.py\n                args: [changed]")
+    ))
+    with pytest.raises(InstallerError, match="runtime hooks changed"):
+        Installer(changed).install([agent], "repo", repo=repo)
+    assert hooks_path.read_bytes() == before
+    Installer(changed).install([agent], "repo", repo=repo, **approval)
+    assert hooks_path.read_bytes() != before
+
+    without_hooks = replace(project, installer_config=InstallerConfig())
+    Installer(without_hooks).install([agent], "repo", repo=repo)
+    assert not hooks_path.exists()
+
+
+@pytest.mark.parametrize("generic", [False, True])
+def test_hook_opt_in_command_preview(tmp_path, generic):
+    args = Namespace(command="install", enable_codex_hooks=True,
+                     enable_gemini_hooks=True, enable_antigravity_hooks=True,
+                     agent="all", scope="global", repo=None, force=False,
+                     skill_path=tmp_path / "source")
+    if generic:
+        from agent_skill_installer.__main__ import build_no_ui_command as preview
+        command = preview(args)
+    else:
+        command = build_no_ui_command(make_project(tmp_path), args)
+    for agent in HOOK_AGENTS:
+        assert f"--enable-{agent}-hooks" in command

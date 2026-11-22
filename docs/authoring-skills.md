@@ -395,7 +395,10 @@ can replace those groups, and uninstall removes a group only after its last ASI
 owner is gone. An identical group that already existed before installation is
 treated as user-owned and is not removed later.
 
-Codex still requires the user to review and trust new or changed hooks with
+Runtime hook installation requires explicit approval in the CLI, text UI, and
+Python API for Codex, Gemini CLI, and Antigravity; see
+[Installing Skills](installing-skills.md#ownership-and-safety).
+Codex also requires the user to review and trust new or changed hooks with
 `/hooks`; installation never grants trust automatically. Gemini CLI hooks can
 also be reviewed with `/hooks`. Claude hook declarations are parsed against the
 Claude-specific schema, but runtime installation is not yet supported and fails

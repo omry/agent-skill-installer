@@ -2087,6 +2087,14 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
         )
         if command == "install":
             subparser.add_argument(
+                "--enable-codex-hooks",
+                action="store_true",
+                help=(
+                    "Enable Codex runtime hooks. Non-interactive installs skip "
+                    "new Codex hooks unless this flag is set."
+                ),
+            )
+            subparser.add_argument(
                 "--enable-gemini-hooks",
                 action="store_true",
                 help=(
@@ -2433,6 +2441,8 @@ def build_no_ui_command(
     if bool(getattr(args, "verbose", False)):
         parts.append("--verbose")
     if command == "install":
+        if getattr(args, "enable_codex_hooks", False):
+            parts.append("--enable-codex-hooks")
         if getattr(args, "enable_gemini_hooks", False):
             parts.append("--enable-gemini-hooks")
         if getattr(args, "enable_antigravity_hooks", False):
@@ -3016,6 +3026,7 @@ def complete_with_ui(
     prompter: Prompter | None = None,
 ) -> argparse.Namespace:
     prompter = prompter or TextualPrompter(project)
+    args.runtime_hook_prompter = prompter
     print(f"{project.skill_name} installer")
 
     missing = object()
@@ -3464,6 +3475,8 @@ def complete_with_ui(
         args.github_path = None
     if not hasattr(args, "verbose"):
         args.verbose = False
+    if not hasattr(args, "enable_codex_hooks"):
+        args.enable_codex_hooks = False
     if not hasattr(args, "enable_gemini_hooks"):
         args.enable_gemini_hooks = False
     if not hasattr(args, "enable_antigravity_hooks"):
@@ -3661,6 +3674,10 @@ def installs_remote_payload(args: argparse.Namespace) -> bool:
     )
 
 
+def codex_hook_consent(project: SkillProject, args: argparse.Namespace) -> bool:
+    return runtime_hook_consent(project, args, "codex")
+
+
 def gemini_hook_consent(project: SkillProject, args: argparse.Namespace) -> bool:
     return runtime_hook_consent(project, args, "gemini")
 
@@ -3707,12 +3724,24 @@ def runtime_hook_consent(
         return False
     if getattr(args, "no_ui", False) or not running_on_tty():
         return False
-    agent_label = "Gemini" if agent == "gemini" else "Antigravity"
+    agent_label = AGENT_LABELS[agent]
+    message = (
+        f"Enable {agent_label} runtime hooks for {project.skill_name}? "
+        f"Hooks can run code automatically when {agent_label} starts or handles events. "
+        "Only enable hooks from a source you trust."
+    )
+    prompter = getattr(args, "runtime_hook_prompter", None)
+    if prompter is not None:
+        return prompter.select(
+            message,
+            [
+                {"name": "No, skip new hooks", "value": "no"},
+                {"name": "Yes, enable hooks", "value": "yes"},
+            ],
+        ) == "yes"
     try:
         answer = input(
-            f"Enable {agent_label} runtime hooks for {project.skill_name}? "
-            f"Hooks can run code automatically when {agent_label} starts or handles events. "
-            "Only enable hooks from a source you trust. [y/N] "
+            message + " [y/N] "
         )
     except EOFError:
         return False
@@ -3729,6 +3758,8 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
         else set(selected_agents_for_command(args.agent))
     )
     if args.command == "install":
+        if "codex" in selected_agents:
+            args.enable_codex_hooks = codex_hook_consent(project, args)
         if "gemini" in selected_agents:
             args.enable_gemini_hooks = gemini_hook_consent(project, args)
         if "antigravity" in selected_agents:
@@ -3759,6 +3790,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 github_url=args.github_url,
                 github_ref=args.github_ref,
                 github_path=args.github_path,
+                enable_codex_hooks=getattr(args, "enable_codex_hooks", False),
                 enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
                 enable_antigravity_hooks=getattr(
                     args, "enable_antigravity_hooks", False
@@ -3806,6 +3838,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     github_url=args.github_url,
                     github_ref=args.github_ref,
                     github_path=args.github_path,
+                    enable_codex_hooks=getattr(args, "enable_codex_hooks", False),
                     enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
                     enable_antigravity_hooks=getattr(
                         args, "enable_antigravity_hooks", False
@@ -3893,6 +3926,8 @@ def prepare_args(args: argparse.Namespace) -> None:
         args.github_path = None
     if not hasattr(args, "verbose"):
         args.verbose = False
+    if not hasattr(args, "enable_codex_hooks"):
+        args.enable_codex_hooks = False
     if not hasattr(args, "enable_gemini_hooks"):
         args.enable_gemini_hooks = False
     if not hasattr(args, "enable_antigravity_hooks"):
@@ -3918,7 +3953,7 @@ def main(
             require_noninteractive_args(args)
         print_install_attempt(project, args)
         results = run(project, args)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, BackRequested):
         print("\nCancelled.", file=sys.stderr)
         return 130
     except UsageError as error:

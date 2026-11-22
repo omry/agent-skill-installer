@@ -285,12 +285,21 @@ filename, SHA256 digest, resolver method, and each `wheel_path` to installed
 For Codex, Gemini CLI, and Antigravity hooks, the manifest also records each
 exact native hook entry that ASI owns. Existing user settings and hook entries
 are preserved, including an identical entry that predates installation.
-Interactive CLI installs ask before enabling Gemini CLI or Antigravity runtime
-hooks. Use `--enable-gemini-hooks` or `--enable-antigravity-hooks` to approve
-them without a prompt, including with `--no-ui` or when running without a
-terminal. Without these flags, non-interactive installs skip new Gemini CLI and
-Antigravity hooks. Before using Codex hooks, review and trust them with `/hooks`,
-review enabled Gemini CLI hooks with `/hooks`, and review Antigravity hooks in `hooks.json`. Packaged hooks name a skill-relative
+Runtime hooks require explicit approval for every supported target: Codex,
+Gemini CLI, and Antigravity. Interactive CLI and text UI installs ask before
+installing new hooks, with No as the default. Use `--enable-codex-hooks`,
+`--enable-gemini-hooks`, or `--enable-antigravity-hooks` to approve hooks for
+that agent without a prompt. Non-interactive installs skip new hooks unless
+the matching flag is set. Python API callers must pass
+`enable_codex_hooks=True`, `enable_gemini_hooks=True`, or
+`enable_antigravity_hooks=True`; all three default to `False`.
+
+On upgrades without approval, unchanged previously approved hook entries stay
+installed. Added or changed entries require approval when the install already
+owns hooks. Removed declarations remove the corresponding owned entries.
+Installer approval does not grant native agent trust: review and trust Codex
+hooks with `/hooks`, review enabled Gemini CLI hooks with `/hooks`, and review
+Antigravity hooks in `hooks.json`. Packaged hooks name a skill-relative
 executable; ASI validates it against the staged skill, ensures copied and
 packaged payloads are executable on POSIX, and writes the installation's
 absolute executable path into a host-quoted native hook command. Editable source
