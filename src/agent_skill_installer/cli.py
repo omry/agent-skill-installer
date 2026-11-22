@@ -27,7 +27,9 @@ from .installer import (
     install_source_metadata,
     install_warnings,
     inspect_installations,
+    replacement_installation,
     running_on_tty,
+    target_spec,
 )
 
 
@@ -2111,6 +2113,14 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
                 ),
             )
             subparser.add_argument(
+                "--replace-skill", metavar="OLD",
+                help="Replace this explicitly named ASI-managed installation after confirmation.",
+            )
+            subparser.add_argument(
+                "--confirm-replacement", action="store_true",
+                help="Confirm removal of the installation named by --replace-skill.",
+            )
+            subparser.add_argument(
                 "--force",
                 action="store_true",
                 help="Replace an existing unowned skill directory.",
@@ -2447,6 +2457,10 @@ def build_no_ui_command(
             parts.append("--enable-gemini-hooks")
         if getattr(args, "enable_antigravity_hooks", False):
             parts.append("--enable-antigravity-hooks")
+        if getattr(args, "replace_skill", None) is not None:
+            parts.extend(["--replace-skill", args.replace_skill])
+        if getattr(args, "confirm_replacement", False):
+            parts.append("--confirm-replacement")
         if bool(getattr(args, "force", False)):
             parts.append("--force")
         if editable:
@@ -3713,6 +3727,49 @@ def has_runtime_hook_declarations(project: SkillProject, agent: str) -> bool:
     return False
 
 
+def replacement_consent(args: argparse.Namespace, new_name: str) -> None:
+    old_name = getattr(args, "replace_skill", None)
+    confirmed = getattr(args, "confirm_replacement", False)
+    if old_name is None:
+        if confirmed:
+            raise InstallerError("--confirm-replacement requires --replace-skill OLD")
+        return
+    if confirmed:
+        return
+    if getattr(args, "no_ui", False) or not running_on_tty():
+        raise InstallerError(
+            "replacement requires explicit confirmation; use "
+            "--confirm-replacement with --replace-skill OLD"
+        )
+    targets = getattr(args, "targets", None) or []
+    location = (
+        ", ".join(
+            f"{agent} {scope}"
+            for agent, scope, _ in targets
+        )
+        if targets
+        else f"{getattr(args, 'agent', 'selected agent')} {getattr(args, 'scope', 'selected scope')}"
+    )
+    message = (
+        f"Replace installed skill {old_name!r} with {new_name!r} for "
+        f"{location}? "
+        "This removes the old skill, its discoverability instructions, and its owned runtime hooks."
+    )
+    prompter = getattr(args, "runtime_hook_prompter", None)
+    if prompter is not None:
+        approved = prompter.select(message, [
+            {"name": "No, cancel replacement", "value": "no"},
+            {"name": "Yes, replace old installation", "value": "yes"},
+        ]) == "yes"
+    else:
+        try:
+            approved = input(message + " [y/N] ").strip().lower() in {"y", "yes"}
+        except EOFError:
+            approved = False
+    if not approved:
+        raise BackRequested()
+
+
 def runtime_hook_consent(
     project: SkillProject,
     args: argparse.Namespace,
@@ -3758,6 +3815,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
         else set(selected_agents_for_command(args.agent))
     )
     if args.command == "install":
+        replacement_consent(args, project.skill_name)
         if "codex" in selected_agents:
             args.enable_codex_hooks = codex_hook_consent(project, args)
         if "gemini" in selected_agents:
@@ -3790,6 +3848,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 github_url=args.github_url,
                 github_ref=args.github_ref,
                 github_path=args.github_path,
+                replace_skill=getattr(args, "replace_skill", None),
                 enable_codex_hooks=getattr(args, "enable_codex_hooks", False),
                 enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
                 enable_antigravity_hooks=getattr(
@@ -3811,7 +3870,38 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
         raise UsageError(f"unknown command: {args.command}")
 
     results: list[InstallResult] = []
+    if args.command == "install" and getattr(args, "replace_skill", None) is not None:
+        # Validate every selected location before any grouped install can mutate.
+        replacement_source = (
+            project.bundled_skill_source
+            if getattr(args, "editable", None) is not False
+            else None
+        )
+        for agent, target_scope, target_repo_target in targets:
+            target = target_spec(
+                project,
+                agent,
+                target_scope,
+                repo_target=target_repo_target,
+                repo=args.repo if target_scope == "dir" else None,
+                home=args.home,
+                codex_home=args.codex_home,
+                claude_home=args.claude_home,
+                gemini_home=getattr(args, "gemini_home", None),
+                antigravity_home=getattr(args, "antigravity_home", None),
+            )
+            replacement_installation(
+                project,
+                target,
+                args.replace_skill,
+                source_dir=replacement_source,
+            )
     groups = list(dict.fromkeys((scope, repo_target) for _, scope, repo_target in targets))
+    if getattr(args, "replace_skill", None) is not None and len(groups) > 1:
+        raise InstallerError(
+            "replacement must target one installation scope at a time; "
+            "select either global or directory targets"
+        )
     for scope, repo_target in groups:
         agents = [
             agent
@@ -3838,6 +3928,7 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     github_url=args.github_url,
                     github_ref=args.github_ref,
                     github_path=args.github_path,
+                    replace_skill=getattr(args, "replace_skill", None),
                     enable_codex_hooks=getattr(args, "enable_codex_hooks", False),
                     enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
                     enable_antigravity_hooks=getattr(
