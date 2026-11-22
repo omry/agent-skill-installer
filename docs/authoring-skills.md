@@ -16,6 +16,16 @@ needs different discoverability text or native hook fields.
 Gemini CLI and Antigravity integrations are **experimental**. See
 [Installing Skills](installing-skills.md) for their testing status.
 
+ASI's skill payload is a raw skill directory containing `SKILL.md`. Codex
+plugins are a separate distribution format with a `.codex-plugin/plugin.json`
+manifest and may include plugin-level MCP, app, hook, marketplace, or
+presentation metadata. Packaging a raw skill for ASI does not package or
+register those plugin-level features; ASI still copies files that are inside the
+selected raw skill directory. See [Codex's plugin documentation](https://developers.openai.com/codex/plugins/build)
+when the plugin itself is the distribution unit. ASI's plugin support remains a
+separate design question; see
+[issue #14](https://github.com/omry/agent-skill-installer/issues/14).
+
 | Target | Default activation text | Instruction file or rule | Hook representation |
 | --- | --- | --- | --- |
 | Codex | `$<skill_name>` | `AGENTS.md` | Native `hooks.json` |
