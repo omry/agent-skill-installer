@@ -3568,10 +3568,14 @@ def test_codex_runtime_hook_docs_cover_skill_command_and_plugin_boundaries() -> 
     assert "review and trust" in installing
     assert "issues/14" in authoring
     assert "issues/14" in installing
-    assert original_fragment.is_file()
-    assert "open event-name mappings" in original_fragment.read_text()
-    assert skill_command_fragment.is_file()
-    skill_command_note = skill_command_fragment.read_text()
+    news = (root / "NEWS.md").read_text()
+    original_note = original_fragment.read_text() if original_fragment.is_file() else news
+    assert original_fragment.is_file() or "/issues/43)" in original_note
+    assert "open event-name mappings" in original_note
+    skill_command_note = (
+        skill_command_fragment.read_text() if skill_command_fragment.is_file() else news
+    )
+    assert skill_command_fragment.is_file() or "/issues/45)" in skill_command_note
     assert "Legacy packaged `type: command`" in skill_command_note
     assert "`CodexCommandHook`" in skill_command_note
     assert "`CodexSkillCommandHook`" in skill_command_note
@@ -9085,7 +9089,7 @@ installer:
     assert not (repo / "GEMINI.md").exists()
 
 
-def test_gemini_docs_and_news_fragment_cover_target() -> None:
+def test_gemini_docs_and_release_notes_cover_target() -> None:
     root = Path(__file__).parents[2]
     readme = (root / "README.md").read_text()
     installing = (root / "docs" / "installing-skills.md").read_text()
@@ -9099,8 +9103,9 @@ def test_gemini_docs_and_news_fragment_cover_target() -> None:
     assert "--gemini-home" in installing
     assert "GeminiAgentConfig" in authoring
     assert "GeminiSkillCommandHook" in authoring
-    assert fragment.is_file()
-    assert "Gemini CLI" in fragment.read_text()
+    note = fragment.read_text() if fragment.is_file() else (root / "NEWS.md").read_text()
+    assert fragment.is_file() or "/issues/3)" in note
+    assert "Gemini CLI" in note
 
 
 def test_installs_reinstalls_force_replaces_and_uninstalls_antigravity_repo_scope(
@@ -10182,7 +10187,7 @@ def test_selected_directory_uninstall_uses_install_root(
     assert not installed.hook_path.exists()
 
 
-def test_antigravity_docs_and_news_fragment_cover_target() -> None:
+def test_antigravity_docs_and_release_notes_cover_target() -> None:
     root = Path(__file__).parents[2]
     readme = (root / "README.md").read_text()
     installing = (root / "docs" / "installing-skills.md").read_text()
@@ -10197,5 +10202,6 @@ def test_antigravity_docs_and_news_fragment_cover_target() -> None:
     assert "--antigravity-home" in installing
     assert "AntigravityAgentConfig" in authoring
     assert "AntigravitySkillCommandHook" in authoring
-    assert fragment.is_file()
-    assert "Antigravity" in fragment.read_text()
+    note = fragment.read_text() if fragment.is_file() else (root / "NEWS.md").read_text()
+    assert fragment.is_file() or "/issues/47)" in note
+    assert "Antigravity" in note
