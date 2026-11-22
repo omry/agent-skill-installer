@@ -1638,6 +1638,21 @@ def complete_install_with_ui(
             validate_pypi_skill_package(args)
     elif source == "wheel":
         if args.wheel_file is None:
+            def validate_wheel_path(value: str) -> str | None:
+                validation_args = copy_args(args)
+                validation_args.wheel_file = Path(value).expanduser()
+                try:
+                    validate_wheel_file(validation_args)
+                except (
+                    InstallerError,
+                    InstallerConfigError,
+                    UsageError,
+                    OSError,
+                    UnicodeError,
+                ) as error:
+                    return str(error)
+                return None
+
             wheel_file = run_prompt(
                 ["wheel_file", *VALIDATED_WHEEL_FIELDS],
                 lambda: prompter.path(
@@ -1654,6 +1669,7 @@ def complete_install_with_ui(
                         source="wheel",
                         wheel_file=Path(str(value)),
                     ),
+                    validator=validate_wheel_path,
                 ),
             )
             if wheel_file == PROMPT_BACK:
@@ -1715,6 +1731,21 @@ def complete_install_with_ui(
             validate_github_skill_source(args)
     elif source == "local":
         if args.skill_path is None:
+            def validate_local_path(value: str) -> str | None:
+                validation_args = copy_args(args)
+                validation_args.skill_path = Path(value).expanduser()
+                try:
+                    read_local_projects(validation_args)
+                except (
+                    InstallerError,
+                    InstallerConfigError,
+                    UsageError,
+                    OSError,
+                    UnicodeError,
+                ) as error:
+                    return str(error)
+                return None
+
             skill_path = run_prompt(
                 ["skill_path"],
                 lambda: prompter.path(
@@ -1731,6 +1762,7 @@ def complete_install_with_ui(
                         source="local",
                         skill_path=Path(str(value)),
                     ),
+                    validator=validate_local_path,
                 ),
             )
             if skill_path == PROMPT_BACK:
