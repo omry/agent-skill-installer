@@ -1,1 +1,0 @@
-The interactive installer now keeps invalid local and wheel sources inside the prompt and restores terminal settings after UI exits.

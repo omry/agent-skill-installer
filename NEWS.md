@@ -2,6 +2,23 @@
 
 <!-- TOWNCRIER -->
 
+## Agent Skill Installer 0.5.0 (2026-11-22)
+
+
+### Features
+
+- Add Gemini CLI as an experimental agent target (`--agent gemini`, included in `--agent all`), with skills, `GEMINI.md` discoverability, native runtime hooks, a `--gemini-home` override, and manifest-tracked uninstall support. Interactive CLI installs ask before enabling Gemini hooks; `--enable-gemini-hooks` approves them without a prompt for unattended installs. ([#3](https://github.com/omry/agent-skill-installer/issues/3))
+
+### Bug Fixes
+
+- The interactive installer now keeps invalid local and wheel sources inside the prompt and restores terminal settings after UI exits. ([#51](https://github.com/omry/agent-skill-installer/issues/51))
+
+### API changes and deprecations
+
+- Install Codex command hooks into native repo or global `hooks.json` files, preserving user entries and tracking exact ownership for safe reinstall and uninstall. `CodexHooks` and `ClaudeHooks` now use open event-name mappings; Python callers should access events by mapping key instead of dataclass attribute. ([#43](https://github.com/omry/agent-skill-installer/issues/43))
+- Package Codex hooks as `type: skill-command` with a validated skill-relative executable and structured arguments; ASI now binds each native hook to that installation's absolute entry point, safely quotes Windows shell metacharacters, and ensures copied or packaged POSIX entry points are executable without modifying editable sources. Legacy packaged `type: command` declarations are rejected explicitly, and the exported `CodexCommandHook` schema is replaced by `CodexSkillCommandHook`. ([#45](https://github.com/omry/agent-skill-installer/issues/45))
+- Add Antigravity as an experimental agent target (`--agent antigravity`, included in `--agent all`), installing skills into `.agents/skills` or `~/.gemini/config/skills`, always-on discoverability rules into `.agents/rules/<skill>.md` or `~/.gemini/config/rules/<skill>.md`, and `type: skill-command` runtime hooks into `.agents/hooks.json` or `~/.gemini/config/hooks.json` with `--antigravity-home` override and manifest-tracked uninstall support. Interactive CLI installs ask before enabling hooks; use `--enable-antigravity-hooks` to approve them in non-interactive installs. ([#47](https://github.com/omry/agent-skill-installer/issues/47))
+- Runtime hooks for Codex, Gemini CLI, and Antigravity now require explicit installation approval. Interactive CLI and text UI installs default to No; unattended installs require the matching `--enable-<agent>-hooks` flag, and Python API callers must pass `enable_<agent>_hooks=True`. Previously approved unchanged hook entries survive upgrades; changed entries require renewed approval. Codex still requires its native `/hooks` trust review. ([#57](https://github.com/omry/agent-skill-installer/issues/57))
 ## Agent Skill Installer 0.4.0 (2026-09-01)
 
 
