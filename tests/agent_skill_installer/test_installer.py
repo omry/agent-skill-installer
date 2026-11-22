@@ -4776,6 +4776,66 @@ def test_build_no_ui_command_for_mixed_scope_targets(tmp_path: Path) -> None:
     )
 
 
+def test_mixed_scope_replacement_preflights_editable_sources_before_mutation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from agent_skill_installer import cli as cli_module
+
+    project = make_project(tmp_path)
+    source = project.bundled_skill_source
+    assert source is not None
+    (source / ".git").mkdir()
+    monkeypatch.chdir(source)
+    target = tmp_path / "target"
+    home = tmp_path / "home"
+    target.mkdir()
+    old_dir = Installer(project).install(["claude"], "dir", repo=target, editable=False)[0]
+    old_global = Installer(project).install(["claude"], "global", home=home, editable=True)[0]
+    args = Namespace(
+        command="install", targets=[("claude", "dir", False), ("claude", "global", False)],
+        agent=None, scope=None, repo=target, repo_target=False, home=home,
+        codex_home=None, claude_home=None, gemini_home=None, antigravity_home=None,
+        no_ui=True, force=False, editable=True, pypi=False, pypi_version=None,
+        github_url=None, github_ref=None, github_path=None, replace_skill=project.skill_name,
+        confirm_replacement=True, enable_codex_hooks=False, enable_gemini_hooks=False,
+        enable_antigravity_hooks=False, runtime_hook_prompter=None,
+    )
+    with pytest.raises(InstallerError, match="editable replacement source"):
+        cli_module.run(replace(project, skill_name="renamed"), args)
+    assert old_dir.skill_dir.exists()
+    assert old_global.skill_dir.is_symlink()
+
+
+def test_mixed_scope_replacement_is_rejected_before_mutation(
+    tmp_path: Path,
+) -> None:
+    from agent_skill_installer import cli as cli_module
+
+    project = make_project(tmp_path)
+    target = tmp_path / "target"
+    home = tmp_path / "home"
+    target.mkdir()
+    old_dir = Installer(project).install(["claude"], "dir", repo=target, editable=False)[0]
+    old_global = Installer(project).install(["claude"], "global", home=home, editable=False)[0]
+    args = Namespace(
+        command="install", targets=[("claude", "dir", False), ("claude", "global", False)],
+        agent=None, scope=None, repo=target, repo_target=False, home=home,
+        codex_home=None, claude_home=None, gemini_home=None, antigravity_home=None,
+        no_ui=True, force=False, editable=False, pypi=False, pypi_version=None,
+        github_url=None, github_ref=None, github_path=None, replace_skill=project.skill_name,
+        confirm_replacement=True, enable_codex_hooks=False, enable_gemini_hooks=False,
+        enable_antigravity_hooks=False, runtime_hook_prompter=None,
+    )
+
+    with pytest.raises(InstallerError, match="one installation scope at a time"):
+        cli_module.run(replace(project, skill_name="renamed"), args)
+
+    assert old_dir.skill_dir.exists()
+    assert old_global.skill_dir.exists()
+    assert not (old_dir.skill_dir.parent / "renamed").exists()
+    assert not (old_global.skill_dir.parent / "renamed").exists()
+
+
 def test_build_no_ui_command_for_mixed_dir_repo_target_targets(
     tmp_path: Path,
 ) -> None:
@@ -10292,3 +10352,356 @@ def test_hook_opt_in_command_preview(tmp_path, generic):
         command = build_no_ui_command(make_project(tmp_path), args)
     for agent in HOOK_AGENTS:
         assert f"--enable-{agent}-hooks" in command
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude", "gemini", "antigravity"])
+@pytest.mark.parametrize("scope", ["dir", "global"])
+@pytest.mark.parametrize("editable", [False])
+def test_explicit_replacement_removes_old_install_and_instructions(
+    tmp_path: Path, monkeypatch, agent: str, scope: str, editable: bool,
+) -> None:
+    project = make_project(tmp_path)
+    source = project.bundled_skill_source
+    assert source is not None
+    (source / ".git").mkdir()
+    monkeypatch.chdir(source)
+    target = tmp_path / "target"
+    target.mkdir()
+    kwargs = {"repo": target, "home": tmp_path / "home", "editable": editable}
+    old = Installer(project).install([agent], scope, **kwargs)[0]
+    original_manifest = manifest_path(project, old.skill_dir)
+    # Existing user instructions must survive replacement and later uninstall.
+    old.hook_path.write_text(old.hook_path.read_text() + "\nUser instructions.\n")
+    new_project = replace(project, skill_name="renamed", package_name="renamed")
+    new = Installer(new_project).install(
+        [agent], scope, replace_skill=project.skill_name, **kwargs,
+    )[0]
+    assert not old.skill_dir.exists() and not old.skill_dir.is_symlink()
+    assert not original_manifest.exists()
+    assert (new.skill_dir / "SKILL.md").read_text() == (source / "SKILL.md").read_text()
+    assert new.skill_dir.is_symlink() == editable
+    assert new_project.marker_start in new.hook_path.read_text()
+    assert project.marker_start not in old.hook_path.read_text()
+    assert "User instructions." in old.hook_path.read_text()
+    Installer(new_project).uninstall([agent], scope, repo=target, home=tmp_path / "home")
+    assert new_project.marker_start not in (new.hook_path.read_text() if new.hook_path.exists() else "")
+    assert "User instructions." in old.hook_path.read_text()
+    assert (source / "SKILL.md").exists()
+
+
+@pytest.mark.parametrize("agent", ["codex", "gemini", "antigravity"])
+def test_replacement_migrates_runtime_hooks(tmp_path: Path, agent: str) -> None:
+    project = project_with_config(tmp_path, f"""
+installer:
+  agents:
+    {agent}:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""")
+    target = tmp_path / "target"
+    target.mkdir()
+    approval = {f"enable_{agent}_hooks": True}
+    old = Installer(project).install([agent], "dir", repo=target, **approval)[0]
+    old_manifest = read_raw_manifest(project, old.skill_dir)
+    assert old_manifest is not None
+    runtime_path = Path(old_manifest["runtime_hooks"]["path"])
+    new_project = replace(project, skill_name="renamed")
+    new = Installer(new_project).install(
+        [agent], "dir", repo=target, replace_skill=project.skill_name, **approval,
+    )[0]
+    runtime = runtime_path.read_text()
+    decoded_runtime = runtime
+    encoded_marker = "-EncodedCommand "
+    if encoded_marker in runtime:
+        encoded = runtime.split(encoded_marker, 1)[1].split()[0]
+        decoded_runtime += "\n" + base64.b64decode(encoded).decode("utf-16-le")
+    old_command = str(old.skill_dir / "scripts" / "tool.py").replace("\\", "\\\\")
+    assert old_command not in decoded_runtime
+    assert "renamed" in decoded_runtime
+    Installer(new_project).uninstall([agent], "dir", repo=target)
+    assert not runtime_path.exists()
+    assert not new.skill_dir.exists()
+
+
+def test_replacement_rolls_back_all_targets_after_removal_failure(tmp_path: Path, monkeypatch) -> None:
+    import agent_skill_installer.installer as module
+    project = make_project(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    originals = Installer(project).install(["codex", "claude"], "dir", repo=target)
+    before = {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    original_remove = module.uninstall_hook
+
+    def fail_second(spec, **kwargs):
+        original_remove(spec, **kwargs)
+        if spec.agent == "claude":
+            raise OSError("injected replacement failure")
+
+    monkeypatch.setattr(module, "uninstall_hook", fail_second)
+    with pytest.raises(InstallerError, match="rolled back"):
+        Installer(replace(project, skill_name="renamed")).install(
+            ["codex", "claude"], "dir", repo=target, replace_skill=project.skill_name,
+        )
+    after = {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    assert before == after
+    assert all(item.skill_dir.exists() for item in originals)
+    assert not list(target.rglob("*previous*"))
+
+
+@pytest.mark.parametrize("old_name", ["missing", "../outside", ".", "..", ""])
+def test_replacement_refuses_invalid_or_absent_install(tmp_path: Path, old_name: str) -> None:
+    project = make_project(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    with pytest.raises(InstallerError):
+        Installer(project).install(["codex"], "dir", repo=target, replace_skill=old_name)
+    assert not list(target.iterdir())
+
+
+def test_generic_replacement_requires_confirmation_and_old_name(tmp_path: Path, capsys) -> None:
+    source = make_skill(tmp_path / "source")
+    target = tmp_path / "target"
+    target.mkdir()
+    base = ["--no-ui", "install", "--skill-path", str(source), "--copy", "--agent", "claude", "--scope", "dir", "--target-dir", str(target)]
+    assert generic_main(base + ["--skill-name", "old"]) == 0
+    old = target / ".claude" / "skills" / "old"
+    before = (target / "CLAUDE.md").read_bytes()
+    assert generic_main(base + ["--skill-name", "new", "--replace-skill", "old"]) == 1
+    assert "--confirm-replacement" in capsys.readouterr().err
+    assert old.is_dir()
+    assert (target / "CLAUDE.md").read_bytes() == before
+    assert generic_main(base + ["--skill-name", "new", "--confirm-replacement"]) == 1
+    assert generic_main(base + ["--skill-name", "new", "--replace-skill", "old", "--confirm-replacement"]) == 0
+    assert not old.is_symlink()
+    assert "OLD-DISCOVERABILITY" not in (target / "CLAUDE.md").read_text()
+    assert "NEW-DISCOVERABILITY" in (target / "CLAUDE.md").read_text()
+
+
+@pytest.mark.parametrize("answer", ["no", "yes"])
+def test_replacement_ui_consent_defaults_to_no(monkeypatch, answer: str) -> None:
+    from agent_skill_installer import cli
+    monkeypatch.setattr(cli, "running_on_tty", lambda: True)
+    class Prompt:
+        def select(self, message, choices):
+            assert "'old'" in message and "'new'" in message
+            assert choices[0]["value"] == "no"
+            return answer
+    args = Namespace(replace_skill="old", confirm_replacement=False, no_ui=False,
+                     agent="claude", scope="global", runtime_hook_prompter=Prompt())
+    if answer == "no":
+        with pytest.raises(BackRequested):
+            cli.replacement_consent(args, "new")
+    else:
+        cli.replacement_consent(args, "new")
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+@pytest.mark.parametrize("editable", [False])
+def test_replacement_rollback_preserves_old_runtime_hooks_and_source(
+    tmp_path: Path, monkeypatch, failure, editable: bool,
+) -> None:
+    import agent_skill_installer.installer as module
+    project = project_with_config(tmp_path, """
+installer:
+  agents:
+    codex:
+      hooks:
+        SessionStart:
+          - hooks:
+              - type: skill-command
+                executable: scripts/tool.py
+""")
+    source = project.bundled_skill_source
+    assert source is not None
+    (source / ".git").mkdir()
+    monkeypatch.chdir(source)
+    target = tmp_path / "target"
+    target.mkdir()
+    old = Installer(project).install(["codex"], "dir", repo=target, editable=editable, enable_codex_hooks=True)[0]
+    manifest = manifest_path(project, old.skill_dir)
+    before = manifest.read_bytes()
+    runtime_path = target / ".codex" / "hooks.json"
+    hooks = runtime_path.read_bytes()
+    instructions = old.hook_path.read_bytes()
+    remove = module.uninstall_hook
+    def fail(spec, **kwargs):
+        remove(spec, **kwargs)
+        raise failure("injected")
+    monkeypatch.setattr(module, "uninstall_hook", fail)
+    with pytest.raises(KeyboardInterrupt if failure is KeyboardInterrupt else InstallerError):
+        Installer(replace(project, skill_name="renamed")).install(
+            ["codex"], "dir", repo=target, editable=editable,
+            replace_skill=project.skill_name, enable_codex_hooks=True,
+        )
+    assert manifest.read_bytes() == before
+    assert runtime_path.read_bytes() == hooks
+    assert old.hook_path.read_bytes() == instructions
+    assert old.skill_dir.is_symlink() == editable
+    assert (source / "scripts" / "tool.py").exists()
+
+
+@pytest.mark.parametrize("defect", ["unowned", "wrong-path", "missing-marker", "occupied", "same-name"])
+def test_replacement_refuses_unproved_or_conflicting_target(tmp_path: Path, defect: str) -> None:
+    project = make_project(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    old = Installer(project).install(["claude"], "dir", repo=target)[0]
+    path = manifest_path(project, old.skill_dir)
+    data = json.loads(path.read_text())
+    if defect == "unowned":
+        path.unlink()
+    elif defect == "wrong-path":
+        data["hook_path"] = str(tmp_path / "unrelated.md")
+        path.write_text(json.dumps(data))
+    elif defect == "missing-marker":
+        data.pop("hook_marker_start")
+        path.write_text(json.dumps(data))
+    elif defect == "occupied":
+        (old.skill_dir.parent / "renamed").mkdir()
+    before = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+    new_name = project.skill_name if defect == "same-name" else "renamed"
+    with pytest.raises(InstallerError):
+        Installer(replace(project, skill_name=new_name)).install(
+            ["claude"], "dir", repo=target, replace_skill=project.skill_name, force=True,
+        )
+    assert before == {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+
+
+def test_replacement_uses_recorded_markers_and_preserves_other_skills(tmp_path: Path) -> None:
+    project = replace(make_project(tmp_path), marker_slug_override="HISTORICAL")
+    target = tmp_path / "target"
+    target.mkdir()
+    old = Installer(project).install(["claude"], "dir", repo=target)[0]
+    unrelated = replace(project, skill_name="other", marker_slug_override=None)
+    other = Installer(unrelated).install(["claude"], "dir", repo=target)[0]
+    new_project = replace(project, skill_name="renamed", marker_slug_override=None)
+    Installer(new_project).install(["claude"], "dir", repo=target, replace_skill=project.skill_name)
+    instructions = old.hook_path.read_text()
+    assert project.marker_start not in instructions
+    assert new_project.marker_start in instructions
+    assert unrelated.marker_start in instructions
+    assert other.skill_dir.is_dir()
+
+
+def test_wrapper_replacement_requires_confirmation(tmp_path: Path, capsys) -> None:
+    project = make_project(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    old = Installer(project).install(["codex"], "dir", repo=target)[0]
+    new = replace(project, skill_name="new")
+    args = ["--no-ui", "install", "--agent", "codex", "--scope", "dir", "--target-dir", str(target), "--replace-skill", project.skill_name]
+    assert main(args, project=new) == 1
+    assert "--confirm-replacement" in capsys.readouterr().err
+    assert old.skill_dir.is_dir()
+    assert main(args + ["--confirm-replacement"], project=new) == 0
+    assert not old.skill_dir.exists()
+    assert (old.skill_dir.parent / "new" / "SKILL.md").exists()
+
+
+def test_generic_replacement_preflights_every_agent_before_staging(tmp_path: Path) -> None:
+    source = make_skill(tmp_path / "source")
+    target = tmp_path / "target"
+    target.mkdir()
+    base = ["--no-ui", "install", "--skill-path", str(source), "--scope", "dir", "--target-dir", str(target)]
+    assert generic_main(base + ["--agent", "codex", "--skill-name", "old"]) == 0
+    before = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+    assert generic_main(base + ["--agent", "codex,claude", "--skill-name", "new", "--replace-skill", "old", "--confirm-replacement"]) == 1
+    assert before == {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+    assert not list(target.rglob("*.install-*"))
+    assert not (target / ".claude").exists()
+
+
+def test_generic_replacement_preflights_editable_source_before_staging(
+    tmp_path: Path,
+) -> None:
+    source = make_skill(tmp_path / "source")
+    target = tmp_path / "target"
+    target.mkdir()
+    base = [
+        "--no-ui", "install", "--skill-path", str(source), "--scope", "dir",
+        "--target-dir", str(target), "--editable",
+    ]
+    assert generic_main(base + ["--agent", "codex", "--skill-name", "old"]) == 0
+    assert generic_main(
+        base
+        + [
+            "--agent", "codex,claude", "--skill-name", "new",
+            "--replace-skill", "old", "--confirm-replacement",
+        ]
+    ) == 1
+    assert (target / ".codex" / "skills" / "old").is_symlink()
+    assert not list((target / ".claude").glob("*.install-*"))
+    assert not list((target / ".codex").glob("*.install-*"))
+
+
+def test_multi_agent_staging_failure_cleans_prior_stage(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+    from agent_skill_installer import __main__ as generic
+
+    project = make_project(tmp_path)
+    args = SimpleNamespace(
+        agent="codex,claude", scope="global", repo_target=False, repo=None,
+        home=tmp_path / "home", codex_home=None, claude_home=None,
+        gemini_home=None, antigravity_home=None, force=False,
+        replace_skill=None,
+    )
+    staged_root = tmp_path / ".new.install-staged"
+    staged_root.mkdir()
+    calls = 0
+
+    def fake_stage(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(staging_root=staged_root)
+        raise InstallerError("second target failed")
+
+    monkeypatch.setattr(generic, "stage_install_target", fake_stage)
+    with pytest.raises(InstallerError, match="second target failed"):
+        generic.stage_project_for_targets(project, args)
+    assert not staged_root.exists()
+
+
+def test_replacement_command_previews_retain_explicit_confirmation() -> None:
+    from agent_skill_installer import __main__ as generic
+    from agent_skill_installer import cli
+    args = generic.build_parser().parse_args([
+        "--no-ui", "install", "--skill-path", ".", "--skill-name", "new",
+        "--replace-skill", "old", "--confirm-replacement",
+        "--agent", "codex", "--scope", "global",
+    ])
+    parts = shlex.split(generic.build_no_ui_command(args))
+    assert parts[parts.index("--replace-skill") + 1] == "old"
+    assert "--confirm-replacement" in parts
+    project = SkillProject(package_name="new", import_name="new", version="1", skill_name="new", description="test")
+    wrapper_args = cli.build_parser(project).parse_args([
+        "install", "--agent", "codex", "--scope", "global",
+        "--replace-skill", "old", "--confirm-replacement",
+    ])
+    cli.prepare_args(wrapper_args)
+    preview = cli.build_no_ui_command(project, wrapper_args)
+    parts = shlex.split(preview)
+    assert parts[parts.index("--replace-skill") + 1] == "old"
+    assert "--confirm-replacement" in parts
+
+
+def test_replacement_rejects_editable_source_inside_retired_installation(tmp_path: Path, monkeypatch) -> None:
+    project = make_project(tmp_path)
+    source = project.bundled_skill_source
+    assert source is not None
+    (source / ".git").mkdir()
+    monkeypatch.chdir(source)
+    target = tmp_path / "target"
+    target.mkdir()
+    old = Installer(project).install(["claude"], "dir", repo=target, editable=True)[0]
+    with pytest.raises(InstallerError, match="editable replacement source"):
+        Installer(replace(project, skill_name="new")).install(
+            ["claude"], "dir", repo=target, editable=True, replace_skill=project.skill_name,
+        )
+    assert old.skill_dir.is_symlink()
+    assert old.skill_dir.resolve() == source.resolve()

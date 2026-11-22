@@ -1,0 +1,1 @@
+Replace a named ASI-managed skill installation with `--replace-skill OLD` after explicit confirmation, removing its old discoverability block and owned hooks. Unattended installs require `--confirm-replacement`; Python callers use `replace_skill="OLD"`.
