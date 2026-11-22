@@ -22,6 +22,26 @@ Use one target, a comma-separated list, or `--agent all`. The target controls
 where the skill, discoverability instructions, and optional runtime hooks are
 written; it does not change the skill payload itself.
 
+## Raw Skills And Codex Plugins
+
+ASI installs raw agent skills: directories containing `SKILL.md`, together with
+the supporting files in that skill directory. A Codex plugin is a separate
+Codex distribution format with a `.codex-plugin/plugin.json` manifest. Plugins
+may bundle skills, MCP server configuration, app mappings, lifecycle hooks,
+marketplace metadata, screenshots, or icons.
+
+For the raw `SKILL.md` format itself, see [Codex's skill documentation](https://developers.openai.com/codex/skills).
+
+ASI does not install a Codex plugin as a plugin. Point ASI directly at the
+bundled skill directory when you want to install a raw skill; ASI does not
+resolve a plugin root's `.codex-plugin/plugin.json` manifest or its skill paths.
+ASI copies files in the selected raw skill directory, but it does not interpret
+or register the plugin's MCP, app, hook, marketplace, or presentation metadata,
+and it does not manage plugin enable/disable state. Use [Codex's plugin workflow](https://developers.openai.com/codex/plugins/build)
+for a reusable Codex plugin, especially when those plugin-level features are
+part of the package. ASI's plugin support remains a separate design question;
+see [issue #14](https://github.com/omry/agent-skill-installer/issues/14).
+
 ## Install The Installer
 
 ```bash
