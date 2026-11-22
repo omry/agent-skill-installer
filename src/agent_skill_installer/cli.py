@@ -49,8 +49,8 @@ TARGET_ALL = "all"
 AGENT_LABELS = {
     "codex": "Codex",
     "claude": "Claude Code",
-    "gemini": "Gemini CLI",
-    "antigravity": "Antigravity",
+    "gemini": "Gemini CLI (experimental)",
+    "antigravity": "Antigravity (experimental)",
 }
 SCOPE_LABELS = {
     "dir": "Directory",
@@ -2034,7 +2034,10 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
         subparser.add_argument(
             "--agent",
             metavar="AGENT[,AGENT...]",
-            help="Agent integration to target.",
+            help=(
+                "Agent integration to target. Gemini CLI and Antigravity "
+                "integrations are experimental."
+            ),
         )
         subparser.add_argument(
             "--scope",
@@ -2089,6 +2092,14 @@ def build_parser(project: SkillProject) -> argparse.ArgumentParser:
                 help=(
                     "Enable Gemini runtime hooks. Non-interactive installs skip "
                     "new Gemini hooks unless this flag is set."
+                ),
+            )
+            subparser.add_argument(
+                "--enable-antigravity-hooks",
+                action="store_true",
+                help=(
+                    "Enable Antigravity runtime hooks. Non-interactive installs "
+                    "skip new Antigravity hooks unless this flag is set."
                 ),
             )
             subparser.add_argument(
@@ -2424,6 +2435,8 @@ def build_no_ui_command(
     if command == "install":
         if getattr(args, "enable_gemini_hooks", False):
             parts.append("--enable-gemini-hooks")
+        if getattr(args, "enable_antigravity_hooks", False):
+            parts.append("--enable-antigravity-hooks")
         if bool(getattr(args, "force", False)):
             parts.append("--force")
         if editable:
@@ -3453,6 +3466,8 @@ def complete_with_ui(
         args.verbose = False
     if not hasattr(args, "enable_gemini_hooks"):
         args.enable_gemini_hooks = False
+    if not hasattr(args, "enable_antigravity_hooks"):
+        args.enable_antigravity_hooks = False
     return args
 
 
@@ -3647,14 +3662,56 @@ def installs_remote_payload(args: argparse.Namespace) -> bool:
 
 
 def gemini_hook_consent(project: SkillProject, args: argparse.Namespace) -> bool:
-    if getattr(args, "enable_gemini_hooks", False):
+    return runtime_hook_consent(project, args, "gemini")
+
+
+def antigravity_hook_consent(
+    project: SkillProject,
+    args: argparse.Namespace,
+) -> bool:
+    return runtime_hook_consent(project, args, "antigravity")
+
+
+def has_runtime_hook_declarations(project: SkillProject, agent: str) -> bool:
+    config = project.agent_config(agent)
+    if config is None:
+        return False
+
+    typed_hooks = getattr(config, "hooks", {})
+    for groups in typed_hooks.values():
+        if isinstance(groups, list) and any(
+            getattr(group, "hooks", ()) for group in groups
+        ):
+            return True
+
+    direct_hooks = getattr(config, "hooks_direct", {})
+    for groups in direct_hooks.values():
+        if isinstance(groups, list) and any(
+            isinstance(group, dict)
+            and isinstance(group.get("hooks"), list)
+            and group["hooks"]
+            for group in groups
+        ):
+            return True
+    return False
+
+
+def runtime_hook_consent(
+    project: SkillProject,
+    args: argparse.Namespace,
+    agent: str,
+) -> bool:
+    if getattr(args, f"enable_{agent}_hooks", False):
         return True
+    if not has_runtime_hook_declarations(project, agent):
+        return False
     if getattr(args, "no_ui", False) or not running_on_tty():
         return False
+    agent_label = "Gemini" if agent == "gemini" else "Antigravity"
     try:
         answer = input(
-            f"Enable Gemini runtime hooks for {project.skill_name}? "
-            "Hooks can run code automatically when Gemini starts or handles events. "
+            f"Enable {agent_label} runtime hooks for {project.skill_name}? "
+            f"Hooks can run code automatically when {agent_label} starts or handles events. "
             "Only enable hooks from a source you trust. [y/N] "
         )
     except EOFError:
@@ -3666,12 +3723,16 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
     normalize_args_scope(args)
     installer = Installer(project)
     targets = getattr(args, "targets", None)
-    if args.command == "install" and (
-        any(agent == "gemini" for agent, _, _ in targets)
+    selected_agents = (
+        {agent for agent, _, _ in targets}
         if targets is not None
-        else "gemini" in selected_agents_for_command(args.agent)
-    ):
-        args.enable_gemini_hooks = gemini_hook_consent(project, args)
+        else set(selected_agents_for_command(args.agent))
+    )
+    if args.command == "install":
+        if "gemini" in selected_agents:
+            args.enable_gemini_hooks = gemini_hook_consent(project, args)
+        if "antigravity" in selected_agents:
+            args.enable_antigravity_hooks = antigravity_hook_consent(project, args)
     if args.command == "install" and not installs_remote_payload(args):
         emit_warnings(
             install_warnings(project, editable=getattr(args, "editable", False)),
@@ -3699,6 +3760,9 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                 github_ref=args.github_ref,
                 github_path=args.github_path,
                 enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
+                enable_antigravity_hooks=getattr(
+                    args, "enable_antigravity_hooks", False
+                ),
             )
         if args.command == "uninstall":
             return installer.uninstall(
@@ -3743,6 +3807,9 @@ def run(project: SkillProject, args: argparse.Namespace) -> list[InstallResult]:
                     github_ref=args.github_ref,
                     github_path=args.github_path,
                     enable_gemini_hooks=getattr(args, "enable_gemini_hooks", False),
+                    enable_antigravity_hooks=getattr(
+                        args, "enable_antigravity_hooks", False
+                    ),
                 )
             )
         elif args.command == "uninstall":
@@ -3826,6 +3893,10 @@ def prepare_args(args: argparse.Namespace) -> None:
         args.github_path = None
     if not hasattr(args, "verbose"):
         args.verbose = False
+    if not hasattr(args, "enable_gemini_hooks"):
+        args.enable_gemini_hooks = False
+    if not hasattr(args, "enable_antigravity_hooks"):
+        args.enable_antigravity_hooks = False
 
 
 def main(
