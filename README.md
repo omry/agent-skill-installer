@@ -13,6 +13,13 @@ are Git or Sapling repositories with `--repo`, writes discoverability blocks int
 the target's instruction files, and records enough install state to safely
 upgrade or uninstall skills it owns.
 
+ASI installs raw agent skills: directories containing `SKILL.md`. A Codex
+plugin is a separate distribution format identified by
+`.codex-plugin/plugin.json`; it can also bundle MCP servers, apps, hooks, and
+other plugin metadata. ASI does not install Codex plugins as plugins. Use
+[Codex's plugin workflow](https://developers.openai.com/codex/plugins/build)
+when those plugin-level features are required.
+
 ### Agent targets
 
 Gemini CLI and Antigravity integrations are **experimental**. Antigravity has
