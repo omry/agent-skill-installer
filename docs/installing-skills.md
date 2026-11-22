@@ -4,14 +4,19 @@ This guide is for people who want to install a skill for Codex, Claude Code,
 Gemini CLI, or Antigravity. You do not need to create a Python package to use
 the installer.
 
+Gemini CLI and Antigravity integrations are **experimental**. Antigravity has
+had limited manual testing; Gemini CLI has not yet had manual testing. Check
+the installed skills, discoverability, and hooks in the agent before relying
+on them.
+
 Choose targets by runtime behavior:
 
 | Target | Best fit | Discoverability | Runtime hooks |
 | --- | --- | --- | --- |
 | Codex | OpenAI coding-agent workflows | `AGENTS.md` | Native `hooks.json` |
 | Claude Code | Claude Code workflows | `CLAUDE.md` | Parsed for compatibility; not installed |
-| Gemini CLI | Gemini terminal workflows | `GEMINI.md` | `settings.json` `hooks` |
-| Antigravity | Antigravity CLI or IDE workflows | Per-skill `always_on` rules | Native `hooks.json` |
+| Gemini CLI (experimental) | Gemini terminal workflows | `GEMINI.md` | `settings.json` `hooks` |
+| Antigravity (experimental) | Antigravity CLI or IDE workflows | Per-skill `always_on` rules | Native `hooks.json` |
 
 Use one target, a comma-separated list, or `--agent all`. The target controls
 where the skill, discoverability instructions, and optional runtime hooks are
@@ -225,8 +230,8 @@ that any agent runtime will automatically discover that directory.
 | --- | --- | --- | --- | --- |
 | Codex | `dir` / `global` | `<target>/.codex/skills/<skill_name>` / `~/.codex/skills/<skill_name>` | `<target>/AGENTS.md` / `~/.codex/AGENTS.md` | `<target>/.codex/hooks.json` / `~/.codex/hooks.json` |
 | Claude Code | `dir` / `global` | `<target>/.claude/skills/<skill_name>` / `~/.claude/skills/<skill_name>` | `<target>/CLAUDE.md` / `~/.claude/CLAUDE.md` | Parsed only; not installed |
-| Gemini CLI | `dir` / `global` | `<target>/.gemini/skills/<skill_name>` / `~/.gemini/skills/<skill_name>` | `<target>/GEMINI.md` / `~/.gemini/GEMINI.md` | `<target>/.gemini/settings.json` / `~/.gemini/settings.json` |
-| Antigravity | `dir` / `global` | `<target>/.agents/skills/<skill_name>` / `~/.gemini/config/skills/<skill_name>` | `<target>/.agents/rules/<skill_name>.md` / `~/.gemini/config/rules/<skill_name>.md` | `<target>/.agents/hooks.json` / `~/.gemini/config/hooks.json` |
+| Gemini CLI (experimental) | `dir` / `global` | `<target>/.gemini/skills/<skill_name>` / `~/.gemini/skills/<skill_name>` | `<target>/GEMINI.md` / `~/.gemini/GEMINI.md` | `<target>/.gemini/settings.json` / `~/.gemini/settings.json` |
+| Antigravity (experimental) | `dir` / `global` | `<target>/.agents/skills/<skill_name>` / `~/.gemini/config/skills/<skill_name>` | `<target>/.agents/rules/<skill_name>.md` / `~/.gemini/config/rules/<skill_name>.md` | `<target>/.agents/hooks.json` / `~/.gemini/config/hooks.json` |
 
 Antigravity per-skill rules must use `trigger: always_on` so the installed
 discoverability block is active. If an existing rule uses another trigger, the
@@ -280,10 +285,11 @@ filename, SHA256 digest, resolver method, and each `wheel_path` to installed
 For Codex, Gemini CLI, and Antigravity hooks, the manifest also records each
 exact native hook entry that ASI owns. Existing user settings and hook entries
 are preserved, including an identical entry that predates installation.
-Interactive CLI installs ask before enabling Gemini runtime hooks. Use
-`--enable-gemini-hooks` to approve them without a prompt, including with
-`--no-ui` or when running without a terminal. Without this flag, non-interactive
-installs skip new Gemini hooks. Before using Codex hooks, review and trust them with `/hooks`,
+Interactive CLI installs ask before enabling Gemini CLI or Antigravity runtime
+hooks. Use `--enable-gemini-hooks` or `--enable-antigravity-hooks` to approve
+them without a prompt, including with `--no-ui` or when running without a
+terminal. Without these flags, non-interactive installs skip new Gemini CLI and
+Antigravity hooks. Before using Codex hooks, review and trust them with `/hooks`,
 review enabled Gemini CLI hooks with `/hooks`, and review Antigravity hooks in `hooks.json`. Packaged hooks name a skill-relative
 executable; ASI validates it against the staged skill, ensures copied and
 packaged payloads are executable on POSIX, and writes the installation's

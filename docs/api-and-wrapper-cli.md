@@ -5,6 +5,10 @@ command or use the installer from Python. To publish a skill as a Python
 package, including platform-specific wheel layouts, see
 [Packaging](packaging.md).
 
+Gemini CLI and Antigravity integrations are **experimental**, including when
+used through the Python API or a wrapper CLI. See
+[Installing Skills](installing-skills.md) for their testing status.
+
 ## Optional Wrapper CLI
 
 A package may expose its own installer command for branded UX, custom defaults,

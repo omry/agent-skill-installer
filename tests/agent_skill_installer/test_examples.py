@@ -279,7 +279,7 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
     assert gemini_install.returncode == 0, gemini_install.stderr
     assert (
-        "Installed api-demo-agent-skill 0.1.0 to Gemini CLI repo:"
+        "Installed api-demo-agent-skill 0.1.0 to Gemini CLI (experimental) repo:"
         in gemini_install.stdout
     )
     gemini_skill_dir = repo / ".gemini" / "skills" / "api-demo-agent-skill"
@@ -304,7 +304,7 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
     assert gemini_uninstall.returncode == 0, gemini_uninstall.stderr
     assert (
-        "Removed api-demo-agent-skill 0.1.0 from Gemini CLI repo:"
+        "Removed api-demo-agent-skill 0.1.0 from Gemini CLI (experimental) repo:"
         in gemini_uninstall.stdout
     )
     assert not gemini_skill_dir.exists()
@@ -326,7 +326,7 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
     assert antigravity_install.returncode == 0, antigravity_install.stderr
     assert (
-        "Installed api-demo-agent-skill 0.1.0 to Antigravity repo:"
+        "Installed api-demo-agent-skill 0.1.0 to Antigravity (experimental) repo:"
         in antigravity_install.stdout
     )
     ag_skill_dir = repo / ".agents" / "skills" / "api-demo-agent-skill"
@@ -352,7 +352,7 @@ def test_api_install_example_installs_and_uninstalls(tmp_path: Path) -> None:
     )
     assert antigravity_uninstall.returncode == 0, antigravity_uninstall.stderr
     assert (
-        "Removed api-demo-agent-skill 0.1.0 from Antigravity repo:"
+        "Removed api-demo-agent-skill 0.1.0 from Antigravity (experimental) repo:"
         in antigravity_uninstall.stdout
     )
     assert not ag_skill_dir.exists()

@@ -8,6 +8,7 @@ import shlex
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Sequence
 
@@ -23,6 +24,7 @@ from .cli import (
     TARGET_ALL,
     TextualPrompter,
     UsageError as CliUsageError,
+    antigravity_hook_consent,
     agent_arg_from_values,
     gemini_hook_consent,
     print_results,
@@ -198,6 +200,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     install.add_argument(
+        "--enable-antigravity-hooks",
+        action="store_true",
+        help=(
+            "Enable Antigravity runtime hooks. Non-interactive installs skip "
+            "new Antigravity hooks unless this flag is set."
+        ),
+    )
+    install.add_argument(
         "--skill-name",
         dest="skill_name",
         help="Override the installed skill directory name.",
@@ -300,7 +310,10 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent",
         metavar="AGENT[,AGENT...]",
-        help="Agent integration to target: codex, claude, gemini, antigravity, or all.",
+        help=(
+            "Agent integration to target: codex, claude, gemini, antigravity, "
+            "or all. Gemini CLI and Antigravity integrations are experimental."
+        ),
     )
     parser.add_argument(
         "--scope",
@@ -428,6 +441,8 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
     if command == "install":
         if getattr(args, "enable_gemini_hooks", False):
             parts.append("--enable-gemini-hooks")
+        if getattr(args, "enable_antigravity_hooks", False):
+            parts.append("--enable-antigravity-hooks")
         if getattr(args, "force", False):
             parts.append("--force")
         if getattr(args, "skill_path", None) is not None:
@@ -501,6 +516,7 @@ def ensure_arg_defaults(args: argparse.Namespace) -> None:
     for name, value in {
         "force": False,
         "enable_gemini_hooks": False,
+        "enable_antigravity_hooks": False,
         "skill_name": None,
         "description": None,
         "pypi_package": None,
@@ -927,7 +943,7 @@ def install_target_label(
 ) -> str:
     label = {
         "claude": "Claude",
-        "gemini": "Gemini",
+        "gemini": "Gemini (experimental)",
     }.get(agent_name, AGENT_LABELS.get(agent_name, agent_name))
     if scope == "dir":
         repo_path = target_repo_path(args, repo)
@@ -2593,7 +2609,12 @@ def read_prefixed_text(
     target = prefixed_path(prefix, name)
     for info in archive.infolist():
         if relative_path_for(info.filename) == target:
-            return archive.read(info).decode()
+            try:
+                return archive.read(info).decode()
+            except (zipfile.BadZipFile, zlib.error, EOFError) as error:
+                raise InstallerError(
+                    f"archive entry could not be decompressed: {info.filename}"
+                ) from error
     return None
 
 
@@ -2685,7 +2706,13 @@ def read_github_projects(
     archive_path: Path,
     source: GithubSource,
 ) -> list[SkillProject]:
-    with zipfile.ZipFile(archive_path) as archive:
+    try:
+        archive_file = zipfile.ZipFile(archive_path)
+    except zipfile.BadZipFile as error:
+        raise InstallerError(
+            f"GitHub archive is not a valid zip file: {archive_path}"
+        ) from error
+    with archive_file as archive:
         projects: list[SkillProject] = []
         files = github_archive_files(archive)
         prefixes = github_archive_skill_prefixes(archive, source.path)
@@ -2820,7 +2847,7 @@ def read_pypi_projects(
                     PurePosixPath,
                 )
                 project_inputs.append((prefix, skill_text, config_text))
-    except zipfile.BadZipFile as error:
+    except (zipfile.BadZipFile, zlib.error, EOFError) as error:
         raise InstallerError(f"wheel file is not a valid zip file: {wheel_path}") from error
 
     package_name = (
@@ -3051,6 +3078,11 @@ def stage_project_for_targets(
         if "gemini" in normalize_agents([args.agent])
         else False
     )
+    enable_antigravity_hooks = (
+        antigravity_hook_consent(project, args)
+        if "antigravity" in normalize_agents([args.agent])
+        else False
+    )
     return [
         stage_install_target(
             project,
@@ -3075,6 +3107,7 @@ def stage_project_for_targets(
             github_archive_path=github_archive_path,
             transaction_created_dirs=transaction_created_dirs,
             enable_gemini_hooks=enable_gemini_hooks,
+            enable_antigravity_hooks=enable_antigravity_hooks,
         )
         for agent in normalize_agents([args.agent])
     ]

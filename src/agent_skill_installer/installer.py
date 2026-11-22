@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -451,6 +452,7 @@ class Installer:
         github_ref: str | None = None,
         github_path: str | None = None,
         enable_gemini_hooks: bool = True,
+        enable_antigravity_hooks: bool = True,
     ) -> list[InstallResult]:
         return install(
             self.project,
@@ -471,6 +473,7 @@ class Installer:
             github_ref=github_ref,
             github_path=github_path,
             enable_gemini_hooks=enable_gemini_hooks,
+            enable_antigravity_hooks=enable_antigravity_hooks,
         )
 
     def uninstall(
@@ -804,7 +807,7 @@ def validate_install_skill_source(
                     skill_path,
                     source=f"{pypi_wheel_path}:{skill_path.as_posix()}",
                 )
-        except zipfile.BadZipFile as error:
+        except (zipfile.BadZipFile, zlib.error, EOFError) as error:
             raise InstallerError(
                 f"PyPI wheel is not a valid zip file: {pypi_wheel_path}"
             ) from error
@@ -826,7 +829,7 @@ def validate_install_skill_source(
                     relative_path_for=github_archive_relative_path,
                     source=f"{github_source.url}:{skill_path.as_posix()}",
                 )
-        except zipfile.BadZipFile as error:
+        except (zipfile.BadZipFile, zlib.error, EOFError) as error:
             raise InstallerError(
                 f"GitHub archive is not a valid zip file: {github_archive_path}"
             ) from error
@@ -2024,7 +2027,7 @@ def copy_external_wheel_files(
                         replace=bool(rule.replace),
                     )
                 )
-    except zipfile.BadZipFile as error:
+    except (zipfile.BadZipFile, zlib.error, EOFError) as error:
         raise InstallerError(
             f"external wheel is not a valid zip file: {wheel_path}"
         ) from error
@@ -2163,7 +2166,7 @@ def copy_github_archive_skill(
                     skill_prefix,
                 ),
             )
-    except zipfile.BadZipFile as error:
+    except (zipfile.BadZipFile, zlib.error, EOFError) as error:
         raise InstallerError(
             f"GitHub archive is not a valid zip file: {archive_path}"
         ) from error
@@ -2215,7 +2218,7 @@ def copy_pypi_wheel_skill(
                 skill_dir,
                 lambda filename: wheel_skill_relative_path(project, filename),
             )
-    except zipfile.BadZipFile as error:
+    except (zipfile.BadZipFile, zlib.error, EOFError) as error:
         raise InstallerError(
             f"PyPI wheel is not a valid zip file: {wheel_path}"
         ) from error
@@ -3349,13 +3352,27 @@ def plan_runtime_hooks(
             )
         if spec.agent == "antigravity" and previous_hook_name is not None:
             hook_name = previous_hook_name
+    declared_entries = desired_entries
     preserve_existing_hooks = (
-        spec.agent == "gemini" and not enable_hooks and bool(previous_owned_entries)
+        spec.agent in {"gemini", "antigravity"}
+        and not enable_hooks
+        and bool(previous_owned_entries)
     )
     if not enable_hooks:
-        # Skipping consent for a new install must not disable hooks the user
-        # explicitly enabled during an earlier install or upgrade.
-        desired_entries = previous_owned_entries
+        # Preserve previously approved hooks that remain declared. A successor
+        # that removes a hook must also remove its command, even when consent
+        # was skipped for the upgrade.
+        desired_entries = {
+            event: [
+                group
+                for group in owned_groups
+                if group in declared_entries.get(event, [])
+            ]
+            for event, owned_groups in previous_owned_entries.items()
+        }
+        desired_entries = {
+            event: groups for event, groups in desired_entries.items() if groups
+        }
     if not desired_entries and not previous_owned_entries:
         return None
 
@@ -3371,19 +3388,14 @@ def plan_runtime_hooks(
         assert isinstance(existing_hooks, dict)
         existing = existing_hooks
     if preserve_existing_hooks:
-        for event, groups in declared_runtime_hook_entries(
-            project,
-            spec.agent,
-            staged_skill_dir=staged_skill_dir,
-            installed_skill_dir=spec.skill_dir,
-        ).items():
+        for event, groups in declared_entries.items():
             existing_groups = existing.get(event, [])
             if not isinstance(existing_groups, list) or any(
                 group not in existing_groups for group in groups
             ):
                 raise InstallerError(
-                    "Gemini runtime hooks changed; rerun with "
-                    "--enable-gemini-hooks to approve the updated hooks"
+                    f"{spec.agent.capitalize()} runtime hooks changed; rerun with "
+                    f"--enable-{spec.agent}-hooks to approve the updated hooks"
                 )
     excluded = (
         manifest_path_candidates(project, spec.skill_dir)
@@ -3853,6 +3865,7 @@ def stage_install_target(
     github_archive_path: Path | None = None,
     transaction_created_dirs: Iterable[Path] = (),
     enable_gemini_hooks: bool = True,
+    enable_antigravity_hooks: bool = True,
 ) -> StagedInstall:
     effective_editable = editable or editable_source_dir is not None
     validate_install_source_selection(
@@ -4006,7 +4019,13 @@ def stage_install_target(
             previous_manifest,
             previous_manifest_file,
             staged_skill_dir=staged_skill_dir,
-            enable_hooks=enable_gemini_hooks or spec.agent != "gemini",
+            enable_hooks=(
+                enable_gemini_hooks
+                if spec.agent == "gemini"
+                else enable_antigravity_hooks
+                if spec.agent == "antigravity"
+                else True
+            ),
         )
 
         for directory in missing_parent_dirs(spec.hook_path):
@@ -4319,6 +4338,7 @@ def install_target(
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
     enable_gemini_hooks: bool = True,
+    enable_antigravity_hooks: bool = True,
 ) -> InstallResult:
     staged = stage_install_target(
         project,
@@ -4332,6 +4352,7 @@ def install_target(
         github_source=github_source,
         github_archive_path=github_archive_path,
         enable_gemini_hooks=enable_gemini_hooks,
+        enable_antigravity_hooks=enable_antigravity_hooks,
     )
     return commit_staged_installs([staged])[0]
 
@@ -4419,6 +4440,7 @@ def install(
     github_ref: str | None = None,
     github_path: str | None = None,
     enable_gemini_hooks: bool = True,
+    enable_antigravity_hooks: bool = True,
 ) -> list[InstallResult]:
     if github_url is None and (github_ref is not None or github_path is not None):
         raise InstallerError("--github-ref and --github-path require --github-url")
@@ -4484,6 +4506,7 @@ def install(
                         pypi_wheel_path=pypi_wheel_path,
                         github_source=github_source,
                         enable_gemini_hooks=enable_gemini_hooks,
+                        enable_antigravity_hooks=enable_antigravity_hooks,
                         github_archive_path=github_archive_path,
                         transaction_created_dirs=created_dirs,
                     )
