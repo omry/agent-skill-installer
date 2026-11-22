@@ -451,8 +451,9 @@ class Installer:
         github_url: str | None = None,
         github_ref: str | None = None,
         github_path: str | None = None,
-        enable_gemini_hooks: bool = True,
-        enable_antigravity_hooks: bool = True,
+        enable_codex_hooks: bool = False,
+        enable_gemini_hooks: bool = False,
+        enable_antigravity_hooks: bool = False,
     ) -> list[InstallResult]:
         return install(
             self.project,
@@ -472,6 +473,7 @@ class Installer:
             github_url=github_url,
             github_ref=github_ref,
             github_path=github_path,
+            enable_codex_hooks=enable_codex_hooks,
             enable_gemini_hooks=enable_gemini_hooks,
             enable_antigravity_hooks=enable_antigravity_hooks,
         )
@@ -3318,7 +3320,7 @@ def plan_runtime_hooks(
     previous_manifest_file: Path | None,
     *,
     staged_skill_dir: Path,
-    enable_hooks: bool = True,
+    enable_hooks: bool = False,
 ) -> RuntimeHookPlan | None:
     desired_entries = declared_runtime_hook_entries(
         project,
@@ -3354,8 +3356,7 @@ def plan_runtime_hooks(
             hook_name = previous_hook_name
     declared_entries = desired_entries
     preserve_existing_hooks = (
-        spec.agent in {"gemini", "antigravity"}
-        and not enable_hooks
+        not enable_hooks
         and bool(previous_owned_entries)
     )
     if not enable_hooks:
@@ -3864,8 +3865,9 @@ def stage_install_target(
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
     transaction_created_dirs: Iterable[Path] = (),
-    enable_gemini_hooks: bool = True,
-    enable_antigravity_hooks: bool = True,
+    enable_codex_hooks: bool = False,
+    enable_gemini_hooks: bool = False,
+    enable_antigravity_hooks: bool = False,
 ) -> StagedInstall:
     effective_editable = editable or editable_source_dir is not None
     validate_install_source_selection(
@@ -4020,11 +4022,13 @@ def stage_install_target(
             previous_manifest_file,
             staged_skill_dir=staged_skill_dir,
             enable_hooks=(
-                enable_gemini_hooks
+                enable_codex_hooks
+                if spec.agent == "codex"
+                else enable_gemini_hooks
                 if spec.agent == "gemini"
                 else enable_antigravity_hooks
                 if spec.agent == "antigravity"
-                else True
+                else False
             ),
         )
 
@@ -4337,8 +4341,9 @@ def install_target(
     pypi_wheel_path: Path | None = None,
     github_source: GithubSource | None = None,
     github_archive_path: Path | None = None,
-    enable_gemini_hooks: bool = True,
-    enable_antigravity_hooks: bool = True,
+    enable_codex_hooks: bool = False,
+    enable_gemini_hooks: bool = False,
+    enable_antigravity_hooks: bool = False,
 ) -> InstallResult:
     staged = stage_install_target(
         project,
@@ -4351,6 +4356,7 @@ def install_target(
         pypi_wheel_path=pypi_wheel_path,
         github_source=github_source,
         github_archive_path=github_archive_path,
+        enable_codex_hooks=enable_codex_hooks,
         enable_gemini_hooks=enable_gemini_hooks,
         enable_antigravity_hooks=enable_antigravity_hooks,
     )
@@ -4439,8 +4445,9 @@ def install(
     github_url: str | None = None,
     github_ref: str | None = None,
     github_path: str | None = None,
-    enable_gemini_hooks: bool = True,
-    enable_antigravity_hooks: bool = True,
+    enable_codex_hooks: bool = False,
+    enable_gemini_hooks: bool = False,
+    enable_antigravity_hooks: bool = False,
 ) -> list[InstallResult]:
     if github_url is None and (github_ref is not None or github_path is not None):
         raise InstallerError("--github-ref and --github-path require --github-url")
@@ -4505,6 +4512,7 @@ def install(
                         pypi_version=pypi_version_override or pypi_version,
                         pypi_wheel_path=pypi_wheel_path,
                         github_source=github_source,
+                        enable_codex_hooks=enable_codex_hooks,
                         enable_gemini_hooks=enable_gemini_hooks,
                         enable_antigravity_hooks=enable_antigravity_hooks,
                         github_archive_path=github_archive_path,

@@ -24,6 +24,7 @@ from .cli import (
     TARGET_ALL,
     TextualPrompter,
     UsageError as CliUsageError,
+    codex_hook_consent,
     antigravity_hook_consent,
     agent_arg_from_values,
     gemini_hook_consent,
@@ -190,6 +191,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Replace an existing unowned skill directory.",
+    )
+    install.add_argument(
+        "--enable-codex-hooks",
+        action="store_true",
+        help=(
+            "Enable Codex runtime hooks. Non-interactive installs skip new "
+            "Codex hooks unless this flag is set."
+        ),
     )
     install.add_argument(
         "--enable-gemini-hooks",
@@ -439,6 +448,8 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
 
     parts: list[object] = ["agent-skill-installer", "--no-ui", command]
     if command == "install":
+        if getattr(args, "enable_codex_hooks", False):
+            parts.append("--enable-codex-hooks")
         if getattr(args, "enable_gemini_hooks", False):
             parts.append("--enable-gemini-hooks")
         if getattr(args, "enable_antigravity_hooks", False):
@@ -515,6 +526,7 @@ def build_no_ui_command(args: argparse.Namespace) -> str | None:
 def ensure_arg_defaults(args: argparse.Namespace) -> None:
     for name, value in {
         "force": False,
+        "enable_codex_hooks": False,
         "enable_gemini_hooks": False,
         "enable_antigravity_hooks": False,
         "skill_name": None,
@@ -2150,6 +2162,7 @@ def complete_with_ui(
     ensure_arg_defaults(args)
     normalize_pypi_package_args(args)
     prompter = prompter or TextualPrompter(generic_project())
+    args.runtime_hook_prompter = prompter
     print("agent-skill-installer")
 
     missing = object()
@@ -3073,6 +3086,11 @@ def stage_project_for_targets(
         github_source=github_source,
     )
     repo = args.repo if args.scope == "dir" else None
+    enable_codex_hooks = (
+        codex_hook_consent(project, args)
+        if "codex" in normalize_agents([args.agent])
+        else False
+    )
     enable_gemini_hooks = (
         gemini_hook_consent(project, args)
         if "gemini" in normalize_agents([args.agent])
@@ -3106,6 +3124,7 @@ def stage_project_for_targets(
             github_source=github_source,
             github_archive_path=github_archive_path,
             transaction_created_dirs=transaction_created_dirs,
+            enable_codex_hooks=enable_codex_hooks,
             enable_gemini_hooks=enable_gemini_hooks,
             enable_antigravity_hooks=enable_antigravity_hooks,
         )
@@ -3254,7 +3273,7 @@ def install_projects_for_targets(
             )
         commit_started = True
         return commit_staged_installs(staged_installs)
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         if not commit_started:
             cleanup_staged_installs(staged_installs)
             remove_created_dirs(created_dirs)
